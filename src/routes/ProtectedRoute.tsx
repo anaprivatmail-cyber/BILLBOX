@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Navigate, Outlet } from 'react-router-dom'
+import AppShell from '../components/AppShell'
 import { getSession } from '../lib/auth'
 
 export default function ProtectedRoute() {
@@ -19,6 +20,12 @@ export default function ProtectedRoute() {
     }
   }, [])
 
-  if (loading) return <div style={{ padding: 16 }}>Loading…</div>
-  return ok ? <Outlet /> : <Navigate to="/login" replace />
+  if (loading) return <div className="px-4 py-8 text-sm text-neutral-300">Loading…</div>
+  return ok ? (
+    <AppShell>
+      <Outlet />
+    </AppShell>
+  ) : (
+    <Navigate to="/login" replace />
+  )
 }

@@ -69,104 +69,88 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <h3>{initial ? 'Edit Bill' : 'Add Bill'}</h3>
-      {error && <p style={{ color: 'red' }}>{error}</p>}
-      <form onSubmit={handleSubmit}>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Supplier
-            <input
-              type="text"
-              value={supplier}
-              onChange={(e) => setSupplier(e.target.value)}
-              required
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
-            />
-          </label>
+    <div className="p-4">
+      <h3 className="text-lg font-semibold">{initial ? 'Edit Bill' : 'Add Bill'}</h3>
+      {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+      <form onSubmit={handleSubmit} className="mt-2 space-y-3">
+        <div>
+          <label className="label">Supplier</label>
+          <input
+            type="text"
+            value={supplier}
+            onChange={(e) => setSupplier(e.target.value)}
+            required
+            className="input"
+          />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Amount
-            <input
-              type="number"
-              step="0.01"
-              value={amount}
-              onChange={(e) => setAmount(Number(e.target.value))}
-              required
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
-            />
-          </label>
+        <div>
+          <label className="label">Amount</label>
+          <input
+            type="number"
+            step="0.01"
+            value={amount}
+            onChange={(e) => setAmount(Number(e.target.value))}
+            required
+            className="input"
+          />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Currency
-            <select value={currency} onChange={(e) => setCurrency(e.target.value)} style={{ display: 'block', width: '100%', marginTop: 4 }}>
-              {currencies.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          </label>
+        <div>
+          <label className="label">Currency</label>
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)} className="input">
+            {currencies.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Due date
-            <input
-              type="date"
-              value={dueDate}
-              onChange={(e) => setDueDate(e.target.value)}
-              required
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
-            />
-          </label>
+        <div>
+          <label className="label">Due date</label>
+          <input
+            type="date"
+            value={dueDate}
+            onChange={(e) => setDueDate(e.target.value)}
+            required
+            className="input"
+          />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Creditor name (optional)
-            <input
-              type="text"
-              value={creditorName}
-              onChange={(e) => setCreditorName(e.target.value)}
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
-            />
-          </label>
+        <div>
+          <label className="label">Creditor name (optional)</label>
+          <input
+            type="text"
+            value={creditorName}
+            onChange={(e) => setCreditorName(e.target.value)}
+            className="input"
+          />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            IBAN (optional)
-            <input
-              type="text"
-              value={iban}
-              onChange={(e) => setIban(e.target.value)}
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
-            />
-          </label>
+        <div>
+          <label className="label">IBAN (optional)</label>
+          <input
+            type="text"
+            value={iban}
+            onChange={(e) => setIban(e.target.value)}
+            className="input"
+          />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Reference (optional)
-            <input
-              type="text"
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
-            />
-          </label>
+        <div>
+          <label className="label">Reference (optional)</label>
+          <input
+            type="text"
+            value={reference}
+            onChange={(e) => setReference(e.target.value)}
+            className="input"
+          />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Purpose (optional)
-            <input
-              type="text"
-              value={purpose}
-              onChange={(e) => setPurpose(e.target.value)}
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
-            />
-          </label>
+        <div>
+          <label className="label">Purpose (optional)</label>
+          <input
+            type="text"
+            value={purpose}
+            onChange={(e) => setPurpose(e.target.value)}
+            className="input"
+          />
         </div>
-        <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-          <button type="submit" disabled={loading}>{loading ? 'Saving…' : 'Save'}</button>
-          <button type="button" onClick={onCancel}>Cancel</button>
+        <div className="mt-2 flex gap-2">
+          <button type="submit" disabled={loading} className="btn btn-primary">{loading ? 'Saving…' : 'Save'}</button>
+          <button type="button" onClick={onCancel} className="btn btn-secondary">Cancel</button>
         </div>
       </form>
     </div>

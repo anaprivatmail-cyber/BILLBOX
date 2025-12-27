@@ -149,35 +149,50 @@ export default function BillsPage() {
   }
 
   return (
-    <div style={{ padding: 12, maxWidth: 640, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <h2 style={{ margin: 0 }}>Bills</h2>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Link to="/app" style={{ textDecoration: 'none' }}>Bills</Link>
-          <span style={{ color: '#999' }}>|</span>
-          <Link to="/app/warranties" style={{ textDecoration: 'none' }}>Warranties</Link>
+    <div className="mx-auto max-w-3xl">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-xl font-semibold">Bills</h2>
+        <div className="hidden sm:flex items-center gap-2 text-sm text-neutral-400">
+          <Link to="/app" className="hover:text-neutral-200">Bills</Link>
+          <span>·</span>
+          <Link to="/app/warranties" className="hover:text-neutral-200">Warranties</Link>
         </div>
       </div>
-      <div style={{ background: '#f6f7f9', padding: 8, borderRadius: 8 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <strong>Unpaid:</strong> {analytics.unpaidCount} / {analytics.unpaidTotal.toFixed(2)}
+      <div className="grid gap-2 sm:grid-cols-3">
+        <div className="card p-3">
+          <div className="text-xs text-neutral-400">Unpaid</div>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-lg font-semibold">{analytics.unpaidCount}</span>
+            <span className="text-sm text-neutral-300">/ {analytics.unpaidTotal.toFixed(2)}</span>
           </div>
-          <div>
-            <strong>Overdue:</strong> {analytics.overdueCount} / {analytics.overdueTotal.toFixed(2)}
+        </div>
+        <div className="card p-3">
+          <div className="text-xs text-neutral-400">Overdue</div>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-lg font-semibold">{analytics.overdueCount}</span>
+            <span className="text-sm text-neutral-300">/ {analytics.overdueTotal.toFixed(2)}</span>
           </div>
-          {analytics.nextDue && (
-            <div>
-              <strong>Next due:</strong> {analytics.nextDue.supplier} on {analytics.nextDue.due_date} ({analytics.nextDue.amount} {analytics.nextDue.currency})
-            </div>
-          )}
+        </div>
+        <div className="card p-3">
+          <div className="text-xs text-neutral-400">Next due</div>
+          <div className="mt-1 text-sm text-neutral-300">
+            {analytics.nextDue ? (
+              <span>
+                {analytics.nextDue.supplier} on {analytics.nextDue.due_date} ({analytics.nextDue.amount} {analytics.nextDue.currency})
+              </span>
+            ) : (
+              <span>—</span>
+            )}
+          </div>
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', gap: 4 }}>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <div className="flex gap-1">
           {(['all', 'unpaid', 'paid', 'overdue'] as BillFilter[]).map((f) => (
-            <button key={f} onClick={() => setFilter(f)} style={{ fontWeight: filter === f ? 'bold' as const : 'normal' }}>{f.toUpperCase()}</button>
+            <button key={f} onClick={() => setFilter(f)} className={`btn ${filter === f ? 'btn-secondary' : 'bg-neutral-900 text-neutral-300 hover:text-neutral-100 border border-neutral-800'}`}>
+              {f.toUpperCase()}
+            </button>
           ))}
         </div>
         <input
@@ -185,58 +200,57 @@ export default function BillsPage() {
           placeholder="Search supplier"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          style={{ flex: 1, minWidth: 160 }}
+          className="input flex-1 min-w-40"
         />
-        <button onClick={() => { setFormOpen(true); setEditing(null) }}>Add bill</button>
+        <button className="btn btn-primary" onClick={() => { setFormOpen(true); setEditing(null) }}>Add bill</button>
       </div>
 
-      {error && <p style={{ color: 'red', marginTop: 8 }}>{error}</p>}
+      {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
       {loading ? (
-        <p style={{ marginTop: 12 }}>Loading…</p>
+        <p className="mt-3 text-sm">Loading…</p>
       ) : filtered.length === 0 ? (
-        <p style={{ marginTop: 12 }}>
-          No bills found. Try adding a bill using the button above. You can track unpaid and overdue items here.
-        </p>
+        <div className="card mt-3 p-6 text-center">
+          <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-neutral-800 flex items-center justify-center text-neutral-400">🧾</div>
+          <p className="text-sm text-neutral-300">No bills found. Add your first bill to start tracking.</p>
+        </div>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0, marginTop: 12 }}>
+        <ul className="mt-3 grid gap-2">
           {filtered.map((b) => {
             const overdue = isOverdue(b)
             return (
-              <li key={b.id} style={{ border: '1px solid #ddd', borderRadius: 8, padding: 8, marginBottom: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <li key={b.id} className="card p-3">
+                <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div style={{ fontWeight: 600 }}>{b.supplier}</div>
-                    <div style={{ fontSize: 12, color: '#555' }}>{b.amount} {b.currency} • due {b.due_date}</div>
-                    <div style={{ fontSize: 12, color: overdue ? 'red' : b.status === 'paid' ? 'green' : '#555' }}>
-                      {overdue ? 'overdue' : b.status}
-                    </div>
-                    <div style={{ fontSize: 11, color: '#999' }}>Created at {new Date(b.created_at).toLocaleString()}</div>
+                    <div className="font-semibold">{b.supplier}</div>
+                    <div className="text-xs text-neutral-400">{b.amount} {b.currency} • due {b.due_date}</div>
+                    <div className={`text-xs ${overdue ? 'text-red-400' : b.status === 'paid' ? 'text-green-400' : 'text-neutral-400'}`}>{overdue ? 'overdue' : b.status}</div>
+                    <div className="text-[11px] text-neutral-500">Created at {new Date(b.created_at).toLocaleString()}</div>
                   </div>
-                    <div style={{ display: 'flex', gap: 6 }}>
+                  <div className="flex flex-wrap gap-2">
                     {b.status === 'paid' ? (
-                      <button onClick={() => handleMark(b.id, 'unpaid')}>Mark unpaid</button>
+                      <button className="btn btn-secondary" onClick={() => handleMark(b.id, 'unpaid')}>Mark unpaid</button>
                     ) : (
-                      <button onClick={() => handleMark(b.id, 'paid')}>Mark paid</button>
+                      <button className="btn btn-secondary" onClick={() => handleMark(b.id, 'paid')}>Mark paid</button>
                     )}
-                    <button onClick={() => { setEditing(b); setFormOpen(true) }}>Edit</button>
-                    <button onClick={() => handleDelete(b.id)}>Delete</button>
-                    <button onClick={async () => {
+                    <button className="btn btn-secondary" onClick={() => { setEditing(b); setFormOpen(true) }}>Edit</button>
+                    <button className="btn btn-danger" onClick={() => handleDelete(b.id)}>Delete</button>
+                    <button className="btn btn-secondary" onClick={async () => {
                       const next = openAttachmentsFor === b.id ? null : b.id
                       setOpenAttachmentsFor(next)
                       if (next) await loadAttachments(next)
                     }}>
                       {openAttachmentsFor === b.id ? 'Hide files' : 'Attachments'}
                     </button>
-                      <button onClick={() => copyToClipboard(b.iban || '')}>Copy IBAN</button>
-                      <button onClick={() => copyToClipboard(b.reference || '')}>Copy Reference</button>
-                      <button onClick={() => copyToClipboard(String(b.amount))}>Copy Amount</button>
-                      <button onClick={() => copyToClipboard(b.purpose || '')}>Copy Purpose</button>
-                      <button onClick={() => copyToClipboard(formatCopyAll(b))}>Copy All</button>
+                    <button className="btn btn-secondary" onClick={() => copyToClipboard(b.iban || '')}>Copy IBAN</button>
+                    <button className="btn btn-secondary" onClick={() => copyToClipboard(b.reference || '')}>Copy Reference</button>
+                    <button className="btn btn-secondary" onClick={() => copyToClipboard(String(b.amount))}>Copy Amount</button>
+                    <button className="btn btn-secondary" onClick={() => copyToClipboard(b.purpose || '')}>Copy Purpose</button>
+                    <button className="btn btn-primary" onClick={() => copyToClipboard(formatCopyAll(b))}>Copy All</button>
                   </div>
                 </div>
                 {(b.creditor_name || b.iban || b.reference || b.purpose) && (
-                  <div style={{ marginTop: 6, fontSize: 12, color: '#333' }}>
-                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                  <div className="mt-2 text-xs text-neutral-300">
+                    <div className="flex flex-wrap gap-3">
                       {b.creditor_name && <span>Creditor: {b.creditor_name}</span>}
                       {b.iban && <span>IBAN: {b.iban}</span>}
                       {b.reference && <span>Ref: {b.reference}</span>}
@@ -245,27 +259,27 @@ export default function BillsPage() {
                   </div>
                 )}
                 {openAttachmentsFor === b.id && (
-                  <div style={{ marginTop: 8, borderTop: '1px dashed #ddd', paddingTop: 8 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <input type="file" multiple accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(e) => handleUploadFiles(b.id, e.target.files)} />
-                      <span style={{ fontSize: 12, color: '#666' }}>Upload PDF or images</span>
-                      {attachments[b.id]?.uploading && <span style={{ fontSize: 12 }}>Uploading…</span>}
+                  <div className="mt-3 border-t border-dashed border-neutral-800 pt-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input className="input" type="file" multiple accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(e) => handleUploadFiles(b.id, e.target.files)} />
+                      <span className="text-xs text-neutral-400">Upload PDF or images</span>
+                      {attachments[b.id]?.uploading && <span className="text-xs">Uploading…</span>}
                     </div>
-                    <div style={{ marginTop: 8 }}>
+                    <div className="mt-2">
                       {attachments[b.id]?.loading ? (
-                        <div style={{ fontSize: 12 }}>Loading files…</div>
+                        <div className="text-xs">Loading files…</div>
                       ) : attachments[b.id]?.error ? (
-                        <div style={{ fontSize: 12, color: 'red' }}>{attachments[b.id]?.error}</div>
+                        <div className="text-xs text-red-400">{attachments[b.id]?.error}</div>
                       ) : (attachments[b.id]?.items || []).length === 0 ? (
-                        <div style={{ fontSize: 12, color: '#666' }}>No attachments yet.</div>
+                        <div className="text-xs text-neutral-400">No attachments yet.</div>
                       ) : (
-                        <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 6 }}>
+                        <ul className="grid gap-2">
                           {(attachments[b.id]?.items || []).map((f) => (
-                            <li key={f.path} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                              <span style={{ fontSize: 12 }}>{f.name} {f.created_at ? `• uploaded ${new Date(f.created_at).toLocaleString()}` : ''}</span>
-                              <div style={{ display: 'flex', gap: 6 }}>
-                                <button onClick={() => handleOpenAttachment(f.path)}>Open</button>
-                                <button onClick={() => handleDeleteAttachment(b.id, f.path)}>Delete</button>
+                            <li key={f.path} className="flex items-center justify-between gap-2">
+                              <span className="text-xs">{f.name} {f.created_at ? `• uploaded ${new Date(f.created_at).toLocaleString()}` : ''}</span>
+                              <div className="flex gap-2">
+                                <button className="btn btn-secondary" onClick={() => handleOpenAttachment(f.path)}>Open</button>
+                                <button className="btn btn-danger" onClick={() => handleDeleteAttachment(b.id, f.path)}>Delete</button>
                               </div>
                             </li>
                           ))}
@@ -281,8 +295,8 @@ export default function BillsPage() {
       )}
 
       {formOpen && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ background: '#fff', width: '100%', maxWidth: 480, borderRadius: 8 }}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-3">
+          <div className="card w-full max-w-md">
             <BillForm
               initial={editing}
               onCancel={() => { setFormOpen(false); setEditing(null) }}

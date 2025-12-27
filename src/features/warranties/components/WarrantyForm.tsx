@@ -51,37 +51,29 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <h3>{initial ? 'Edit Warranty' : 'Add Warranty'}</h3>
-      {error && <p style={{ color: 'red' }}>{error}</p>}
-      <form onSubmit={handleSubmit}>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Item name
-            <input type="text" value={itemName} onChange={(e) => setItemName(e.target.value)} required style={{ display: 'block', width: '100%', marginTop: 4 }} />
-          </label>
+    <div className="p-4">
+      <h3 className="text-lg font-semibold">{initial ? 'Edit Warranty' : 'Add Warranty'}</h3>
+      {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+      <form onSubmit={handleSubmit} className="mt-2 space-y-3">
+        <div>
+          <label className="label">Item name</label>
+          <input type="text" value={itemName} onChange={(e) => setItemName(e.target.value)} required className="input" />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Supplier (optional)
-            <input type="text" value={supplier} onChange={(e) => setSupplier(e.target.value)} style={{ display: 'block', width: '100%', marginTop: 4 }} />
-          </label>
+        <div>
+          <label className="label">Supplier (optional)</label>
+          <input type="text" value={supplier} onChange={(e) => setSupplier(e.target.value)} className="input" />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Purchase date (optional)
-            <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} style={{ display: 'block', width: '100%', marginTop: 4 }} />
-          </label>
+        <div>
+          <label className="label">Purchase date (optional)</label>
+          <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} className="input" />
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Expires at
-            <input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} required style={{ display: 'block', width: '100%', marginTop: 4 }} />
-          </label>
+        <div>
+          <label className="label">Expires at</label>
+          <input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} required className="input" />
         </div>
-        <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-          <button type="submit" disabled={loading}>{loading ? 'Saving…' : 'Save'}</button>
-          <button type="button" onClick={onCancel}>Cancel</button>
+        <div className="mt-2 flex gap-2">
+          <button type="submit" disabled={loading} className="btn btn-primary">{loading ? 'Saving…' : 'Save'}</button>
+          <button type="button" onClick={onCancel} className="btn btn-secondary">Cancel</button>
         </div>
       </form>
     </div>

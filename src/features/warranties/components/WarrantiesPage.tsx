@@ -56,46 +56,51 @@ export default function WarrantiesPage() {
   }
 
   return (
-    <div style={{ padding: 12, maxWidth: 640, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <h2 style={{ margin: 0 }}>Warranties</h2>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Link to="/app" style={{ textDecoration: 'none' }}>Bills</Link>
-          <span style={{ color: '#999' }}>|</span>
-          <Link to="/app/warranties" style={{ textDecoration: 'none' }}>Warranties</Link>
+    <div className="mx-auto max-w-3xl">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-xl font-semibold">Warranties</h2>
+        <div className="hidden sm:flex items-center gap-2 text-sm text-neutral-400">
+          <Link to="/app" className="hover:text-neutral-200">Bills</Link>
+          <span>·</span>
+          <Link to="/app/warranties" className="hover:text-neutral-200">Warranties</Link>
         </div>
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', gap: 4 }}>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <div className="flex gap-1">
           {(['all', 'active', 'expiring', 'expired'] as Array<WarrantyStatus | 'all'>).map((f) => (
-            <button key={f} onClick={() => setFilter(f)} style={{ fontWeight: filter === f ? 'bold' as const : 'normal' }}>{String(f).toUpperCase()}</button>
+            <button key={f} onClick={() => setFilter(f)} className={`btn ${filter === f ? 'btn-secondary' : 'bg-neutral-900 text-neutral-300 hover:text-neutral-100 border border-neutral-800'}`}>
+              {String(f).toUpperCase()}
+            </button>
           ))}
         </div>
-        <input type="text" placeholder="Search item" value={query} onChange={(e) => setQuery(e.target.value)} style={{ flex: 1, minWidth: 160 }} />
-        <button onClick={() => { setFormOpen(true); setEditing(null) }}>Add</button>
+        <input type="text" placeholder="Search item" value={query} onChange={(e) => setQuery(e.target.value)} className="input flex-1 min-w-40" />
+        <button className="btn btn-primary" onClick={() => { setFormOpen(true); setEditing(null) }}>Add</button>
       </div>
 
-      {error && <p style={{ color: 'red', marginTop: 8 }}>{error}</p>}
+      {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
       {loading ? (
-        <p style={{ marginTop: 12 }}>Loading…</p>
+        <p className="mt-3 text-sm">Loading…</p>
       ) : filtered.length === 0 ? (
-        <p style={{ marginTop: 12 }}>No warranties found.</p>
+        <div className="card mt-3 p-6 text-center">
+          <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-neutral-800 flex items-center justify-center text-neutral-400">🛡️</div>
+          <p className="text-sm text-neutral-300">No warranties found. Add your first warranty to manage coverage.</p>
+        </div>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0, marginTop: 12 }}>
+        <ul className="mt-3 grid gap-2">
           {filtered.map((w) => {
             const status = getWarrantyStatus(w)
-            const statusColor = status === 'expired' ? 'red' : status === 'expiring' ? '#d9822b' : 'green'
+            const statusColor = status === 'expired' ? 'text-red-400' : status === 'expiring' ? 'text-amber-400' : 'text-green-400'
             return (
-              <li key={w.id} style={{ border: '1px solid #ddd', borderRadius: 8, padding: 8, marginBottom: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <li key={w.id} className="card p-3">
+                <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div style={{ fontWeight: 600 }}>{w.item_name}</div>
-                    <div style={{ fontSize: 12, color: '#555' }}>{w.supplier || '—'} • purchased {w.purchase_date || '—'} • expires {w.expires_at || '—'}</div>
-                    <div style={{ fontSize: 12, color: statusColor }}>{status}</div>
+                    <div className="font-semibold">{w.item_name}</div>
+                    <div className="text-xs text-neutral-400">{w.supplier || '—'} • purchased {w.purchase_date || '—'} • expires {w.expires_at || '—'}</div>
+                    <div className={`text-xs ${statusColor}`}>{status}</div>
                   </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={() => { setEditing(w); setFormOpen(true) }}>Edit</button>
-                    <button onClick={() => handleDelete(w.id)}>Delete</button>
+                  <div className="flex gap-2">
+                    <button className="btn btn-secondary" onClick={() => { setEditing(w); setFormOpen(true) }}>Edit</button>
+                    <button className="btn btn-danger" onClick={() => handleDelete(w.id)}>Delete</button>
                   </div>
                 </div>
               </li>
@@ -105,8 +110,8 @@ export default function WarrantiesPage() {
       )}
 
       {formOpen && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ background: '#fff', width: '100%', maxWidth: 480, borderRadius: 8 }}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-3">
+          <div className="card w-full max-w-md">
             <WarrantyForm initial={editing} onCancel={() => { setFormOpen(false); setEditing(null) }} onSave={handleSave} />
           </div>
         </div>
