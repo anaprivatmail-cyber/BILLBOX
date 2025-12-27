@@ -1,35 +1,44 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
+import { useEffect, useState } from 'react'
 import './App.css'
+import Login from './pages/Login'
+import ProtectedHome from './pages/ProtectedHome'
+import { getSession } from './lib/auth'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [hasSession, setHasSession] = useState(false)
 
-  return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+  useEffect(() => {
+    let mounted = true
+    ;(async () => {
+      const { data } = await getSession()
+      if (!mounted) return
+      const active = Boolean(data?.session)
+      setHasSession(active)
+      setLoading(false)
+      const path = window.location.pathname
+      if (!active && path !== '/login') {
+        window.location.replace('/login')
+      }
+      if (active && path === '/login') {
+        window.location.replace('/')
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  if (loading) {
+    return <div style={{ padding: 16 }}>Loading…</div>
+  }
+
+  const path = window.location.pathname
+  if (path === '/login') {
+    return <Login />
+  }
+
+  return hasSession ? <ProtectedHome /> : null
 }
 
 export default App
