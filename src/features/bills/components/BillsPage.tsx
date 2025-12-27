@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Bill, BillFilter } from '../types'
 import { listBills, createBill, updateBill, deleteBill, setBillStatus, isOverdue } from '../api'
+import { listAttachments, uploadAttachments, deleteAttachment, getDownloadUrl } from '../attachments'
 import BillForm from './BillForm'
 
 export default function BillsPage() {
@@ -11,6 +12,8 @@ export default function BillsPage() {
   const [query, setQuery] = useState('')
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Bill | null>(null)
+  const [openAttachmentsFor, setOpenAttachmentsFor] = useState<string | null>(null)
+  const [attachments, setAttachments] = useState<Record<string, { items: { name: string; path: string }[]; loading: boolean; error: string | null }>>({})
 
   async function reload() {
     setLoading(true)
@@ -18,6 +21,48 @@ export default function BillsPage() {
     if (error) setError(error.message)
     else setBills(data)
     setLoading(false)
+  }
+  async function loadAttachments(billId: string) {
+    setAttachments((prev) => ({
+      ...prev,
+      [billId]: { items: prev[billId]?.items || [], loading: true, error: null },
+    }))
+    const { items, error } = await listAttachments(billId)
+    setAttachments((prev) => ({
+      ...prev,
+      [billId]: { items, loading: false, error: error ? (error as any)?.message || 'Failed to list' : null },
+    }))
+  }
+
+  async function handleUploadFiles(billId: string, files: FileList | null) {
+    if (!files || files.length === 0) return
+    const arr = Array.from(files)
+    const { error } = await uploadAttachments(billId, arr)
+    if (error) {
+      setAttachments((prev) => ({
+        ...prev,
+        [billId]: { items: prev[billId]?.items || [], loading: false, error: (error as any)?.message || 'Upload failed' },
+      }))
+    } else {
+      await loadAttachments(billId)
+    }
+  }
+
+  async function handleDeleteAttachment(billId: string, path: string) {
+    const { error } = await deleteAttachment(path)
+    if (error) {
+      setAttachments((prev) => ({
+        ...prev,
+        [billId]: { items: prev[billId]?.items || [], loading: false, error: (error as any)?.message || 'Delete failed' },
+      }))
+    } else {
+      await loadAttachments(billId)
+    }
+  }
+
+  async function handleOpenAttachment(path: string) {
+    const { url } = await getDownloadUrl(path)
+    if (url) window.open(url, '_blank')
   }
 
   useEffect(() => {
@@ -144,8 +189,44 @@ export default function BillsPage() {
                     )}
                     <button onClick={() => { setEditing(b); setFormOpen(true) }}>Edit</button>
                     <button onClick={() => handleDelete(b.id)}>Delete</button>
+                    <button onClick={async () => {
+                      const next = openAttachmentsFor === b.id ? null : b.id
+                      setOpenAttachmentsFor(next)
+                      if (next) await loadAttachments(next)
+                    }}>
+                      {openAttachmentsFor === b.id ? 'Hide files' : 'Attachments'}
+                    </button>
                   </div>
                 </div>
+                {openAttachmentsFor === b.id && (
+                  <div style={{ marginTop: 8, borderTop: '1px dashed #ddd', paddingTop: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <input type="file" multiple accept="image/*,application/pdf" onChange={(e) => handleUploadFiles(b.id, e.target.files)} />
+                      <span style={{ fontSize: 12, color: '#666' }}>Upload PDF or images</span>
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      {attachments[b.id]?.loading ? (
+                        <div style={{ fontSize: 12 }}>Loading files…</div>
+                      ) : attachments[b.id]?.error ? (
+                        <div style={{ fontSize: 12, color: 'red' }}>{attachments[b.id]?.error}</div>
+                      ) : (attachments[b.id]?.items || []).length === 0 ? (
+                        <div style={{ fontSize: 12, color: '#666' }}>No attachments yet.</div>
+                      ) : (
+                        <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 6 }}>
+                          {(attachments[b.id]?.items || []).map((f) => (
+                            <li key={f.path} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                              <span style={{ fontSize: 12 }}>{f.name}</span>
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                <button onClick={() => handleOpenAttachment(f.path)}>Open</button>
+                                <button onClick={() => handleDeleteAttachment(b.id, f.path)}>Delete</button>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                )}
               </li>
             )
           })}
