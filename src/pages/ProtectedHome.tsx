@@ -1,10 +1,12 @@
 import { signOut } from '../lib/auth'
+import { useNavigate } from 'react-router-dom'
 
 export default function ProtectedHome() {
+  const navigate = useNavigate()
   async function handleSignOut() {
     const { error } = await signOut()
     if (!error) {
-      window.location.replace('/login')
+      navigate('/login', { replace: true })
     }
   }
 

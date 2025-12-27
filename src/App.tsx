@@ -1,44 +1,23 @@
-import { useEffect, useState } from 'react'
 import './App.css'
 import Login from './pages/Login'
 import ProtectedHome from './pages/ProtectedHome'
-import { getSession } from './lib/auth'
+import Reset from './pages/Reset'
+import ProtectedRoute from './routes/ProtectedRoute'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 
 function App() {
-  const [loading, setLoading] = useState(true)
-  const [hasSession, setHasSession] = useState(false)
-
-  useEffect(() => {
-    let mounted = true
-    ;(async () => {
-      const { data } = await getSession()
-      if (!mounted) return
-      const active = Boolean(data?.session)
-      setHasSession(active)
-      setLoading(false)
-      const path = window.location.pathname
-      if (!active && path !== '/login') {
-        window.location.replace('/login')
-      }
-      if (active && path === '/login') {
-        window.location.replace('/')
-      }
-    })()
-    return () => {
-      mounted = false
-    }
-  }, [])
-
-  if (loading) {
-    return <div style={{ padding: 16 }}>Loading…</div>
-  }
-
-  const path = window.location.pathname
-  if (path === '/login') {
-    return <Login />
-  }
-
-  return hasSession ? <ProtectedHome /> : null
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/reset" element={<Reset />} />
+        <Route path="/app" element={<ProtectedRoute />}>
+          <Route index element={<ProtectedHome />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/app" replace />} />
+      </Routes>
+    </BrowserRouter>
+  )
 }
 
 export default App
