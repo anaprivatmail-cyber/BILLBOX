@@ -10,6 +10,10 @@ export interface Bill {
   due_date: string // YYYY-MM-DD
   status: BillStatus
   created_at: string
+  creditor_name?: string | null
+  iban?: string | null
+  reference?: string | null
+  purpose?: string | null
 }
 
 export interface CreateBillInput {
@@ -18,6 +22,10 @@ export interface CreateBillInput {
   currency: string
   due_date: string
   status?: BillStatus
+  creditor_name?: string | null
+  iban?: string | null
+  reference?: string | null
+  purpose?: string | null
 }
 
 export interface UpdateBillInput {
@@ -26,4 +34,8 @@ export interface UpdateBillInput {
   currency?: string
   due_date?: string
   status?: BillStatus
+  creditor_name?: string | null
+  iban?: string | null
+  reference?: string | null
+  purpose?: string | null
 }

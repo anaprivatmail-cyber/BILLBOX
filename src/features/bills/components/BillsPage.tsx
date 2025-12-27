@@ -71,6 +71,24 @@ export default function BillsPage() {
     if (url) window.open(url, '_blank')
   }
 
+  function copyToClipboard(text: string) {
+    if (!text) return
+    navigator.clipboard.writeText(text)
+  }
+
+  function formatCopyAll(b: Bill): string {
+    const lines = [
+      `Supplier: ${b.supplier}`,
+      `Amount: ${b.amount} ${b.currency}`,
+      b.creditor_name ? `Creditor: ${b.creditor_name}` : '',
+      b.iban ? `IBAN: ${b.iban}` : '',
+      b.reference ? `Reference: ${b.reference}` : '',
+      b.purpose ? `Purpose: ${b.purpose}` : '',
+      `Due: ${b.due_date}`,
+    ].filter(Boolean)
+    return lines.join('\n')
+  }
+
   useEffect(() => {
     reload()
   }, [])
@@ -209,8 +227,23 @@ export default function BillsPage() {
                     }}>
                       {openAttachmentsFor === b.id ? 'Hide files' : 'Attachments'}
                     </button>
+                      <button onClick={() => copyToClipboard(b.iban || '')}>Copy IBAN</button>
+                      <button onClick={() => copyToClipboard(b.reference || '')}>Copy Reference</button>
+                      <button onClick={() => copyToClipboard(String(b.amount))}>Copy Amount</button>
+                      <button onClick={() => copyToClipboard(b.purpose || '')}>Copy Purpose</button>
+                      <button onClick={() => copyToClipboard(formatCopyAll(b))}>Copy All</button>
                   </div>
                 </div>
+                {(b.creditor_name || b.iban || b.reference || b.purpose) && (
+                  <div style={{ marginTop: 6, fontSize: 12, color: '#333' }}>
+                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                      {b.creditor_name && <span>Creditor: {b.creditor_name}</span>}
+                      {b.iban && <span>IBAN: {b.iban}</span>}
+                      {b.reference && <span>Ref: {b.reference}</span>}
+                      {b.purpose && <span>Purpose: {b.purpose}</span>}
+                    </div>
+                  </div>
+                )}
                 {openAttachmentsFor === b.id && (
                   <div style={{ marginTop: 8, borderTop: '1px dashed #ddd', paddingTop: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

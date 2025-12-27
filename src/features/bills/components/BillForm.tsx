@@ -14,6 +14,10 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [amount, setAmount] = useState<number>(0)
   const [currency, setCurrency] = useState('EUR')
   const [dueDate, setDueDate] = useState('')
+  const [creditorName, setCreditorName] = useState<string>('')
+  const [iban, setIban] = useState<string>('')
+  const [reference, setReference] = useState<string>('')
+  const [purpose, setPurpose] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -23,11 +27,19 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       setAmount(initial.amount)
       setCurrency(initial.currency)
       setDueDate(initial.due_date)
+      setCreditorName(initial.creditor_name || '')
+      setIban(initial.iban || '')
+      setReference(initial.reference || '')
+      setPurpose(initial.purpose || '')
     } else {
       setSupplier('')
       setAmount(0)
       setCurrency('EUR')
       setDueDate('')
+      setCreditorName('')
+      setIban('')
+      setReference('')
+      setPurpose('')
     }
   }, [initial])
 
@@ -40,7 +52,16 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
     }
     setLoading(true)
     try {
-      await onSave({ supplier, amount: Number(amount), currency, due_date: dueDate }, initial?.id)
+      await onSave({
+        supplier,
+        amount: Number(amount),
+        currency,
+        due_date: dueDate,
+        creditor_name: creditorName || null,
+        iban: iban || null,
+        reference: reference || null,
+        purpose: purpose || null,
+      }, initial?.id)
     } catch (err: any) {
       setError(err?.message || 'Could not save bill')
     }
@@ -95,6 +116,50 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
               required
+              style={{ display: 'block', width: '100%', marginTop: 4 }}
+            />
+          </label>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>
+            Creditor name (optional)
+            <input
+              type="text"
+              value={creditorName}
+              onChange={(e) => setCreditorName(e.target.value)}
+              style={{ display: 'block', width: '100%', marginTop: 4 }}
+            />
+          </label>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>
+            IBAN (optional)
+            <input
+              type="text"
+              value={iban}
+              onChange={(e) => setIban(e.target.value)}
+              style={{ display: 'block', width: '100%', marginTop: 4 }}
+            />
+          </label>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>
+            Reference (optional)
+            <input
+              type="text"
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              style={{ display: 'block', width: '100%', marginTop: 4 }}
+            />
+          </label>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>
+            Purpose (optional)
+            <input
+              type="text"
+              value={purpose}
+              onChange={(e) => setPurpose(e.target.value)}
               style={{ display: 'block', width: '100%', marginTop: 4 }}
             />
           </label>

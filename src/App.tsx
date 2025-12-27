@@ -5,6 +5,8 @@ import WarrantiesPage from './features/warranties/components/WarrantiesPage'
 import Reset from './pages/Reset'
 import ProtectedRoute from './routes/ProtectedRoute'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import PaymentsPage from './pages/Payments'
+import ReportsPage from './pages/Reports'
 
 function App() {
   return (
@@ -15,6 +17,8 @@ function App() {
         <Route path="/app" element={<ProtectedRoute />}>
           <Route index element={<BillsPage />} />
           <Route path="warranties" element={<WarrantiesPage />} />
+          <Route path="payments" element={<PaymentsPage />} />
+          <Route path="reports" element={<ReportsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/app" replace />} />
       </Routes>
