@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { Bill, BillFilter } from '../types'
 import { listBills, createBill, updateBill, deleteBill, setBillStatus, isOverdue } from '../api'
 import { listAttachments, uploadAttachments, deleteAttachment, getDownloadUrl } from '../attachments'
+import { Link } from 'react-router-dom'
 import BillForm from './BillForm'
 
 export default function BillsPage() {
@@ -13,7 +14,7 @@ export default function BillsPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Bill | null>(null)
   const [openAttachmentsFor, setOpenAttachmentsFor] = useState<string | null>(null)
-  const [attachments, setAttachments] = useState<Record<string, { items: { name: string; path: string }[]; loading: boolean; error: string | null }>>({})
+  const [attachments, setAttachments] = useState<Record<string, { items: { name: string; path: string; created_at?: string }[]; loading: boolean; uploading: boolean; error: string | null }>>({})
 
   async function reload() {
     setLoading(true)
@@ -25,23 +26,27 @@ export default function BillsPage() {
   async function loadAttachments(billId: string) {
     setAttachments((prev) => ({
       ...prev,
-      [billId]: { items: prev[billId]?.items || [], loading: true, error: null },
+      [billId]: { items: prev[billId]?.items || [], loading: true, uploading: false, error: null },
     }))
     const { items, error } = await listAttachments(billId)
     setAttachments((prev) => ({
       ...prev,
-      [billId]: { items, loading: false, error: error ? (error as any)?.message || 'Failed to list' : null },
+      [billId]: { items, loading: false, uploading: false, error: error ? (error instanceof Error ? error.message : String(error)) : null },
     }))
   }
 
   async function handleUploadFiles(billId: string, files: FileList | null) {
     if (!files || files.length === 0) return
     const arr = Array.from(files)
+    setAttachments((prev) => ({
+      ...prev,
+      [billId]: { items: prev[billId]?.items || [], loading: false, uploading: true, error: null },
+    }))
     const { error } = await uploadAttachments(billId, arr)
     if (error) {
       setAttachments((prev) => ({
         ...prev,
-        [billId]: { items: prev[billId]?.items || [], loading: false, error: (error as any)?.message || 'Upload failed' },
+        [billId]: { items: prev[billId]?.items || [], loading: false, uploading: false, error: error instanceof Error ? error.message : 'Upload failed' },
       }))
     } else {
       await loadAttachments(billId)
@@ -49,11 +54,12 @@ export default function BillsPage() {
   }
 
   async function handleDeleteAttachment(billId: string, path: string) {
+    if (!confirm('Delete this attachment?')) return
     const { error } = await deleteAttachment(path)
     if (error) {
       setAttachments((prev) => ({
         ...prev,
-        [billId]: { items: prev[billId]?.items || [], loading: false, error: (error as any)?.message || 'Delete failed' },
+        [billId]: { items: prev[billId]?.items || [], loading: false, uploading: false, error: error instanceof Error ? error.message : 'Delete failed' },
       }))
     } else {
       await loadAttachments(billId)
@@ -126,7 +132,14 @@ export default function BillsPage() {
 
   return (
     <div style={{ padding: 12, maxWidth: 640, margin: '0 auto' }}>
-      <h2 style={{ marginBottom: 8 }}>Bills</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <h2 style={{ margin: 0 }}>Bills</h2>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Link to="/app" style={{ textDecoration: 'none' }}>Bills</Link>
+          <span style={{ color: '#999' }}>|</span>
+          <Link to="/app/warranties" style={{ textDecoration: 'none' }}>Warranties</Link>
+        </div>
+      </div>
       <div style={{ background: '#f6f7f9', padding: 8, borderRadius: 8 }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
           <div>
@@ -181,7 +194,7 @@ export default function BillsPage() {
                     </div>
                     <div style={{ fontSize: 11, color: '#999' }}>Created at {new Date(b.created_at).toLocaleString()}</div>
                   </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
+                    <div style={{ display: 'flex', gap: 6 }}>
                     {b.status === 'paid' ? (
                       <button onClick={() => handleMark(b.id, 'unpaid')}>Mark unpaid</button>
                     ) : (
@@ -201,8 +214,9 @@ export default function BillsPage() {
                 {openAttachmentsFor === b.id && (
                   <div style={{ marginTop: 8, borderTop: '1px dashed #ddd', paddingTop: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <input type="file" multiple accept="image/*,application/pdf" onChange={(e) => handleUploadFiles(b.id, e.target.files)} />
+                      <input type="file" multiple accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(e) => handleUploadFiles(b.id, e.target.files)} />
                       <span style={{ fontSize: 12, color: '#666' }}>Upload PDF or images</span>
+                      {attachments[b.id]?.uploading && <span style={{ fontSize: 12 }}>Uploading…</span>}
                     </div>
                     <div style={{ marginTop: 8 }}>
                       {attachments[b.id]?.loading ? (
@@ -215,7 +229,7 @@ export default function BillsPage() {
                         <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 6 }}>
                           {(attachments[b.id]?.items || []).map((f) => (
                             <li key={f.path} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                              <span style={{ fontSize: 12 }}>{f.name}</span>
+                              <span style={{ fontSize: 12 }}>{f.name} {f.created_at ? `• uploaded ${new Date(f.created_at).toLocaleString()}` : ''}</span>
                               <div style={{ display: 'flex', gap: 6 }}>
                                 <button onClick={() => handleOpenAttachment(f.path)}>Open</button>
                                 <button onClick={() => handleDeleteAttachment(b.id, f.path)}>Delete</button>

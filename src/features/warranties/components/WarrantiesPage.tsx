@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { Warranty, WarrantyStatus } from '../types'
 import { listWarranties, createWarranty, updateWarranty, deleteWarranty, getWarrantyStatus } from '../api'
 import WarrantyForm from './WarrantyForm'
+import { Link } from 'react-router-dom'
 
 export default function WarrantiesPage() {
   const [items, setItems] = useState<Warranty[]>([])
@@ -26,7 +27,7 @@ export default function WarrantiesPage() {
     let arr = items.slice()
     if (query.trim()) {
       const q = query.trim().toLowerCase()
-      arr = arr.filter((w) => w.item_name.toLowerCase().includes(q))
+      arr = arr.filter((w) => w.item_name.toLowerCase().includes(q) || (w.supplier || '').toLowerCase().includes(q))
     }
     if (filter !== 'all') arr = arr.filter((w) => getWarrantyStatus(w) === filter)
     arr = arr.sort((a, b) => new Date(a.expires_at || '9999-12-31').getTime() - new Date(b.expires_at || '9999-12-31').getTime())
@@ -56,7 +57,14 @@ export default function WarrantiesPage() {
 
   return (
     <div style={{ padding: 12, maxWidth: 640, margin: '0 auto' }}>
-      <h2 style={{ marginBottom: 8 }}>Warranties</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <h2 style={{ margin: 0 }}>Warranties</h2>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Link to="/app" style={{ textDecoration: 'none' }}>Bills</Link>
+          <span style={{ color: '#999' }}>|</span>
+          <Link to="/app/warranties" style={{ textDecoration: 'none' }}>Warranties</Link>
+        </div>
+      </div>
       <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', gap: 4 }}>
           {(['all', 'active', 'expiring', 'expired'] as Array<WarrantyStatus | 'all'>).map((f) => (

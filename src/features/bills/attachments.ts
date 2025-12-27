@@ -6,7 +6,7 @@ export type AttachmentItem = {
   created_at?: string
   updated_at?: string
   last_accessed_at?: string
-  metadata?: unknown
+  metadata?: Record<string, unknown> | null
 }
 
 async function getCurrentUserId(): Promise<string> {
@@ -21,23 +21,36 @@ function basePath(userId: string, billId: string): string {
   return `${userId}/bills/${billId}`
 }
 
+function toError(e: unknown): Error {
+  return e instanceof Error ? e : new Error(String(e))
+}
+
+function safeFileName(name: string): string {
+  const base = name.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '')
+  return base.toLowerCase()
+}
+
 export async function listAttachments(billId: string): Promise<{ items: AttachmentItem[]; error: Error | null }>{
   try {
     const userId = await getCurrentUserId()
     const dir = basePath(userId, billId)
-    const { data, error } = await supabase.storage.from('attachments').list(dir, { limit: 100 })
-    if (error) return { items: [], error }
-    const items: AttachmentItem[] = (data || []).map((f: any) => ({
+    const { data, error } = await supabase.storage.from('attachments').list(dir, {
+      limit: 100,
+      sortBy: { column: 'name', order: 'desc' },
+    })
+    if (error) return { items: [], error: toError(error) }
+    const raw = Array.isArray(data) ? data : []
+    const items: AttachmentItem[] = raw.map((f) => ({
       name: f.name,
       path: `${dir}/${f.name}`,
-      created_at: f.created_at,
-      updated_at: f.updated_at,
-      last_accessed_at: f.last_accessed_at,
-      metadata: f.metadata,
+      created_at: (f as { created_at?: string }).created_at,
+      updated_at: (f as { updated_at?: string }).updated_at,
+      last_accessed_at: (f as { last_accessed_at?: string }).last_accessed_at,
+      metadata: (f as { metadata?: Record<string, unknown> | null }).metadata ?? null,
     }))
     return { items, error: null }
-  } catch (err: any) {
-    return { items: [], error: err }
+  } catch (err: unknown) {
+    return { items: [], error: toError(err) }
   }
 }
 
@@ -45,27 +58,27 @@ export async function uploadAttachments(billId: string, files: File[]): Promise<
   try {
     const userId = await getCurrentUserId()
     const dir = basePath(userId, billId)
-    // Upload sequentially to keep simple error handling
     for (const file of files) {
-      const path = `${dir}/${file.name}`
+      const ts = Date.now()
+      const path = `${dir}/${ts}-${safeFileName(file.name)}`
       const { error } = await supabase.storage.from('attachments').upload(path, file, {
         upsert: true,
         contentType: file.type || undefined,
       })
-      if (error) return { error }
+      if (error) return { error: toError(error) }
     }
     return { error: null }
-  } catch (err: any) {
-    return { error: err }
+  } catch (err: unknown) {
+    return { error: toError(err) }
   }
 }
 
 export async function deleteAttachment(path: string): Promise<{ error: Error | null }>{
   const { error } = await supabase.storage.from('attachments').remove([path])
-  return { error }
+  return { error: error ? toError(error) : null }
 }
 
 export async function getDownloadUrl(path: string): Promise<{ url: string | null; error: Error | null }>{
-  const { data, error } = await supabase.storage.from('attachments').createSignedUrl(path, 60 * 15)
-  return { url: data?.signedUrl || null, error }
+  const { data, error } = await supabase.storage.from('attachments').createSignedUrl(path, 60)
+  return { url: data?.signedUrl || null, error: error ? toError(error) : null }
 }

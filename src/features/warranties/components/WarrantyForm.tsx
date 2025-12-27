@@ -36,11 +36,16 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
       setError('Item name is required.')
       return
     }
+    if (!expiresAt) {
+      setError('Expiry date is required.')
+      return
+    }
     setLoading(true)
     try {
-      await onSave({ item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: expiresAt || null }, initial?.id)
-    } catch (err: any) {
-      setError(err?.message || 'Could not save warranty')
+      await onSave({ item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: expiresAt }, initial?.id)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Could not save warranty'
+      setError(msg)
     }
     setLoading(false)
   }
@@ -70,8 +75,8 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
         </div>
         <div style={{ marginTop: 8 }}>
           <label>
-            Expires at (optional)
-            <input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} style={{ display: 'block', width: '100%', marginTop: 4 }} />
+            Expires at
+            <input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} required style={{ display: 'block', width: '100%', marginTop: 4 }} />
           </label>
         </div>
         <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
