@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bill, BillFilter } from '../types'
+import type { Bill, BillFilter } from '../types'
 import { listBills, createBill, updateBill, deleteBill, setBillStatus, isOverdue } from '../api'
 import BillForm from './BillForm'
 

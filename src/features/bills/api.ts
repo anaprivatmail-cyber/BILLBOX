@@ -1,6 +1,6 @@
 import { PostgrestError } from '@supabase/supabase-js'
 import { supabase } from '../../lib/supabase'
-import { Bill, BillStatus, CreateBillInput, UpdateBillInput } from './types'
+import type { Bill, BillStatus, CreateBillInput, UpdateBillInput } from './types'
 
 async function getCurrentUserId(): Promise<string> {
   const { data, error } = await supabase.auth.getUser()

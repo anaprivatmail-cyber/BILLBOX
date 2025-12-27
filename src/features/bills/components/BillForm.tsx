@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Bill, CreateBillInput } from '../types'
+import type { Bill, CreateBillInput } from '../types'
 
 interface Props {
   initial?: Bill | null
