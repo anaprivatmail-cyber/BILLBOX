@@ -1,5 +1,4 @@
 import { GoogleAuth } from 'google-auth-library';
-import axios from 'axios';
 
 function jsonResponse(statusCode, payload) {
   return {
@@ -11,10 +10,7 @@ function jsonResponse(statusCode, payload) {
 
 function safeDetailFromError(err) {
   try {
-    const msg =
-      (err && err.response && err.response.data && err.response.data.error && err.response.data.error.message) ||
-      (err && err.message) ||
-      'vision_api_error';
+    const msg = (err && err.message) || 'vision_api_error';
     const s = String(msg)
       .replace(/\n/g, ' ')
       .replace(/private_key/gi, 'redacted');
@@ -96,23 +92,31 @@ export async function handler() {
     };
 
     try {
-      const response = await axios.post('https://vision.googleapis.com/v1/images:annotate', payload, {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch('https://vision.googleapis.com/v1/images:annotate', {
+        method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-        timeout: 10000,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
-      if (response.status === 200) {
+      clearTimeout(timeout);
+
+      if (response.ok) {
         return jsonResponse(200, { ok: true });
       }
 
+      const statusText = response.statusText || '';
       return jsonResponse(500, {
         ok: false,
         step: 'vision',
         error: 'vision_call_failed',
-        detail: `status ${response.status} ${response.statusText || ''}`.trim(),
+        detail: `status ${response.status} ${statusText}`.trim(),
       });
     } catch (err) {
       return jsonResponse(500, {
