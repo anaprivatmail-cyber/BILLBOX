@@ -60,9 +60,13 @@ export default function WarrantiesPage() {
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-xl font-semibold">Warranties</h2>
         <div className="hidden sm:flex items-center gap-2 text-sm text-neutral-400">
-          <Link to="/app" className="hover:text-neutral-200">Bills</Link>
-          <span>·</span>
-          <Link to="/app/warranties" className="hover:text-neutral-200">Warranties</Link>
+           <Link to="/app/bills" className="hover:text-neutral-200">Bills</Link>
+           <span>·</span>
+           <Link to="/app/warranties" className="hover:text-neutral-200">Warranties</Link>
+           <span>·</span>
+           <Link to="/app/payments" className="hover:text-neutral-200">Payments</Link>
+           <span>·</span>
+           <Link to="/app/reports" className="hover:text-neutral-200">Reports</Link>
         </div>
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
