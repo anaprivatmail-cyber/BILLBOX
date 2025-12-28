@@ -19,39 +19,39 @@
   --color-brand-900: #312e81;
 }
 
-/* App-wide base styles for premium dark theme */
+/* App-wide base styles for light fintech theme */
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 html, body, #root {
   height: 100%;
 }
 body {
-  @apply bg-neutral-950 text-neutral-100 antialiased;
+  @apply bg-[#F7F8FA] text-neutral-800 antialiased;
 }
 
 /* Reusable tokens */
 .card {
-  @apply bg-neutral-900/60 border border-neutral-800 rounded-lg shadow-soft;
+  @apply bg-white border border-neutral-200 rounded-lg shadow-soft;
 }
 .btn {
   @apply inline-flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium transition-colors;
 }
 .btn-primary {
-  @apply bg-brand-600 hover:bg-brand-500 text-white shadow-soft ring-1 ring-brand-600/40;
+  @apply bg-brand-600 hover:bg-brand-500 text-white shadow-soft ring-1 ring-brand-600/30;
 }
 .btn-secondary {
-  @apply bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700;
+  @apply bg-white hover:bg-neutral-100 text-neutral-800 border border-neutral-300;
 }
 .btn-danger {
   @apply bg-red-600 hover:bg-red-500 text-white;
 }
 .input {
-  @apply w-full rounded-md bg-neutral-900/60 border border-neutral-800 px-3 py-2 text-sm placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-600;
+  @apply w-full rounded-md bg-white border border-neutral-300 px-3 py-2 text-sm placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-600;
 }
 .label {
-  @apply block text-sm text-neutral-300 mb-1;
+  @apply block text-sm text-neutral-700 mb-1;
 }
 .helper {
-  @apply text-xs text-neutral-400;
+  @apply text-xs text-neutral-500;
 }

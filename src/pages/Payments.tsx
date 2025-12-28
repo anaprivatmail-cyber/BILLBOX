@@ -103,7 +103,7 @@ export default function PaymentsPage() {
 
   return (
     <div className="mx-auto max-w-4xl">
-      <div className="sticky top-16 z-10 bg-neutral-950/80 backdrop-blur border-b border-neutral-800">
+      <div className="sticky top-16 z-10 bg-white backdrop-blur border-b border-neutral-200">
         <div className="px-3 sm:px-4 py-3 flex items-center justify-between">
           <h2 className="text-xl font-semibold">Payments</h2>
           <div className="flex items-center gap-6 text-sm">

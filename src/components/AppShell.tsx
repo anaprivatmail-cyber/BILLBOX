@@ -16,13 +16,13 @@ export default function AppShell({ children }: PropsWithChildren) {
 
   return (
     <div className="min-h-full">
-      <header className="sticky top-0 z-30 border-b border-neutral-700 bg-neutral-950/90 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white backdrop-blur">
         <div className="mx-auto max-w-7xl px-4 sm:px-6">
           <div className="flex h-16 items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
                 <div className="h-7 w-7 rounded-md bg-brand-600"></div>
-                <span className="text-base font-semibold tracking-wide text-neutral-100">BillBox</span>
+                <span className="text-base font-semibold tracking-wide text-neutral-800">BillBox</span>
               </div>
               <nav className="ml-3 hidden md:flex items-center gap-2">
                 <TopLink to="/app/dashboard" label="Dashboard" />
@@ -55,8 +55,8 @@ function TopLink({ to, label }: { to: string; label: string }) {
       className={({ isActive }) =>
         `rounded-full px-3 py-1.5 text-sm transition-colors ${
           isActive
-            ? 'bg-neutral-800 text-neutral-100 shadow-soft border border-neutral-700 ring-1 ring-brand-600/30'
-            : 'text-neutral-300 hover:text-neutral-100 hover:bg-neutral-800/40'
+            ? 'bg-brand-50 text-brand-700 border border-brand-200'
+            : 'text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100'
         }`
       }
     >
@@ -67,7 +67,7 @@ function TopLink({ to, label }: { to: string; label: string }) {
 
 function MobileNav() {
   return (
-    <div className="md:hidden border-t border-neutral-900 bg-neutral-950">
+    <div className="md:hidden border-t border-neutral-200 bg-white">
       <div className="mx-auto max-w-7xl px-3 sm:px-4">
         <div className="grid grid-cols-5">
           <MobileLink to="/app/dashboard" label="Dashboard" />
@@ -87,7 +87,7 @@ function MobileLink({ to, label }: { to: string; label: string }) {
       to={to}
       className={({ isActive }) =>
         `text-center text-sm py-3 ${
-          isActive ? 'text-neutral-100 font-medium border-b-2 border-brand-500' : 'text-neutral-400 hover:text-neutral-200'
+          isActive ? 'text-brand-700 font-medium border-b-2 border-brand-500' : 'text-neutral-600 hover:text-neutral-900'
         }`
       }
     >

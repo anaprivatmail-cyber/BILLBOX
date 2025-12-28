@@ -10,7 +10,7 @@ export function Tabs({ items, value, onChange }: { items: TabItem[]; value: stri
           key={it.key}
           onClick={() => onChange(it.key)}
           className={`rounded-full px-3 py-1 text-xs sm:text-sm border ${
-            value === it.key ? 'bg-neutral-800 border-neutral-700 text-neutral-100' : 'bg-neutral-900/60 border-neutral-800 text-neutral-300 hover:text-neutral-100'
+            value === it.key ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-neutral-300 text-neutral-700 hover:bg-neutral-100'
           }`}
         >
           {it.label}

@@ -76,7 +76,7 @@ export default function DashboardPage() {
           </Card>
 
           {/* Overdue */}
-          <Card className="p-5 border-red-800/60 bg-red-950/20">
+          <Card className="p-5 border-red-200 bg-red-50">
             <div className="flex items-start justify-between">
               <div>
                 <div className="text-xs text-neutral-400">Overdue</div>
@@ -93,7 +93,7 @@ export default function DashboardPage() {
           </Card>
 
           {/* Next due */}
-          <Card className="p-5 border-amber-700/60 bg-amber-950/10">
+          <Card className="p-5 border-amber-200 bg-amber-50">
             <div className="text-xs text-neutral-400">Next due</div>
             <div className="mt-2 text-sm text-neutral-300">
               {stats.nextDue ? (

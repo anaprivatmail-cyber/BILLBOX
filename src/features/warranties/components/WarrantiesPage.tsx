@@ -68,7 +68,9 @@ export default function WarrantiesPage() {
       <div className="mt-2 flex flex-wrap gap-2">
         <div className="flex gap-1">
           {(['all', 'active', 'expiring', 'expired'] as Array<WarrantyStatus | 'all'>).map((f) => (
-            <button key={f} onClick={() => setFilter(f)} className={`btn ${filter === f ? 'btn-secondary' : 'bg-neutral-900 text-neutral-300 hover:text-neutral-100 border border-neutral-800'}`}>
+            <button key={f} onClick={() => setFilter(f)} className={`rounded-full px-3 py-1 text-xs sm:text-sm border ${
+              filter === f ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-neutral-300 text-neutral-700 hover:bg-neutral-100'
+            }`}>
               {String(f).toUpperCase()}
             </button>
           ))}
@@ -82,20 +84,20 @@ export default function WarrantiesPage() {
         <p className="mt-3 text-sm">Loading…</p>
       ) : filtered.length === 0 ? (
         <div className="card mt-3 p-6 text-center">
-          <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-neutral-800 flex items-center justify-center text-neutral-400">🛡️</div>
-          <p className="text-sm text-neutral-300">No warranties found. Add your first warranty to manage coverage.</p>
+          <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-neutral-100 flex items-center justify-center text-neutral-500">🛡️</div>
+          <p className="text-sm text-neutral-600">No warranties found. Add your first warranty to manage coverage.</p>
         </div>
       ) : (
         <ul className="mt-3 grid gap-2">
           {filtered.map((w) => {
             const status = getWarrantyStatus(w)
-            const statusColor = status === 'expired' ? 'text-red-400' : status === 'expiring' ? 'text-amber-400' : 'text-green-400'
+            const statusColor = status === 'expired' ? 'text-red-600' : status === 'expiring' ? 'text-amber-600' : 'text-green-600'
             return (
-              <li key={w.id} className="card p-3">
+              <li key={w.id} className="card p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="font-semibold">{w.item_name}</div>
-                    <div className="text-xs text-neutral-400">{w.supplier || '—'} • purchased {w.purchase_date || '—'} • expires {w.expires_at || '—'}</div>
+                    <div className="text-xs text-neutral-500">{w.supplier || '—'} • purchased {w.purchase_date || '—'} • expires {w.expires_at || '—'}</div>
                     <div className={`text-xs ${statusColor}`}>{status}</div>
                   </div>
                   <div className="flex gap-2">
