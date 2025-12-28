@@ -111,7 +111,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
       <form onSubmit={handleSubmit} className="mt-3 space-y-5">
         {/* Sticky input method bar */}
-        <div className="sticky top-0 z-10 -mx-5 px-5 py-2 bg-white/90 backdrop-blur border-b border-neutral-200">
+        <div className="mt-3 sticky top-[72px] z-20 -mx-5 px-5 py-3 bg-white shadow-sm ring-1 ring-neutral-200">
           <div className="text-xs text-neutral-500 mb-2">Input method</div>
           <Tabs items={inputTabs} value={inputMethod} onChange={(k) => setInputMethod(k as typeof inputMethod)} />
           {inputMethod === 'upload' && (
