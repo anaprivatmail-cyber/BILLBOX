@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, FlatList, SafeAreaView, StyleSheet, Text, TextInput, TouchableOpacity, View, ScrollView, Platform, Linking } from 'react-native'
+import { Alert, Button, FlatList, SafeAreaView, StyleSheet, Text, TextInput, TouchableOpacity, View, ScrollView, Platform, Linking, Image, Switch } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { NavigationContainer, useFocusEffect, useNavigation, useRoute } from '@react-navigation/native'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
@@ -246,6 +246,18 @@ async function deleteAttachment(kind: 'bills'|'warranties', recId: string, path:
   if (!s) { await removeLocalAttachment(kind, recId, path); return { error: null } }
   const { error } = await s.storage.from('attachments').remove([path])
   return { error: error ? error.message : null }
+}
+
+async function deleteAllAttachmentsForRecord(kind: 'bills'|'warranties', recId: string): Promise<void> {
+  const s = getSupabase()
+  if (!s) {
+    const items = await listLocalAttachments(kind, recId)
+    for (const it of items) await removeLocalAttachment(kind, recId, it.path)
+    return
+  }
+  const items = await listRemoteAttachments(s, kind, recId)
+  if (!items.length) return
+  await s.storage.from('attachments').remove(items.map(i=> i.path))
 }
 
 // --- Screens ---
@@ -508,6 +520,9 @@ function ScanBillScreen() {
               }
               setSaving(false)
               Alert.alert('Saved', s ? 'Bill created successfully' : 'Saved locally (Not synced)')
+              if (!pendingAttachment) {
+                Alert.alert('Tip', 'You can attach a photo or PDF of the bill (recommended).')
+              }
               try { (navigation as any)?.navigate?.('My Bills', { highlightBillId: savedId }) } catch {}
             } catch (e: any) {
               setSaving(false)
@@ -532,7 +547,27 @@ function ScanBillScreen() {
             }}>
               <Text style={styles.secondaryBtnText}>Attach Image</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={async ()=>{
+              const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true })
+              if (res.canceled) return
+              const file = res.assets?.[0]
+              if (!file?.uri) return
+              setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
+              Alert.alert('Attachment selected', 'The PDF will be uploaded on save.')
+            }}>
+              <Text style={styles.secondaryBtnText}>Attach PDF</Text>
+            </TouchableOpacity>
           </View>
+          {!!pendingAttachment && (
+            <View style={{ marginTop: 8 }}>
+              <Text style={{ marginBottom: 4 }}>Attachment preview:</Text>
+              {pendingAttachment.type?.startsWith('image/') ? (
+                <Image source={{ uri: pendingAttachment.uri }} style={{ width: 160, height: 120, borderRadius: 6 }} />
+              ) : (
+                <Text>{pendingAttachment.name}</Text>
+              )}
+            </View>
+          )}
         </View>
       )}
     </View>
@@ -547,6 +582,10 @@ function BillsListScreen() {
   const [amount, setAmount] = useState('')
   const [dueDate, setDueDate] = useState(new Date().toISOString().slice(0,10))
   const [highlightId, setHighlightId] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  const [showUnpaidOnly, setShowUnpaidOnly] = useState(true)
+  const [start, setStart] = useState('')
+  const [end, setEnd] = useState('')
   useEffect(() => { (async ()=>{ 
     if (!supabase) { const locals = await loadLocalBills(); setItems(locals as any); return }
     const { data } = await listBills(supabase); setItems(data) 
@@ -573,6 +612,7 @@ function BillsListScreen() {
     Alert.alert('Are you sure? This will also delete attached files.', 'Confirm deletion of this bill and all attachments.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: async () => { 
+        await deleteAllAttachmentsForRecord('bills', id)
         if (supabase) { const s = supabase!; const { error } = await deleteBill(s, id); if (error) Alert.alert('Error', String(error.message)) }
         else { await deleteLocalBill(id) }
         setItems((prev)=>prev.filter(b=>b.id!==id)) 
@@ -588,13 +628,28 @@ function BillsListScreen() {
           <Text style={{ color: '#6B4F00' }}>Offline / Read-only mode. Saved bills are local and marked Not synced.</Text>
         </View>
       )}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <TextInput style={[styles.input, { flex: 1 }]} placeholder="Search supplier" value={query} onChangeText={setQuery} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text>Unpaid only</Text>
+          <Switch value={showUnpaidOnly} onValueChange={setShowUnpaidOnly} />
+        </View>
+        <TextInput style={[styles.input,{ width: 120 }]} placeholder="Start YYYY-MM-DD" value={start} onChangeText={setStart} />
+        <TextInput style={[styles.input,{ width: 120 }]} placeholder="End YYYY-MM-DD" value={end} onChangeText={setEnd} />
+      </View>
       <View style={{ flexDirection: 'row', gap: 8 }}>
         <TextInput style={[styles.input, { flex: 1 }]} placeholder="Supplier" value={supplier} onChangeText={setSupplier} />
         <TextInput style={[styles.input, { width: 100 }]} placeholder="Amount" keyboardType="decimal-pad" value={amount} onChangeText={setAmount} />
         <TextInput style={[styles.input, { width: 140 }]} placeholder="Due YYYY-MM-DD" value={dueDate} onChangeText={setDueDate} />
         <Button title="Add" onPress={add} />
       </View>
-      <FlatList data={items} keyExtractor={(b)=>b.id} renderItem={({ item }) => (
+      <FlatList data={items.filter(b=>{
+        if (showUnpaidOnly && b.status!=='unpaid') return false
+        if (query && !b.supplier.toLowerCase().includes(query.toLowerCase())) return false
+        if (start && b.due_date < start) return false
+        if (end && b.due_date > end) return false
+        return true
+      })} keyExtractor={(b)=>b.id} renderItem={({ item }) => (
         <View style={[styles.card, highlightId===item.id ? { borderColor: '#2fb344', borderWidth: 2 } : null]}>
           <Text style={styles.cardTitle}>{item.supplier}{(item as any).unsynced ? ' • Not synced' : ''}</Text>
           <Text>{item.currency} {item.amount} due {item.due_date} {item.status==='paid' ? ' • Paid' : ''}</Text>
@@ -707,6 +762,11 @@ function HomeScreen({ navigation }: { navigation: any }) {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Dashboard</Text>
+      {!getSupabase() && (
+        <View style={{ padding: 8, backgroundColor: '#FFF8E1', borderColor: '#F6D365', borderWidth: 1, borderRadius: 6, marginBottom: 8 }}>
+          <Text style={{ color: '#6B4F00' }}>Working in offline mode. Data will sync when connection is available.</Text>
+        </View>
+      )}
       <DashboardPanel />
     </View>
   )
@@ -715,9 +775,11 @@ function HomeScreen({ navigation }: { navigation: any }) {
 function DashboardPanel() {
   const supabase = useMemo(() => getSupabase(), [])
   const [bills, setBills] = useState<Bill[]>([])
+  const [warranties, setWarranties] = useState<Warranty[]>([])
   useEffect(() => { (async ()=>{
     if (supabase) { const { data } = await listBills(supabase); setBills(data) }
     else { const locals = await loadLocalBills(); setBills(locals as any) }
+    if (supabase) { const { data } = await listWarranties(supabase); setWarranties(data) } else { const localsW = await loadLocalWarranties(); setWarranties(localsW as any) }
   })() }, [supabase])
   const today = new Date().toISOString().slice(0,10)
   const unpaid = bills.filter(b=>b.status==='unpaid')
@@ -725,11 +787,14 @@ function DashboardPanel() {
   const overdue = unpaid.filter(b=> b.due_date < today)
   const totalOverdue = overdue.reduce((sum,b)=> sum + (b.currency==='EUR'? b.amount : 0), 0)
   const nextDue = unpaid.sort((a,b)=> a.due_date.localeCompare(b.due_date))[0] || null
+  const upcomingExp = warranties.filter(w=> w.expires_at && w.expires_at >= today && w.expires_at <= new Date(Date.now()+30*24*3600*1000).toISOString().slice(0,10)).length
+  const expiredCount = warranties.filter(w=> w.expires_at && w.expires_at < today).length
   return (
     <View>
       <View style={styles.card}><Text style={styles.cardTitle}>Total unpaid</Text><Text>EUR {totalUnpaid.toFixed(2)}</Text></View>
       <View style={styles.card}><Text style={styles.cardTitle}>Total overdue</Text><Text>EUR {totalOverdue.toFixed(2)}</Text></View>
       <View style={styles.card}><Text style={styles.cardTitle}>Next due bill</Text><Text>{nextDue ? `${nextDue.supplier} • ${nextDue.due_date} • EUR ${nextDue.amount}` : '—'}</Text></View>
+      <View style={styles.card}><Text style={styles.cardTitle}>Warranties</Text><Text>{`Upcoming expiry (30d): ${upcomingExp} • Expired: ${expiredCount}`}</Text></View>
     </View>
   )
 }
@@ -742,6 +807,7 @@ function WarrantiesScreen() {
   const [supplier, setSupplier] = useState('')
   const [purchaseDate, setPurchaseDate] = useState('')
   const [expiresAt, setExpiresAt] = useState('')
+  const [pendingAttachment, setPendingAttachment] = useState<{ uri: string; name: string; type?: string } | null>(null)
   useEffect(() => { (async ()=>{
     if (supabase) { const { data } = await listWarranties(supabase); setItems(data) }
     else { const locals = await loadLocalWarranties(); setItems(locals as any) }
@@ -749,22 +815,29 @@ function WarrantiesScreen() {
 
   async function addManual() {
     if (!itemName) { Alert.alert('Validation', 'Enter item name'); return }
+    if (!pendingAttachment) { Alert.alert('Attachment required', 'Warranties must include an image or PDF attachment.'); return }
     if (supabase) {
       const { data, error } = await createWarranty(supabase!, { item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: expiresAt || null })
       if (error) { Alert.alert('Error', error.message); return }
-      if (data) setItems(prev=>[data, ...prev])
+      if (data) {
+        const up = await uploadAttachmentFromUri('warranties', data.id, pendingAttachment.uri, pendingAttachment.name, pendingAttachment.type)
+        if (up.error) Alert.alert('Attachment upload failed', up.error)
+        setItems(prev=>[data, ...prev])
+      }
     } else {
       const local = await addLocalWarranty({ item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: expiresAt || null })
+      await addLocalAttachment('warranties', local.id, { name: pendingAttachment.name, path: `${local.id}/${pendingAttachment.name}`, created_at: new Date().toISOString() })
       setItems((prev:any)=>[local, ...prev])
     }
     setItemName(''); setSupplier(''); setPurchaseDate(''); setExpiresAt('')
+    setPendingAttachment(null)
     Alert.alert('Saved', supabase ? 'Warranty saved' : 'Saved locally (Not synced)')
   }
 
   async function del(id: string) {
     Alert.alert('Are you sure? This will also delete attached files.', 'Confirm deletion of this warranty and attachments.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: async () => { if (supabase) { const { error } = await deleteWarranty(supabase!, id); if (error) Alert.alert('Error', error.message) } else { await deleteLocalWarranty(id) } setItems(prev=>prev.filter(w=>w.id!==id)) } }
+      { text: 'Delete', style: 'destructive', onPress: async () => { await deleteAllAttachmentsForRecord('warranties', id); if (supabase) { const { error } = await deleteWarranty(supabase!, id); if (error) Alert.alert('Error', error.message) } else { await deleteLocalWarranty(id) } setItems(prev=>prev.filter(w=>w.id!==id)) } }
     ])
   }
 
@@ -818,6 +891,34 @@ function WarrantiesScreen() {
         <TextInput style={[styles.input, { width: 140 }]} placeholder="Purchase YYYY-MM-DD" value={purchaseDate} onChangeText={setPurchaseDate} />
         <TextInput style={[styles.input, { width: 140 }]} placeholder="Expires YYYY-MM-DD" value={expiresAt} onChangeText={setExpiresAt} />
       </View>
+      <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+        <Button title="Attach Image" onPress={async ()=>{
+          const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 })
+          if (res.canceled) return
+          const asset = res.assets?.[0]
+          if (!asset?.uri) return
+          setPendingAttachment({ uri: asset.uri, name: asset.fileName || 'photo.jpg', type: asset.type || 'image/jpeg' })
+          Alert.alert('Attachment selected', 'Image will be attached on save.')
+        }} />
+        <Button title="Attach PDF" onPress={async ()=>{
+          const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true })
+          if (res.canceled) return
+          const file = res.assets?.[0]
+          if (!file?.uri) return
+          setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
+          Alert.alert('Attachment selected', 'PDF will be attached on save.')
+        }} />
+      </View>
+      {!!pendingAttachment && (
+        <View style={{ marginTop: 8 }}>
+          <Text style={{ marginBottom: 4 }}>Attachment preview:</Text>
+          {pendingAttachment.type?.startsWith('image/') ? (
+            <Image source={{ uri: pendingAttachment.uri }} style={{ width: 160, height: 120, borderRadius: 6 }} />
+          ) : (
+            <Text>{pendingAttachment.name}</Text>
+          )}
+        </View>
+      )}
       <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
         <Button title="Save" onPress={addManual} />
         <Button title="OCR from Photo" onPress={ocrPhoto} />
@@ -997,7 +1098,22 @@ function MainTabs() {
       <Tab.Screen name="My Bills" component={BillsListScreen} />
       <Tab.Screen name="Warranties" component={WarrantiesScreen} />
       <Tab.Screen name="Reports" component={ReportsScreen} />
+      <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
+  )
+}
+
+function SettingsScreen() {
+  const supabase = useMemo(() => getSupabase(), [])
+  return (
+    <View style={styles.container}>
+      <Text style={styles.title}>Settings</Text>
+      <View style={styles.card}><Text>Supabase: {supabase ? 'Configured' : 'Missing (offline mode)'}</Text></View>
+      <View style={styles.card}><Text>Functions base: {getFunctionsBase() || 'Not set'}</Text></View>
+      {supabase && (
+        <Button title="Sign out" onPress={async ()=>{ try { await supabase!.auth.signOut(); Alert.alert('Signed out'); } catch(e:any) { Alert.alert('Error', e?.message||'Failed') } }} />
+      )}
+    </View>
   )
 }
 
