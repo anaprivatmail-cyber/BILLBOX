@@ -1,5 +1,24 @@
 @import "tailwindcss";
 
+/* Custom utility for soft shadow (Tailwind v4) */
+@utility shadow-soft {
+  box-shadow: 0 1px 2px 0 rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.12);
+}
+
+/* Brand color tokens (Tailwind v4 @theme) */
+@theme {
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-200: #c7d2fe;
+  --color-brand-300: #a5b4fc;
+  --color-brand-400: #818cf8;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-700: #4338ca;
+  --color-brand-800: #3730a3;
+  --color-brand-900: #312e81;
+}
+
 /* App-wide base styles for premium dark theme */
 :root {
   color-scheme: dark;

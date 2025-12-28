@@ -1,4 +1,4 @@
-import type { PropsWithChildren } from 'react'
+ 
 
 type TabItem = { key: string; label: string }
 
