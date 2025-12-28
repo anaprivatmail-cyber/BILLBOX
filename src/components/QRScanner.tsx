@@ -21,6 +21,7 @@ export default function QRScanner({ onDecode }: Props) {
   const [showFreeze, setShowFreeze] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
   const [showHint, setShowHint] = useState(false)
+  const ROI_FRACTION = 0.6
 
   useEffect(() => {
     let rafId = 0
@@ -98,7 +99,7 @@ export default function QRScanner({ onDecode }: Props) {
       const vh = video.videoHeight
       if (!vw || !vh) return null
       // ROI: centered square covering ~60% of min dimension
-      const side = Math.floor(Math.min(vw, vh) * 0.6)
+      const side = Math.floor(Math.min(vw, vh) * ROI_FRACTION)
       const x = Math.floor((vw - side) / 2)
       const y = Math.floor((vh - side) / 2)
       roiCanvas.width = side
@@ -150,6 +151,64 @@ export default function QRScanner({ onDecode }: Props) {
     }
   }, [onDecode, deviceId])
 
+  async function handleSnap() {
+    setError(null)
+    const video = videoRef.current
+    if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      setError('Try again: move closer, improve light, keep QR inside the frame.')
+      return
+    }
+    const vw = video.videoWidth
+    const vh = video.videoHeight
+    if (!vw || !vh) {
+      setError('Try again: move closer, improve light, keep QR inside the frame.')
+      return
+    }
+    // Center ROI crop and scale up for better decoding
+    const side = Math.floor(Math.min(vw, vh) * ROI_FRACTION)
+    const x = Math.floor((vw - side) / 2)
+    const y = Math.floor((vh - side) / 2)
+    const scale = 2
+    const snapCanvas = document.createElement('canvas')
+    snapCanvas.width = side * scale
+    snapCanvas.height = side * scale
+    const sctx = snapCanvas.getContext('2d')
+    if (!sctx) {
+      setError('Try again: move closer, improve light, keep QR inside the frame.')
+      return
+    }
+    sctx.drawImage(video, x, y, side, side, 0, 0, snapCanvas.width, snapCanvas.height)
+    const data = sctx.getImageData(0, 0, snapCanvas.width, snapCanvas.height)
+    const code = jsQR(data.data, data.width, data.height, { inversionAttempts: 'dontInvert' })
+    if (code?.data) {
+      // Freeze current frame and show success
+      try {
+        const canvas = canvasRef.current
+        if (canvas) {
+          const w = vw
+          const h = vh
+          canvas.width = w
+          canvas.height = h
+          const ctx = canvas.getContext('2d')
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, w, h)
+            setShowFreeze(true)
+          }
+        }
+      } catch {}
+      setShowSuccess(true)
+      onDecode(code.data)
+      // Stop camera stream
+      const stream = video.srcObject as MediaStream | null
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop())
+      }
+      setActive(false)
+    } else {
+      setError('Try again: move closer, improve light, keep QR inside the frame.')
+    }
+  }
+
   async function toggleTorch() {
     const stream = videoRef.current?.srcObject as MediaStream | null
     if (!stream) return
@@ -177,21 +236,25 @@ export default function QRScanner({ onDecode }: Props) {
     img.onload = () => {
       const canvas = canvasRef.current
       if (!canvas) return
-      const side = Math.min(img.width, img.height)
-      canvas.width = side
-      canvas.height = side
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
-      // center-crop square then decode
+      const minSide = Math.min(img.width, img.height)
+      const side = Math.floor(minSide)
       const sx = Math.floor((img.width - side) / 2)
       const sy = Math.floor((img.height - side) / 2)
-      ctx.drawImage(img, sx, sy, side, side, 0, 0, side, side)
-      const data = ctx.getImageData(0, 0, side, side)
+      const scale = 2
+      const scaledW = side * scale
+      const scaledH = side * scale
+      canvas.width = scaledW
+      canvas.height = scaledH
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      // center-crop square and scale up, then decode
+      ctx.drawImage(img, sx, sy, side, side, 0, 0, scaledW, scaledH)
+      const data = ctx.getImageData(0, 0, scaledW, scaledH)
       const code = jsQR(data.data, data.width, data.height, { inversionAttempts: 'dontInvert' })
       if (code?.data) {
         onDecode(code.data)
       } else {
-        setError('Could not read QR, try better lighting or use Manual mode.')
+        setError('Try again: move closer, improve light, keep QR inside the frame.')
       }
       URL.revokeObjectURL(url)
     }
@@ -212,16 +275,14 @@ export default function QRScanner({ onDecode }: Props) {
         ) : (
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
         )}
-        {/* Darken outside with centered scan box */}
-        <div className="absolute inset-0">
-          <div className="absolute inset-0 bg-black/40" aria-hidden />
-          {/* Scan box: ~70% viewport width, square, thicker border, subtle pulse */}
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md shadow [width:min(70vw,60vh)] [height:min(70vw,60vh)] bg-transparent border-[3px] border-green-400 animate-pulse" />
+        {/* ROI overlay with darkened outside area */}
+        <div className="pointer-events-none absolute inset-0">
+          {/* Centered square ROI with outside darkening via large box-shadow */}
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md [width:min(70vw,60vh)] [height:min(70vw,60vh)] border-[3px] border-green-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.5)]" />
         </div>
         {/* Guidance text */}
         <div className="absolute bottom-2 left-0 right-0 px-3 text-center">
-          <div className="text-xs text-white">Poravnaj QR v okvir in zadrži 1 sekundo</div>
-          <div className="text-[11px] text-white/80">Iščem QR… približaj ali oddalji po potrebi</div>
+          <div className="text-sm text-white">Tip: put the QR inside the frame, then tap SNAP QR.</div>
         </div>
         {/* Progress indicator */}
         <div className="absolute top-2 left-1/2 -translate-x-1/2 w-24 h-1 bg-white/40 rounded">
@@ -232,14 +293,15 @@ export default function QRScanner({ onDecode }: Props) {
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="flex items-center gap-2 px-3 py-2 bg-green-600/80 text-white rounded-full">
               <span>✅</span>
-              <span className="text-sm font-medium">QR prepoznan</span>
+              <span className="text-sm font-medium">QR recognized</span>
             </div>
           </div>
         )}
       </div>
 
       {/* Controls */}
-      <div className="mt-2 flex items-center gap-2">
+      <div className="mt-2 flex items-center gap-2 flex-wrap">
+        <button type="button" className="btn btn-primary grow" onClick={handleSnap}>Snap QR</button>
         {hasTorch && (
           <button type="button" className="btn btn-secondary" onClick={toggleTorch}>{torchOn ? 'Torch Off' : 'Torch On'}</button>
         )}
@@ -261,9 +323,9 @@ export default function QRScanner({ onDecode }: Props) {
           Camera permission denied. Enable camera in browser settings and reload. On iOS Safari: Settings → Safari → Camera → Allow. On Android Chrome: Site settings → Camera → Allow.
         </div>
       )}
-      <div className="mt-2 text-xs text-neutral-500">{active ? 'Iščem QR… približaj ali oddalji po potrebi' : 'Camera stopped.'}</div>
+      <div className="mt-2 text-xs text-neutral-500">{active ? 'Tip: put the QR inside the frame, then tap SNAP QR.' : 'Camera stopped.'}</div>
       {showHint && (
-        <div className="mt-2 text-xs text-neutral-700">Ne gre? Uporabi 'Photo-PDF' ali naloži sliko QR</div>
+        <div className="mt-2 text-xs text-neutral-700">Try upload image as fallback, or move closer and retry Snap.</div>
       )}
 
       {/* Hidden canvases */}
