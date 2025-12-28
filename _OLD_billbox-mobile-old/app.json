@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "BillBox",
+    "slug": "billbox-mobile",
+    "version": "1.0.0",
+    "sdkVersion": "~54.0.0",
+    "platforms": ["ios", "android"],
+    "orientation": "portrait",
+    "android": {
+      "permissions": ["CAMERA"],
+      "package": "com.billbox.mobile"
+    }
+  }
+}

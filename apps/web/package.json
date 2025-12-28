@@ -1,0 +1,12 @@
+{
+  "name": "billbox-web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm --prefix ../ run dev",
+    "build": "npm --prefix ../ run build",
+    "preview": "npm --prefix ../ run preview",
+    "lint": "npm --prefix ../ run lint"
+  }
+}

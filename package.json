@@ -1,14 +1,20 @@
 {
-  "name": "billbox-pwa",
+  "name": "billbox-monorepo",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/web run build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "npm --workspace apps/web run preview",
+    "mobile:start": "npm --workspace apps/mobile run start"
   },
+  "workspaces": [
+    "apps/web",
+    "apps/mobile",
+    "packages/shared"
+  ],
   "dependencies": {
     "@supabase/supabase-js": "^2.89.0",
     "@zxing/browser": "^0.1.5",
@@ -39,6 +45,7 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
     "vite": "^7.2.4",
-    "vite-plugin-pwa": "^1.2.0"
+    "vite-plugin-pwa": "^1.2.0",
+    "eas-cli": "^10.0.0"
   }
 }
