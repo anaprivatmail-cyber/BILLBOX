@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { signIn, signUp, sendPasswordResetEmail, getAppUrl, resendConfirmation } from '../lib/auth'
+import Card from '../components/ui/Card'
+import Button from '../components/ui/Button'
+import Input from '../components/ui/Input'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -51,63 +54,55 @@ export default function Login() {
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <h2>{isSignUp ? 'Sign Up' : 'Login'}</h2>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label>
-            Email
-            <input
+    <div className="min-h-[70vh] flex items-center justify-center px-3 py-6">
+      <Card className="w-full max-w-md p-5">
+        <h2 className="text-xl font-semibold tracking-tight">{isSignUp ? 'Sign Up' : 'Login'}</h2>
+        <p className="mt-1 text-xs text-neutral-400">Access your BillBox account</p>
+        <form onSubmit={handleSubmit} className="mt-4 space-y-3">
+          <div>
+            <label className="label">Email</label>
+            <Input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
             />
-          </label>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Password
-            <input
+            <div className="helper mt-1">Use the email you registered with.</div>
+          </div>
+          <div>
+            <label className="label">Password</label>
+            <Input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
             />
-          </label>
-        </div>
-        {error && (
-          <p style={{ color: 'red', marginTop: 8 }}>{error}</p>
-        )}
-        {info && (
-          <p style={{ color: 'green', marginTop: 8 }}>{info}</p>
-        )}
-        <button type="submit" disabled={loading} style={{ marginTop: 12 }}>
-          {loading ? 'Please wait…' : isSignUp ? 'Create account' : 'Sign in'}
-        </button>
-      </form>
-      <button
-        type="button"
-        onClick={() => setIsSignUp((v) => !v)}
-        style={{ marginTop: 12 }}
-      >
-        {isSignUp ? 'Have an account? Login' : "Don't have an account? Sign up"}
-      </button>
-      {!isSignUp && (
-        <div style={{ marginTop: 12 }}>
-          <button type="button" onClick={() => setForgot(true)}>Forgot password?</button>
-          {forgot && (
-            <div style={{ marginTop: 8 }}>
-              <button type="button" onClick={handleForgot}>Send reset email</button>
-            </div>
+          </div>
+          {error && <p className="text-sm text-red-400">{error}</p>}
+          {info && <p className="text-sm text-green-400">{info}</p>}
+          <Button type="submit" variant="primary" disabled={loading} className="w-full mt-2">
+            {loading ? 'Please wait…' : isSignUp ? 'Create account' : 'Sign in'}
+          </Button>
+        </form>
+        <div className="mt-3 flex items-center justify-between">
+          <Button type="button" variant="ghost" className="text-xs px-0" onClick={() => setIsSignUp((v) => !v)}>
+            {isSignUp ? 'Have an account? Login' : "No account? Sign up"}
+          </Button>
+          {!isSignUp && (
+            <Button type="button" variant="ghost" className="text-xs px-0" onClick={() => setForgot(true)}>
+              Forgot password?
+            </Button>
           )}
         </div>
-      )}
-      <div style={{ marginTop: 12 }}>
-        <button type="button" onClick={handleResend}>Resend confirmation email</button>
-      </div>
+        {forgot && (
+          <div className="mt-2">
+            <Button type="button" className="w-full" onClick={handleForgot}>Send reset email</Button>
+          </div>
+        )}
+        <div className="mt-2">
+          <Button type="button" variant="ghost" className="text-xs px-0" onClick={handleResend}>Resend confirmation email</Button>
+        </div>
+      </Card>
     </div>
   )
 }

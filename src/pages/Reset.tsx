@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 import { updatePassword } from '../lib/auth'
+import Card from '../components/ui/Card'
+import Button from '../components/ui/Button'
+import Input from '../components/ui/Input'
 
 export default function Reset() {
   const [password, setPassword] = useState('')
@@ -34,39 +37,36 @@ export default function Reset() {
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <h2>Reset Password</h2>
-      {message && <p style={{ color: 'green' }}>{message}</p>}
-      {error && <p style={{ color: 'red' }}>{error}</p>}
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label>
-            New password
-            <input
+    <div className="min-h-[70vh] flex items-center justify-center px-3 py-6">
+      <Card className="w-full max-w-md p-5">
+        <h2 className="text-xl font-semibold tracking-tight">Reset Password</h2>
+        {message && <p className="mt-2 text-sm text-green-400">{message}</p>}
+        {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+        <form onSubmit={handleSubmit} className="mt-3 space-y-3">
+          <div>
+            <label className="label">New password</label>
+            <Input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
             />
-          </label>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Confirm password
-            <input
+            <div className="helper mt-1">Choose a strong password you haven’t used before.</div>
+          </div>
+          <div>
+            <label className="label">Confirm password</label>
+            <Input
               type="password"
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
               required
-              style={{ display: 'block', width: '100%', marginTop: 4 }}
             />
-          </label>
-        </div>
-        <button type="submit" disabled={loading} style={{ marginTop: 12 }}>
-          {loading ? 'Please wait…' : 'Update password'}
-        </button>
-      </form>
+          </div>
+          <Button type="submit" variant="primary" disabled={loading} className="w-full mt-2">
+            {loading ? 'Please wait…' : 'Update password'}
+          </Button>
+        </form>
+      </Card>
     </div>
   )
 }
