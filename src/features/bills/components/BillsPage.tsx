@@ -170,17 +170,17 @@ export default function BillsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-xl font-semibold">Bills</h2>
+    <div className="mx-auto max-w-4xl">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-2xl font-semibold tracking-tight">Bills</h2>
         <div className="hidden sm:flex items-center gap-2 text-sm text-neutral-400">
           <Link to="/app" className="hover:text-neutral-200">Bills</Link>
           <span>·</span>
           <Link to="/app/warranties" className="hover:text-neutral-200">Warranties</Link>
         </div>
       </div>
-      <div className="grid gap-2 sm:grid-cols-3">
-        <Card className="p-3">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Card className="p-4">
           <div className="text-xs text-neutral-400">Unpaid</div>
           <div className="mt-1 flex items-baseline gap-2">
             <span className="text-lg font-semibold">{analytics.unpaidCount}</span>
@@ -188,19 +188,19 @@ export default function BillsPage() {
             <Badge variant={analytics.unpaidCount > 0 ? 'warning' : 'success'}>{analytics.unpaidCount > 0 ? 'Pending' : 'Clear'}</Badge>
           </div>
         </Card>
-        <Card className="p-3">
+        <Card className="p-4">
           <div className="text-xs text-neutral-400">Overdue</div>
           <div className="mt-1 flex items-baseline gap-2">
-            <span className="text-lg font-semibold">{analytics.overdueCount}</span>
+            <span className="text-lg font-semibold text-red-300">{analytics.overdueCount}</span>
             <span className="text-sm text-neutral-300">/ {analytics.overdueTotal.toFixed(2)}</span>
           </div>
         </Card>
-        <Card className="p-3">
+        <Card className="p-4">
           <div className="text-xs text-neutral-400">Next due</div>
           <div className="mt-1 text-sm text-neutral-300">
             {analytics.nextDue ? (
               <span>
-                {analytics.nextDue.supplier} on {analytics.nextDue.due_date} ({analytics.nextDue.amount} {analytics.nextDue.currency})
+                {analytics.nextDue.supplier} on {analytics.nextDue.due_date} ({Number(analytics.nextDue.amount).toFixed(2)} {analytics.nextDue.currency})
               </span>
             ) : (
               <span>—</span>
@@ -209,25 +209,27 @@ export default function BillsPage() {
         </Card>
       </div>
 
-      <div className="mt-3 flex flex-wrap gap-2 items-center">
-        <Tabs
-          items={[
-            { key: 'all', label: 'ALL' },
-            { key: 'unpaid', label: 'UNPAID' },
-            { key: 'paid', label: 'PAID' },
-            { key: 'overdue', label: 'OVERDUE' },
-          ]}
-          value={filter}
-          onChange={(key: string) => setFilter(key as BillFilter)}
-        />
-        <Input
-          type="text"
-          placeholder="Search supplier"
-          value={query}
-          onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
-          className="flex-1 min-w-40"
-        />
-        <Button variant="primary" onClick={() => { setFormOpen(true); setEditing(null) }}>Add bill</Button>
+      <div className="mt-4 flex flex-wrap gap-2 items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Tabs
+            items={[
+              { key: 'all', label: 'ALL' },
+              { key: 'unpaid', label: 'UNPAID' },
+              { key: 'paid', label: 'PAID' },
+              { key: 'overdue', label: 'OVERDUE' },
+            ]}
+            value={filter}
+            onChange={(key: string) => setFilter(key as BillFilter)}
+          />
+          <Input
+            type="text"
+            placeholder="Search supplier"
+            value={query}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
+            className="flex-1 min-w-40"
+          />
+        </div>
+        <Button variant="primary" className="px-4 py-2" onClick={() => { setFormOpen(true); setEditing(null) }}>Add bill</Button>
       </div>
 
       {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
@@ -242,41 +244,47 @@ export default function BillsPage() {
           </div>
         </Card>
       ) : (
-        <ul className="mt-3 grid gap-2">
+        <ul className="mt-4 grid gap-3">
           {filtered.map((b) => {
             const overdue = isOverdue(b)
             return (
-              <li key={b.id} className="card p-3">
-                <div className="flex items-start justify-between gap-3">
+              <li key={b.id} className="card p-4">
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0">
+                    <div className="text-sm text-neutral-400">{b.creditor_name || 'Supplier'}</div>
+                    <div className="truncate font-semibold text-neutral-100">{b.supplier}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xl font-bold tracking-tight">{Number(b.amount).toFixed(2)}</div>
+                    <div className="text-xs text-neutral-400">{b.currency}</div>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-center justify-between">
+                  <div className="text-xs text-neutral-400">Due {b.due_date}</div>
                   <div>
-                    <div className="font-semibold">{b.supplier}</div>
-                    <div className="text-xs text-neutral-400">{b.amount} {b.currency} • due {b.due_date}</div>
-                    <div className="mt-1">
-                      {overdue ? <Badge variant="danger">overdue</Badge> : b.status === 'paid' ? <Badge variant="success">paid</Badge> : <Badge>unpaid</Badge>}
-                    </div>
-                    <div className="text-[11px] text-neutral-500">Created at {new Date(b.created_at).toLocaleString()}</div>
+                    {overdue ? <Badge variant="danger">Overdue</Badge> : b.status === 'paid' ? <Badge variant="success">Paid</Badge> : <Badge>Unpaid</Badge>}
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    {b.status === 'paid' ? (
-                      <Button onClick={() => handleMark(b.id, 'unpaid')}>Mark unpaid</Button>
-                    ) : (
-                      <Button onClick={() => handleMark(b.id, 'paid')}>Mark paid</Button>
-                    )}
-                    <Button onClick={() => { setEditing(b); setFormOpen(true) }}>Edit</Button>
-                    <Button variant="danger" onClick={() => handleDelete(b.id)}>Delete</Button>
-                    <Button onClick={async () => {
-                      const next = openAttachmentsFor === b.id ? null : b.id
-                      setOpenAttachmentsFor(next)
-                      if (next) await loadAttachments(next)
-                    }}>
-                      {openAttachmentsFor === b.id ? 'Hide files' : 'Attachments'}
-                    </Button>
-                    <Button onClick={() => copyToClipboard(b.iban || '')}>Copy IBAN</Button>
-                    <Button onClick={() => copyToClipboard(b.reference || '')}>Copy Reference</Button>
-                    <Button onClick={() => copyToClipboard(String(b.amount))}>Copy Amount</Button>
-                    <Button onClick={() => copyToClipboard(b.purpose || '')}>Copy Purpose</Button>
-                    <Button variant="primary" onClick={() => copyToClipboard(formatCopyAll(b))}>Copy All</Button>
-                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {b.status === 'paid' ? (
+                    <Button className="px-2 py-1 text-xs" onClick={() => handleMark(b.id, 'unpaid')}>Mark unpaid</Button>
+                  ) : (
+                    <Button className="px-2 py-1 text-xs" variant="primary" onClick={() => handleMark(b.id, 'paid')}>Mark paid</Button>
+                  )}
+                  <Button className="px-2 py-1 text-xs" variant="primary" onClick={() => copyToClipboard(formatCopyAll(b))}>Copy payment</Button>
+                  <Button className="px-2 py-1 text-xs" onClick={() => { setEditing(b); setFormOpen(true) }}>Edit</Button>
+                  <Button className="px-2 py-1 text-xs" variant="danger" onClick={() => handleDelete(b.id)}>Delete</Button>
+                  <Button className="px-2 py-1 text-xs" onClick={async () => {
+                    const next = openAttachmentsFor === b.id ? null : b.id
+                    setOpenAttachmentsFor(next)
+                    if (next) await loadAttachments(next)
+                  }}>
+                    {openAttachmentsFor === b.id ? 'Hide files' : 'Attachments'}
+                  </Button>
+                  <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(b.iban || '')}>Copy IBAN</Button>
+                  <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(b.reference || '')}>Copy Reference</Button>
+                  <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(String(b.amount))}>Copy Amount</Button>
+                  <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(b.purpose || '')}>Copy Purpose</Button>
                 </div>
                 {(b.creditor_name || b.iban || b.reference || b.purpose) && (
                   <div className="mt-2 text-xs text-neutral-300">
