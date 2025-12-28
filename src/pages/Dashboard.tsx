@@ -70,13 +70,13 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="mt-4 flex flex-col sm:flex-row gap-2">
-              <Button variant="primary" onClick={() => navigate('/app/bills?add=1')}>Add bill</Button>
-              <Button variant="secondary" onClick={() => navigate('/app/payments')}>Go to Payments</Button>
+              <Button variant="primary" className="px-4 py-2" onClick={() => navigate('/app/bills?add=1')}>Add bill</Button>
+              <Button variant="secondary" className="px-4 py-2" onClick={() => navigate('/app/payments')}>Go to Payments</Button>
             </div>
           </Card>
 
           {/* Overdue */}
-          <Card className="p-5 border-red-800/60">
+          <Card className="p-5 border-red-800/60 bg-red-950/20">
             <div className="flex items-start justify-between">
               <div>
                 <div className="text-xs text-neutral-400">Overdue</div>
@@ -88,12 +88,12 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="mt-3">
-              <Button variant="secondary" onClick={() => navigate('/app/bills?filter=overdue')}>Review overdue</Button>
+              <Button variant="secondary" className="px-4 py-2" onClick={() => navigate('/app/bills?filter=overdue')}>Review overdue</Button>
             </div>
           </Card>
 
           {/* Next due */}
-          <Card className="p-5">
+          <Card className="p-5 border-amber-700/60 bg-amber-950/10">
             <div className="text-xs text-neutral-400">Next due</div>
             <div className="mt-2 text-sm text-neutral-300">
               {stats.nextDue ? (

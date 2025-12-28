@@ -16,7 +16,7 @@ export default function AppShell({ children }: PropsWithChildren) {
 
   return (
     <div className="min-h-full">
-      <header className="sticky top-0 z-30 border-b border-neutral-800/80 bg-neutral-950/80 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-neutral-700 bg-neutral-950/90 backdrop-blur">
         <div className="mx-auto max-w-7xl px-4 sm:px-6">
           <div className="flex h-16 items-center justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -55,8 +55,8 @@ function TopLink({ to, label }: { to: string; label: string }) {
       className={({ isActive }) =>
         `rounded-full px-3 py-1.5 text-sm transition-colors ${
           isActive
-            ? 'bg-neutral-800 text-neutral-100 shadow-soft border border-neutral-700'
-            : 'text-neutral-300 hover:text-neutral-100'
+            ? 'bg-neutral-800 text-neutral-100 shadow-soft border border-neutral-700 ring-1 ring-brand-600/30'
+            : 'text-neutral-300 hover:text-neutral-100 hover:bg-neutral-800/40'
         }`
       }
     >
@@ -87,7 +87,7 @@ function MobileLink({ to, label }: { to: string; label: string }) {
       to={to}
       className={({ isActive }) =>
         `text-center text-sm py-3 ${
-          isActive ? 'text-neutral-100 border-b-2 border-brand-500' : 'text-neutral-400 hover:text-neutral-200'
+          isActive ? 'text-neutral-100 font-medium border-b-2 border-brand-500' : 'text-neutral-400 hover:text-neutral-200'
         }`
       }
     >
