@@ -29,6 +29,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [decodedText, setDecodedText] = useState<string | null>(null)
   const [qrSuccess, setQrSuccess] = useState<boolean>(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  const paymentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (initial) {
@@ -75,6 +76,10 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       if (res.reference) setReference(res.reference)
       if (res.currency) setCurrency(res.currency)
       setQrSuccess(true)
+      // Scroll to filled payment fields for clarity
+      setTimeout(() => {
+        paymentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 200)
     } else {
       setQrSuccess(false)
     }
@@ -183,7 +188,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         </div>
 
         {/* Payment details */}
-        <div>
+        <div ref={paymentRef}>
           <div className="text-xs text-neutral-400 mb-2">Payment details</div>
           <div className="grid gap-3 sm:grid-cols-3">
             <div>

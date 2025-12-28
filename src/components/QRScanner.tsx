@@ -18,6 +18,9 @@ export default function QRScanner({ onDecode }: Props) {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [deviceId, setDeviceId] = useState<string | null>(null)
   const [permissionDenied, setPermissionDenied] = useState(false)
+  const [showFreeze, setShowFreeze] = useState(false)
+  const [showSuccess, setShowSuccess] = useState(false)
+  const [showHint, setShowHint] = useState(false)
 
   useEffect(() => {
     let rafId = 0
@@ -39,9 +42,9 @@ export default function QRScanner({ onDecode }: Props) {
       const constraints: MediaStreamConstraints = {
         video: {
           deviceId: deviceId ? { exact: deviceId } : undefined,
-          facingMode: deviceId ? undefined : { ideal: 'environment' },
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
           frameRate: { ideal: 30 },
         },
         audio: false,
@@ -64,6 +67,11 @@ export default function QRScanner({ onDecode }: Props) {
           setHasTorch(false)
           setTorchOn(false)
         }
+        // Try to request continuous autofocus if supported
+        try { await (track.applyConstraints as any)({ advanced: [{ focusMode: 'continuous' }] }) } catch {}
+        // Fallback hint after 5s without decode
+        setShowHint(false)
+        setTimeout(() => { if (active && !showSuccess) setShowHint(true) }, 5000)
         tick()
       } catch (e: any) {
         const name = e?.name || ''
@@ -115,6 +123,22 @@ export default function QRScanner({ onDecode }: Props) {
       setProgress((p) => (p + delta > 1 ? 0 : p + delta))
       const text = decodeFromROI(video)
       if (text) {
+        // Freeze last frame to canvas
+        try {
+          const canvas = canvasRef.current
+          if (canvas) {
+            const w = video.videoWidth
+            const h = video.videoHeight
+            canvas.width = w
+            canvas.height = h
+            const ctx = canvas.getContext('2d')
+            if (ctx) {
+              ctx.drawImage(video, 0, 0, w, h)
+              setShowFreeze(true)
+            }
+          }
+        } catch {}
+        setShowSuccess(true)
         onDecode(text)
         stop()
       }
@@ -182,23 +206,36 @@ export default function QRScanner({ onDecode }: Props) {
     <div className="mt-2">
       {/* Video container with overlay */}
       <div className="relative w-full aspect-[3/4] max-h-[60vh] rounded-lg overflow-hidden bg-neutral-100">
-        <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" muted playsInline />
+        {/* Show captured frame when frozen, else live video */}
+        {!showFreeze ? (
+          <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" muted playsInline />
+        ) : (
+          <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+        )}
         {/* Darken outside with centered scan box */}
         <div className="absolute inset-0">
           <div className="absolute inset-0 bg-black/40" aria-hidden />
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 border-2 border-green-400 rounded-md shadow [width:min(70vw,60vh)] [height:min(70vw,60vh)] bg-transparent" />
-          {/* Cutout effect */}
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 [width:min(70vw,60vh)] [height:min(70vw,60vh)] ring-2 ring-green-400" aria-hidden />
+          {/* Scan box: ~70% viewport width, square, thicker border, subtle pulse */}
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md shadow [width:min(70vw,60vh)] [height:min(70vw,60vh)] bg-transparent border-[3px] border-green-400 animate-pulse" />
         </div>
         {/* Guidance text */}
         <div className="absolute bottom-2 left-0 right-0 px-3 text-center">
-          <div className="text-xs text-white">Align the QR code inside the frame</div>
-          <div className="text-[11px] text-white/80">Hold steady for 1–2 seconds</div>
+          <div className="text-xs text-white">Poravnaj QR v okvir in zadrži 1 sekundo</div>
+          <div className="text-[11px] text-white/80">Iščem QR… približaj ali oddalji po potrebi</div>
         </div>
         {/* Progress indicator */}
         <div className="absolute top-2 left-1/2 -translate-x-1/2 w-24 h-1 bg-white/40 rounded">
           <div className="h-1 rounded bg-white" style={{ width: `${Math.floor(progress * 100)}%` }} />
         </div>
+        {/* Success overlay */}
+        {showSuccess && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="flex items-center gap-2 px-3 py-2 bg-green-600/80 text-white rounded-full">
+              <span>✅</span>
+              <span className="text-sm font-medium">QR prepoznan</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Controls */}
@@ -224,10 +261,12 @@ export default function QRScanner({ onDecode }: Props) {
           Camera permission denied. Enable camera in browser settings and reload. On iOS Safari: Settings → Safari → Camera → Allow. On Android Chrome: Site settings → Camera → Allow.
         </div>
       )}
-      <div className="mt-2 text-xs text-neutral-500">{active ? 'Scanning…' : 'Camera stopped.'}</div>
+      <div className="mt-2 text-xs text-neutral-500">{active ? 'Iščem QR… približaj ali oddalji po potrebi' : 'Camera stopped.'}</div>
+      {showHint && (
+        <div className="mt-2 text-xs text-neutral-700">Ne gre? Uporabi 'Photo-PDF' ali naloži sliko QR</div>
+      )}
 
       {/* Hidden canvases */}
-      <canvas ref={canvasRef} className="hidden" />
       <canvas ref={roiCanvasRef} className="hidden" />
     </div>
   )
