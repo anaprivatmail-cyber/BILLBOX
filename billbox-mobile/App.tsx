@@ -100,8 +100,8 @@ type Bill = { id: string; user_id: string; supplier: string; amount: number; cur
 type CreateBillInput = { supplier: string; amount: number; currency: string; due_date: string; status?: BillStatus; creditor_name?: string | null; iban?: string | null; reference?: string | null; purpose?: string | null }
 
 // Warranties
-type Warranty = { id: string; user_id: string; item_name: string; supplier?: string | null; purchase_date?: string | null; expires_at?: string | null; created_at: string }
-type CreateWarrantyInput = { item_name: string; supplier?: string | null; purchase_date?: string | null; expires_at?: string | null }
+type Warranty = { id: string; user_id: string; item_name: string; supplier?: string | null; purchase_date?: string | null; bill_id?: string | null; expires_at?: string | null; created_at: string }
+type CreateWarrantyInput = { item_name: string; supplier?: string | null; purchase_date?: string | null; bill_id?: string | null; expires_at?: string | null }
 
 async function getCurrentUserId(supabase: SupabaseClient): Promise<string> {
   const { data, error } = await supabase.auth.getUser()
@@ -189,7 +189,7 @@ async function addLocalWarranty(input: Omit<LocalWarranty, 'id'|'created_at'|'us
 async function deleteLocalWarranty(id: string): Promise<void> { const items = await loadLocalWarranties(); await saveLocalWarranties(items.filter(w=>w.id!==id)) }
 
 // --- Attachments helpers ---
-type AttachmentItem = { name: string; path: string; created_at?: string }
+type AttachmentItem = { name: string; path: string; created_at?: string; uri?: string }
 const LS_ATTACH_PREFIX = 'billbox.local.attachments.'
 function getLocalAttachKey(kind: 'bills'|'warranties', id: string): string { return `${LS_ATTACH_PREFIX}${kind}.${id}` }
 async function listLocalAttachments(kind: 'bills'|'warranties', id: string): Promise<AttachmentItem[]> {
@@ -225,7 +225,7 @@ async function uploadAttachmentFromUri(kind: 'bills'|'warranties', recId: string
     const s = getSupabase()
     if (!s) {
       const path = `${recId}/${filename}`
-      await addLocalAttachment(kind, recId, { name: filename, path, created_at: new Date().toISOString() })
+      await addLocalAttachment(kind, recId, { name: filename, path, created_at: new Date().toISOString(), uri })
       return { path, error: null }
     }
     const userId = await getCurrentUserId(s)
@@ -271,7 +271,7 @@ function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
       <Text style={styles.title}>BillBox</Text>
       {!supabase && (
         <View style={{ padding: 8, backgroundColor: '#FFF8E1', borderColor: '#F6D365', borderWidth: 1, borderRadius: 6, marginBottom: 8 }}>
-          <Text style={{ color: '#6B4F00' }}>Read-only mode: Supabase env missing. Scanning and OCR still available.</Text>
+          <Text style={{ color: '#6B4F00' }}>Cloud sync disabled. You can still scan, OCR, and attach files locally.</Text>
         </View>
       )}
       <TextInput style={styles.input} placeholder="Email" value={email} onChangeText={setEmail} autoCapitalize="none" />
@@ -710,13 +710,14 @@ function BillDetailsScreen() {
     await refresh()
   }
 
-  async function openAttachment(path: string) {
+  async function openAttachment(path: string, uri?: string) {
     if (supabase) {
       const url = await getSignedUrl(supabase!, path)
       if (url) Linking.openURL(url)
       else Alert.alert('Open failed', 'Could not get URL')
     } else {
-      Alert.alert('Offline', 'Attachment stored locally and cannot be opened from here.')
+      if (uri) Linking.openURL(uri)
+      else Alert.alert('Offline', 'Attachment stored locally. Preview is unavailable.')
     }
   }
 
@@ -740,6 +741,28 @@ function BillDetailsScreen() {
         {!!bill.reference && <Text>Ref: {bill.reference}</Text>}
         {!!bill.iban && <Text>IBAN: {bill.iban}</Text>}
       </View>
+      <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+        <Button title="Create Warranty from this Bill" onPress={async ()=>{
+          try {
+            const s = getSupabase()
+            let createdId: string | null = null
+            if (s) {
+              const { data, error } = await createWarranty(s, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id })
+              if (error) { Alert.alert('Warranty error', error.message); return }
+              createdId = data?.id || null
+            } else {
+              const local = await addLocalWarranty({ item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id })
+              createdId = local.id
+            }
+            if (createdId) {
+              Alert.alert('Warranty created', 'Linked to this bill.')
+              navigation.navigate('Warranty Details', { warrantyId: createdId })
+            }
+          } catch (e: any) {
+            Alert.alert('Create warranty failed', e?.message || 'Unknown error')
+          }
+        }} />
+      </View>
       <Text style={styles.sectionTitle}>Attachments</Text>
       <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
         <Button title="Add Image" onPress={addImage} />
@@ -749,7 +772,7 @@ function BillDetailsScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>{item.name}</Text>
           <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
-            <Button title="Open" onPress={()=>openAttachment(item.path)} />
+            <Button title="Open" onPress={()=>openAttachment(item.path, item.uri)} />
             <Button title="Delete" color="#c53030" onPress={()=>remove(item.path)} />
           </View>
         </View>
@@ -764,7 +787,7 @@ function HomeScreen({ navigation }: { navigation: any }) {
       <Text style={styles.title}>Dashboard</Text>
       {!getSupabase() && (
         <View style={{ padding: 8, backgroundColor: '#FFF8E1', borderColor: '#F6D365', borderWidth: 1, borderRadius: 6, marginBottom: 8 }}>
-          <Text style={{ color: '#6B4F00' }}>Working in offline mode. Data will sync when connection is available.</Text>
+          <Text style={{ color: '#6B4F00' }}>Cloud sync disabled. You can still scan, OCR, and attach files locally.</Text>
         </View>
       )}
       <DashboardPanel />
@@ -807,6 +830,7 @@ function WarrantiesScreen() {
   const [supplier, setSupplier] = useState('')
   const [purchaseDate, setPurchaseDate] = useState('')
   const [expiresAt, setExpiresAt] = useState('')
+  const [durationMonths, setDurationMonths] = useState('')
   const [pendingAttachment, setPendingAttachment] = useState<{ uri: string; name: string; type?: string } | null>(null)
   useEffect(() => { (async ()=>{
     if (supabase) { const { data } = await listWarranties(supabase); setItems(data) }
@@ -816,8 +840,22 @@ function WarrantiesScreen() {
   async function addManual() {
     if (!itemName) { Alert.alert('Validation', 'Enter item name'); return }
     if (!pendingAttachment) { Alert.alert('Attachment required', 'Warranties must include an image or PDF attachment.'); return }
+    // Calculate expiry if duration and purchase date provided
+    let computedExpires = expiresAt
+    if (!computedExpires && durationMonths && purchaseDate) {
+      try {
+        const d = new Date(purchaseDate)
+        const months = parseInt(durationMonths, 10)
+        if (!Number.isNaN(months) && months > 0) {
+          const y = d.getFullYear()
+          const m = d.getMonth() + months
+          const nd = new Date(y, m, d.getDate())
+          computedExpires = nd.toISOString().slice(0,10)
+        }
+      } catch {}
+    }
     if (supabase) {
-      const { data, error } = await createWarranty(supabase!, { item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: expiresAt || null })
+      const { data, error } = await createWarranty(supabase!, { item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: computedExpires || null })
       if (error) { Alert.alert('Error', error.message); return }
       if (data) {
         const up = await uploadAttachmentFromUri('warranties', data.id, pendingAttachment.uri, pendingAttachment.name, pendingAttachment.type)
@@ -825,11 +863,11 @@ function WarrantiesScreen() {
         setItems(prev=>[data, ...prev])
       }
     } else {
-      const local = await addLocalWarranty({ item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: expiresAt || null })
+      const local = await addLocalWarranty({ item_name: itemName, supplier: supplier || null, purchase_date: purchaseDate || null, expires_at: computedExpires || null })
       await addLocalAttachment('warranties', local.id, { name: pendingAttachment.name, path: `${local.id}/${pendingAttachment.name}`, created_at: new Date().toISOString() })
       setItems((prev:any)=>[local, ...prev])
     }
-    setItemName(''); setSupplier(''); setPurchaseDate(''); setExpiresAt('')
+    setItemName(''); setSupplier(''); setPurchaseDate(''); setExpiresAt(''); setDurationMonths('')
     setPendingAttachment(null)
     Alert.alert('Saved', supabase ? 'Warranty saved' : 'Saved locally (Not synced)')
   }
@@ -890,6 +928,7 @@ function WarrantiesScreen() {
       <View style={{ flexDirection: 'row', gap: 8 }}>
         <TextInput style={[styles.input, { width: 140 }]} placeholder="Purchase YYYY-MM-DD" value={purchaseDate} onChangeText={setPurchaseDate} />
         <TextInput style={[styles.input, { width: 140 }]} placeholder="Expires YYYY-MM-DD" value={expiresAt} onChangeText={setExpiresAt} />
+        <TextInput style={[styles.input, { width: 160 }]} placeholder="Duration (months)" value={durationMonths} onChangeText={setDurationMonths} keyboardType="numeric" />
       </View>
       <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
         <Button title="Attach Image" onPress={async ()=>{
@@ -983,9 +1022,10 @@ function WarrantyDetailsScreen() {
     else Alert.alert('Attachment uploaded', 'PDF attached to warranty')
     await refresh()
   }
-  async function openAttachment(path: string) {
+  async function openAttachment(path: string, uri?: string) {
     if (supabase) { const url = await getSignedUrl(supabase!, path); if (url) Linking.openURL(url); else Alert.alert('Open failed', 'Could not get URL') }
-    else Alert.alert('Offline', 'Attachment stored locally and cannot be opened from here.')
+    else if (uri) Linking.openURL(uri)
+    else Alert.alert('Offline', 'Attachment stored locally. Preview is unavailable.')
   }
   async function remove(path: string) {
     Alert.alert('Delete attachment?', 'This file will be removed.', [
@@ -1011,7 +1051,7 @@ function WarrantyDetailsScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>{item.name}</Text>
           <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
-            <Button title="Open" onPress={()=>openAttachment(item.path)} />
+            <Button title="Open" onPress={()=>openAttachment(item.path, item.uri)} />
             <Button title="Delete" color="#c53030" onPress={()=>remove(item.path)} />
           </View>
         </View>

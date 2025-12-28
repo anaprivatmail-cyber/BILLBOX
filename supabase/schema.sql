@@ -22,12 +22,15 @@ create table if not exists public.warranties (
   item_name text not null,
   supplier text,
   purchase_date date,
+  bill_id uuid,
   expires_at date,
   created_at timestamptz not null default now()
 );
 
 create index if not exists warranties_user_id_idx on public.warranties(user_id);
+create index if not exists warranties_bill_id_idx on public.warranties(bill_id);
 
 -- Ensure optional columns exist if table was created previously
 alter table public.warranties add column if not exists supplier text;
 alter table public.warranties add column if not exists purchase_date date;
+alter table public.warranties add column if not exists bill_id uuid;
