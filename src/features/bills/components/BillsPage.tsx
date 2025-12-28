@@ -3,7 +3,7 @@ import type { ChangeEvent } from 'react'
 import type { Bill, BillFilter } from '../types'
 import { listBills, createBill, updateBill, deleteBill, setBillStatus, isOverdue } from '../api'
 import { listAttachments, uploadAttachments, deleteAttachment, getDownloadUrl } from '../attachments'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import Card from '../../../components/ui/Card'
 import Button from '../../../components/ui/Button'
 import Input from '../../../components/ui/Input'
@@ -12,6 +12,7 @@ import { Tabs } from '../../../components/ui/Tabs'
 import BillForm from './BillForm'
 
 export default function BillsPage() {
+  const location = useLocation()
   const [bills, setBills] = useState<Bill[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -98,6 +99,20 @@ export default function BillsPage() {
   useEffect(() => {
     reload()
   }, [])
+
+  // Read query params for initial UI state (no business logic changes)
+  useEffect(() => {
+    const sp = new URLSearchParams(location.search)
+    const f = sp.get('filter') as BillFilter | null
+    if (f && ['all', 'unpaid', 'paid', 'overdue'].includes(f)) {
+      setFilter(f)
+    }
+    const add = sp.get('add')
+    if (add === '1') {
+      setFormOpen(true)
+      setEditing(null)
+    }
+  }, [location.search])
 
   const filtered = useMemo(() => {
     let items = bills.slice()

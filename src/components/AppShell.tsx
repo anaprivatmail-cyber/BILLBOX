@@ -17,14 +17,14 @@ export default function AppShell({ children }: PropsWithChildren) {
   return (
     <div className="min-h-full">
       <header className="sticky top-0 z-30 border-b border-neutral-800/80 bg-neutral-950/80 backdrop-blur">
-        <div className="mx-auto max-w-7xl px-3 sm:px-4">
-          <div className="flex h-14 items-center justify-between gap-3">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="flex h-16 items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
-                <div className="h-6 w-6 rounded-md bg-brand-600"></div>
-                <span className="text-sm font-semibold tracking-wide text-neutral-100">BillBox</span>
+                <div className="h-7 w-7 rounded-md bg-brand-600"></div>
+                <span className="text-base font-semibold tracking-wide text-neutral-100">BillBox</span>
               </div>
-              <nav className="ml-2 hidden md:flex items-center gap-1">
+              <nav className="ml-3 hidden md:flex items-center gap-2">
                 <TopLink to="/app/dashboard" label="Dashboard" />
                 <TopLink to="/app/bills" label="Bills" />
                 <TopLink to="/app/warranties" label="Warranties" />
@@ -33,7 +33,7 @@ export default function AppShell({ children }: PropsWithChildren) {
               </nav>
             </div>
             <div className="flex items-center gap-2">
-              <button className="btn btn-secondary px-2 py-1 text-xs md:text-sm" onClick={handleLogout} disabled={busy}>
+              <button className="btn btn-secondary px-3 py-2 text-sm" onClick={handleLogout} disabled={busy}>
                 {busy ? 'Signing out…' : 'Logout'}
               </button>
             </div>
@@ -41,7 +41,7 @@ export default function AppShell({ children }: PropsWithChildren) {
         </div>
         <MobileNav />
       </header>
-      <main className="mx-auto max-w-7xl px-3 sm:px-4 py-4">
+      <main className="mx-auto max-w-7xl px-4 sm:px-6 py-5">
         {children}
       </main>
     </div>
@@ -53,7 +53,11 @@ function TopLink({ to, label }: { to: string; label: string }) {
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `rounded-md px-2 py-1 text-sm ${isActive ? 'bg-neutral-800 text-neutral-100' : 'text-neutral-300 hover:text-neutral-100'}`
+        `rounded-full px-3 py-1.5 text-sm transition-colors ${
+          isActive
+            ? 'bg-neutral-800 text-neutral-100 shadow-soft border border-neutral-700'
+            : 'text-neutral-300 hover:text-neutral-100'
+        }`
       }
     >
       {label}
@@ -82,7 +86,9 @@ function MobileLink({ to, label }: { to: string; label: string }) {
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `text-center text-xs py-2 ${isActive ? 'text-brand-400' : 'text-neutral-400 hover:text-neutral-200'}`
+        `text-center text-sm py-3 ${
+          isActive ? 'text-neutral-100 border-b-2 border-brand-500' : 'text-neutral-400 hover:text-neutral-200'
+        }`
       }
     >
       {label}
