@@ -4,8 +4,6 @@ This template provides a minimal setup to get React working in Vite with HMR and
 
 Currently, two official plugins are available:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
 ## React Compiler
 
@@ -43,6 +41,49 @@ export default defineConfig([
 ])
 ```
 
+## BillBox Mobile (Expo) – Production Setup
+
+- Requirements: Node 18+, Expo CLI, EAS account for secrets.
+- Mobile app path: `billbox-mobile/`
+
+### Environment Variables (Expo)
+
+Define these in EAS secrets or `.env` (prefixed `EXPO_PUBLIC_`):
+
+- `EXPO_PUBLIC_SUPABASE_URL`: Your Supabase project URL
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY`: Supabase anon key
+- `EXPO_PUBLIC_FUNCTIONS_BASE`: Base URL serving Netlify functions (e.g. `https://your-site.netlify.app`)
+
+Expo reads only `process.env.EXPO_PUBLIC_*` at runtime. Do not rely on Netlify envs for the app.
+
+### Environment Variables (Netlify Functions)
+
+Set these in Netlify → Site settings → Environment variables:
+
+- `GOOGLE_SERVICE_ACCOUNT_JSON`: JSON string of service account with Vision API access
+  - Must include `private_key` and `client_email`
+- (Optional) Supabase service role key if server-side writes are needed
+
+No OCR keys in frontend code. Expo uploads the file to the Netlify OCR function; the function returns parsed JSON only.
+
+### Features Implemented
+
+- Bills: QR scan (raw text shown), EPC/UPN parsing, OCR from photo, manual entry, review + explicit save
+- Warranties: OCR/manual entry with attachments
+- Attachments: Image/PDF upload to Supabase Storage, list/open/delete with confirmation
+- Offline mode: If Supabase envs missing, data saves locally and appears in lists
+- Analytics Dashboard: Total unpaid, total overdue, next due
+- Reports: Date range filter, monthly spend bars, top suppliers, export CSV/PDF
+
+### Run
+
+```
+cd billbox-mobile
+npm install
+npm run start
+```
+
+Ensure the Expo env variables are set before starting.
 You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
 
 ```js

@@ -32,6 +32,8 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [flashFilled, setFlashFilled] = useState<boolean>(false)
   const [uploadDecoding, setUploadDecoding] = useState(false)
   const [uploadDecodeError, setUploadDecodeError] = useState<string | null>(null)
+  const [ocrBusy, setOcrBusy] = useState(false)
+  const [ocrError, setOcrError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const paymentRef = useRef<HTMLDivElement>(null)
 
@@ -126,6 +128,41 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
     }
   }
 
+  async function extractWithOCR() {
+    if (!selectedFile) return
+    setOcrError(null)
+    setOcrBusy(true)
+    try {
+      const resp = await fetch('/.netlify/functions/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': selectedFile.type || 'application/octet-stream' },
+        body: selectedFile,
+      })
+      const data = await resp.json().catch(() => null)
+      if (!resp.ok || !data?.ok) {
+        throw new Error(data?.error || `OCR failed (${resp.status})`)
+      }
+      const f = data.fields || {}
+      if (f.creditor_name) setCreditorName(f.creditor_name)
+      if (f.supplier) setSupplier((prev)=> prev || f.supplier)
+      if (typeof f.amount === 'number') setAmount(f.amount)
+      if (f.currency) setCurrency(f.currency)
+      if (f.due_date) setDueDate(f.due_date)
+      if (f.iban) setIban(f.iban)
+      if (f.reference) setReference(f.reference)
+      if (f.purpose) setPurpose(f.purpose)
+      setFlashFilled(true)
+      setTimeout(() => {
+        paymentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 200)
+      setTimeout(() => setFlashFilled(false), 1200)
+    } catch (e: any) {
+      setOcrError(e?.message || 'OCR failed')
+    } finally {
+      setOcrBusy(false)
+    }
+  }
+
 
   function onQrDecode(text: string) {
     setDecodedText(text)
@@ -206,8 +243,12 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
                 <button type="button" className="btn btn-secondary" onClick={decodeUploadQR} disabled={!selectedFile || uploadDecoding}>
                   {uploadDecoding ? 'Scanning…' : 'Scan QR from photo'}
                 </button>
+                <button type="button" className="btn btn-primary" onClick={extractWithOCR} disabled={!selectedFile || ocrBusy}>
+                  {ocrBusy ? 'Extracting…' : 'Extract with OCR'}
+                </button>
               </div>
               {uploadDecodeError && <div className="text-xs text-red-600">{uploadDecodeError}</div>}
+              {ocrError && <div className="text-xs text-red-600">{ocrError}</div>}
               <div className="text-xs text-neutral-600">For now, only QR detection from images is supported.</div>
               <div className="text-xs text-neutral-500">Manual editing is always available below.</div>
             </div>

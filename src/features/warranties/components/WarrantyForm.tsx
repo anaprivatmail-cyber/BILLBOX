@@ -25,6 +25,8 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
   const [decodedText, setDecodedText] = useState<string | null>(null)
   const [uploadDecoding, setUploadDecoding] = useState(false)
   const [uploadDecodeError, setUploadDecodeError] = useState<string | null>(null)
+  const [ocrBusy, setOcrBusy] = useState(false)
+  const [ocrError, setOcrError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -50,6 +52,30 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] || null
     setSelectedFile(file)
+  }
+
+  async function extractWithOCR() {
+    if (!selectedFile) return
+    setOcrError(null)
+    setOcrBusy(true)
+    try {
+      const resp = await fetch('/.netlify/functions/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': selectedFile.type || 'application/octet-stream' },
+        body: selectedFile,
+      })
+      const data = await resp.json().catch(() => null)
+      if (!resp.ok || !data?.ok) {
+        throw new Error(data?.error || `OCR failed (${resp.status})`)
+      }
+      const f = data.fields || {}
+      if (f.supplier) setSupplier((prev)=> prev || f.supplier)
+      if (f.due_date && !expiresAt) setExpiresAt(f.due_date)
+    } catch (e: any) {
+      setOcrError(e?.message || 'OCR failed')
+    } finally {
+      setOcrBusy(false)
+    }
   }
 
   async function decodeUploadQR() {
@@ -172,10 +198,14 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
                 <button type="button" className="btn btn-secondary" onClick={decodeUploadQR} disabled={!selectedFile || uploadDecoding}>
                   {uploadDecoding ? 'Scanning…' : 'Scan QR from photo'}
                 </button>
+                <button type="button" className="btn btn-primary" onClick={extractWithOCR} disabled={!selectedFile || ocrBusy}>
+                  {ocrBusy ? 'Extracting…' : 'Extract with OCR'}
+                </button>
               </div>
               {uploadMsg && <div className="text-xs text-neutral-600">{uploadMsg}</div>}
               {uploadDecodeError && <div className="text-xs text-red-600">{uploadDecodeError}</div>}
-              <div className="text-xs text-neutral-500">OCR for warranties coming later. Image QR detection is available.</div>
+              {ocrError && <div className="text-xs text-red-600">{ocrError}</div>}
+              <div className="text-xs text-neutral-500">Use OCR to prefill supplier and expiry if present.</div>
             </div>
           )}
           {inputMethod === 'qr' && (
