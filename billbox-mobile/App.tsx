@@ -1148,7 +1148,7 @@ function SettingsScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Settings</Text>
-      <View style={styles.card}><Text>Supabase: {supabase ? 'Configured' : 'Missing (offline mode)'}</Text></View>
+      <View style={styles.card}><Text>{supabase ? 'Cloud sync enabled' : 'Offline mode (cloud sync disabled)'}</Text></View>
       <View style={styles.card}><Text>Functions base: {getFunctionsBase() || 'Not set'}</Text></View>
       {supabase && (
         <Button title="Sign out" onPress={async ()=>{ try { await supabase!.auth.signOut(); Alert.alert('Signed out'); } catch(e:any) { Alert.alert('Error', e?.message||'Failed') } }} />
