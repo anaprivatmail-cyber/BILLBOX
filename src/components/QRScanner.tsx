@@ -23,6 +23,127 @@ export default function QRScanner({ onDecode }: Props) {
   const [showHint, setShowHint] = useState(false)
   const ROI_FRACTION = 0.6
 
+  // --- Image preprocessing helpers for robust decoding ---
+  function toGrayscale(src: ImageData): ImageData {
+    const { width, height, data } = src
+    const out = new ImageData(width, height)
+    const o = out.data
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i]
+      const g = data[i + 1]
+      const b = data[i + 2]
+      // Luma: Rec. 601
+      const y = Math.round(0.299 * r + 0.587 * g + 0.114 * b)
+      o[i] = y
+      o[i + 1] = y
+      o[i + 2] = y
+      o[i + 3] = 255
+    }
+    return out
+  }
+
+  function stretchContrast(src: ImageData): ImageData {
+    const { width, height, data } = src
+    let min = 255
+    let max = 0
+    for (let i = 0; i < data.length; i += 4) {
+      const v = data[i]
+      if (v < min) min = v
+      if (v > max) max = v
+    }
+    const out = new ImageData(width, height)
+    const o = out.data
+    const range = Math.max(1, max - min)
+    for (let i = 0; i < data.length; i += 4) {
+      const v = data[i]
+      const s = Math.max(0, Math.min(255, Math.round(((v - min) * 255) / range)))
+      o[i] = s
+      o[i + 1] = s
+      o[i + 2] = s
+      o[i + 3] = 255
+    }
+    return out
+  }
+
+  function threshold(src: ImageData, t: number): ImageData {
+    const { width, height, data } = src
+    const out = new ImageData(width, height)
+    const o = out.data
+    for (let i = 0; i < data.length; i += 4) {
+      const v = data[i]
+      const bw = v >= t ? 255 : 0
+      o[i] = bw
+      o[i + 1] = bw
+      o[i + 2] = bw
+      o[i + 3] = 255
+    }
+    return out
+  }
+
+  function sharpen(src: ImageData): ImageData {
+    const { width, height, data } = src
+    const out = new ImageData(width, height)
+    const o = out.data
+    // Simple 3x3 sharpen kernel
+    // [ 0, -1,  0]
+    // [-1,  5, -1]
+    // [ 0, -1,  0]
+    const w = width
+    const h = height
+    const get = (x: number, y: number) => {
+      const xi = Math.max(0, Math.min(w - 1, x))
+      const yi = Math.max(0, Math.min(h - 1, y))
+      const idx = (yi * w + xi) * 4
+      return data[idx]
+    }
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const v = (
+          0 * get(x - 1, y - 1) +
+          -1 * get(x, y - 1) +
+          0 * get(x + 1, y - 1) +
+          -1 * get(x - 1, y) +
+          5 * get(x, y) +
+          -1 * get(x + 1, y) +
+          0 * get(x - 1, y + 1) +
+          -1 * get(x, y + 1) +
+          0 * get(x + 1, y + 1)
+        )
+        const clamped = Math.max(0, Math.min(255, v))
+        const idx = (y * w + x) * 4
+        o[idx] = clamped
+        o[idx + 1] = clamped
+        o[idx + 2] = clamped
+        o[idx + 3] = 255
+      }
+    }
+    return out
+  }
+
+  function decodeWithPreprocessing(src: ImageData): string | null {
+    const thresholds = [80, 100, 120, 140, 160]
+    // Grayscale + contrast stretch
+    let gray = toGrayscale(src)
+    let stretched = stretchContrast(gray)
+    // Try baseline stretched
+    let code = jsQR(stretched.data, stretched.width, stretched.height, { inversionAttempts: 'attemptBoth' })
+    if (code?.data) return code.data
+    // Try thresholds
+    for (const t of thresholds) {
+      const bin = threshold(stretched, t)
+      code = jsQR(bin.data, bin.width, bin.height, { inversionAttempts: 'dontInvert' })
+      if (code?.data) return code.data
+    }
+    // Try sharpened + thresholds
+    const sharp = sharpen(stretched)
+    for (const t of thresholds) {
+      const bin = threshold(sharp, t)
+      code = jsQR(bin.data, bin.width, bin.height, { inversionAttempts: 'dontInvert' })
+      if (code?.data) return code.data
+    }
+    return null
+  }
+
   useEffect(() => {
     let rafId = 0
     let stream: MediaStream | null = null
@@ -61,9 +182,9 @@ export default function QRScanner({ onDecode }: Props) {
         const caps: any = track.getCapabilities?.() || {}
         if (caps && typeof caps.torch !== 'undefined') {
           setHasTorch(true)
-          // Ensure torch off initially
-          try { await (track.applyConstraints as any)({ advanced: [{ torch: false }] }) } catch {}
-          setTorchOn(false)
+          // Default torch ON in Scan QR mode
+          try { await (track.applyConstraints as any)({ advanced: [{ torch: true }] }) } catch {}
+          setTorchOn(true)
         } else {
           setHasTorch(false)
           setTorchOn(false)
@@ -168,7 +289,7 @@ export default function QRScanner({ onDecode }: Props) {
     const side = Math.floor(Math.min(vw, vh) * ROI_FRACTION)
     const x = Math.floor((vw - side) / 2)
     const y = Math.floor((vh - side) / 2)
-    const scale = 2
+    const scale = 3
     const snapCanvas = document.createElement('canvas')
     snapCanvas.width = side * scale
     snapCanvas.height = side * scale
@@ -179,8 +300,8 @@ export default function QRScanner({ onDecode }: Props) {
     }
     sctx.drawImage(video, x, y, side, side, 0, 0, snapCanvas.width, snapCanvas.height)
     const data = sctx.getImageData(0, 0, snapCanvas.width, snapCanvas.height)
-    const code = jsQR(data.data, data.width, data.height, { inversionAttempts: 'dontInvert' })
-    if (code?.data) {
+    const decoded = decodeWithPreprocessing(data)
+    if (decoded) {
       // Freeze current frame and show success
       try {
         const canvas = canvasRef.current
@@ -197,7 +318,7 @@ export default function QRScanner({ onDecode }: Props) {
         }
       } catch {}
       setShowSuccess(true)
-      onDecode(code.data)
+      onDecode(decoded)
       // Stop camera stream
       const stream = video.srcObject as MediaStream | null
       if (stream) {
@@ -240,7 +361,7 @@ export default function QRScanner({ onDecode }: Props) {
       const side = Math.floor(minSide)
       const sx = Math.floor((img.width - side) / 2)
       const sy = Math.floor((img.height - side) / 2)
-      const scale = 2
+      const scale = 3
       const scaledW = side * scale
       const scaledH = side * scale
       canvas.width = scaledW
@@ -250,9 +371,9 @@ export default function QRScanner({ onDecode }: Props) {
       // center-crop square and scale up, then decode
       ctx.drawImage(img, sx, sy, side, side, 0, 0, scaledW, scaledH)
       const data = ctx.getImageData(0, 0, scaledW, scaledH)
-      const code = jsQR(data.data, data.width, data.height, { inversionAttempts: 'dontInvert' })
-      if (code?.data) {
-        onDecode(code.data)
+      const decoded = decodeWithPreprocessing(data)
+      if (decoded) {
+        onDecode(decoded)
       } else {
         setError('Try again: move closer, improve light, keep QR inside the frame.')
       }
