@@ -28,6 +28,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   // OCR placeholder: no state needed while feature is pending
   const [decodedText, setDecodedText] = useState<string | null>(null)
   const [qrSuccess, setQrSuccess] = useState<boolean>(false)
+  const [flashFilled, setFlashFilled] = useState<boolean>(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const paymentRef = useRef<HTMLDivElement>(null)
 
@@ -76,10 +77,13 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       if (res.reference) setReference(res.reference)
       if (res.currency) setCurrency(res.currency)
       setQrSuccess(true)
+      setFlashFilled(true)
       // Scroll to filled payment fields for clarity
       setTimeout(() => {
         paymentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }, 200)
+      // brief highlight
+      setTimeout(() => setFlashFilled(false), 1200)
     } else {
       setQrSuccess(false)
     }
@@ -188,7 +192,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         </div>
 
         {/* Payment details */}
-        <div ref={paymentRef}>
+        <div ref={paymentRef} className={flashFilled ? 'ring-2 ring-green-300 rounded' : ''}>
           <div className="text-xs text-neutral-400 mb-2">Payment details</div>
           <div className="grid gap-3 sm:grid-cols-3">
             <div>

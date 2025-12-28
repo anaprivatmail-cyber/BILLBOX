@@ -5,7 +5,7 @@ type Props = {
   onDecode: (text: string) => void
 }
 
-// Mobile-first, guided scanner with ROI, torch, and camera switch.
+// Mobile-first, guided scanner with fast ROI loop, auto torch, and auto zoom.
 export default function QRScanner({ onDecode }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -16,156 +16,38 @@ export default function QRScanner({ onDecode }: Props) {
   const [torchOn, setTorchOn] = useState(false)
   const [hasTorch, setHasTorch] = useState(false)
   const [torchError, setTorchError] = useState<string | null>(null)
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
-  const [deviceId, setDeviceId] = useState<string | null>(null)
   const [permissionDenied, setPermissionDenied] = useState(false)
   const [showFreeze, setShowFreeze] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
   const [showHint, setShowHint] = useState(false)
-  const [isReading, setIsReading] = useState(false)
-  const ROI_FRACTION = 0.6
+  const [statusText, setStatusText] = useState('Align QR in frame. Scanning…')
+  const ROI_BASE_FRACTION = 0.6
+  const [roiFraction, setRoiFraction] = useState(ROI_BASE_FRACTION)
+  const [roiUpscaleIndex, setRoiUpscaleIndex] = useState(0) // 0→1.0, 1→1.3, 2→1.6
+  const ROI_UPSCALES = [1.0, 1.3, 1.6]
+  const [autoTorchFailed, setAutoTorchFailed] = useState(false)
+  const [darkHintShown, setDarkHintShown] = useState(false)
+  // reading overlay not used in continuous loop
+  const [lastDecodeAt, setLastDecodeAt] = useState<number | null>(null)
+  const [startedAt, setStartedAt] = useState<number | null>(null)
+  const [lowLightStart, setLowLightStart] = useState<number | null>(null)
+  // avg luminance tracked internally; no exposed state needed
 
-  // --- Image preprocessing helpers for robust decoding ---
-  function toGrayscale(src: ImageData): ImageData {
-    const { width, height, data } = src
-    const out = new ImageData(width, height)
-    const o = out.data
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i]
-      const g = data[i + 1]
-      const b = data[i + 2]
-      // Luma: Rec. 601
-      const y = Math.round(0.299 * r + 0.587 * g + 0.114 * b)
-      o[i] = y
-      o[i + 1] = y
-      o[i + 2] = y
-      o[i + 3] = 255
-    }
-    return out
-  }
+  // (preprocessing helpers removed for lean, fast loop)
 
-  function stretchContrast(src: ImageData): ImageData {
-    const { width, height, data } = src
-    let min = 255
-    let max = 0
-    for (let i = 0; i < data.length; i += 4) {
-      const v = data[i]
-      if (v < min) min = v
-      if (v > max) max = v
-    }
-    const out = new ImageData(width, height)
-    const o = out.data
-    const range = Math.max(1, max - min)
-    for (let i = 0; i < data.length; i += 4) {
-      const v = data[i]
-      const s = Math.max(0, Math.min(255, Math.round(((v - min) * 255) / range)))
-      o[i] = s
-      o[i + 1] = s
-      o[i + 2] = s
-      o[i + 3] = 255
-    }
-    return out
-  }
-
-  function threshold(src: ImageData, t: number): ImageData {
-    const { width, height, data } = src
-    const out = new ImageData(width, height)
-    const o = out.data
-    for (let i = 0; i < data.length; i += 4) {
-      const v = data[i]
-      const bw = v >= t ? 255 : 0
-      o[i] = bw
-      o[i + 1] = bw
-      o[i + 2] = bw
-      o[i + 3] = 255
-    }
-    return out
-  }
-
-  function sharpen(src: ImageData): ImageData {
-    const { width, height, data } = src
-    const out = new ImageData(width, height)
-    const o = out.data
-    // Simple 3x3 sharpen kernel
-    // [ 0, -1,  0]
-    // [-1,  5, -1]
-    // [ 0, -1,  0]
-    const w = width
-    const h = height
-    const get = (x: number, y: number) => {
-      const xi = Math.max(0, Math.min(w - 1, x))
-      const yi = Math.max(0, Math.min(h - 1, y))
-      const idx = (yi * w + xi) * 4
-      return data[idx]
-    }
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const v = (
-          0 * get(x - 1, y - 1) +
-          -1 * get(x, y - 1) +
-          0 * get(x + 1, y - 1) +
-          -1 * get(x - 1, y) +
-          5 * get(x, y) +
-          -1 * get(x + 1, y) +
-          0 * get(x - 1, y + 1) +
-          -1 * get(x, y + 1) +
-          0 * get(x + 1, y + 1)
-        )
-        const clamped = Math.max(0, Math.min(255, v))
-        const idx = (y * w + x) * 4
-        o[idx] = clamped
-        o[idx + 1] = clamped
-        o[idx + 2] = clamped
-        o[idx + 3] = 255
-      }
-    }
-    return out
-  }
-
-  function decodeWithPreprocessing(src: ImageData): string | null {
-    const thresholds = [80, 100, 120, 140, 160]
-    // Grayscale + contrast stretch
-    let gray = toGrayscale(src)
-    let stretched = stretchContrast(gray)
-    // Try baseline stretched
-    let code = jsQR(stretched.data, stretched.width, stretched.height, { inversionAttempts: 'attemptBoth' })
-    if (code?.data) return code.data
-    // Try thresholds
-    for (const t of thresholds) {
-      const bin = threshold(stretched, t)
-      code = jsQR(bin.data, bin.width, bin.height, { inversionAttempts: 'dontInvert' })
-      if (code?.data) return code.data
-    }
-    // Try sharpened + thresholds
-    const sharp = sharpen(stretched)
-    for (const t of thresholds) {
-      const bin = threshold(sharp, t)
-      code = jsQR(bin.data, bin.width, bin.height, { inversionAttempts: 'dontInvert' })
-      if (code?.data) return code.data
-    }
-    return null
-  }
+  // Preprocessing decoder not used in fast loop
 
   useEffect(() => {
     let rafId = 0
     let stream: MediaStream | null = null
     let lastTick = 0
-
-    async function listCameras() {
-      try {
-        const all = await navigator.mediaDevices.enumerateDevices()
-        const cams = all.filter((d) => d.kind === 'videoinput')
-        setDevices(cams)
-      } catch {}
-    }
+    let luminanceTimer: number | null = null
 
     async function start() {
       setError(null)
       setPermissionDenied(false)
-      await listCameras()
       const constraints: MediaStreamConstraints = {
         video: {
-          deviceId: deviceId ? { exact: deviceId } : undefined,
           facingMode: { ideal: 'environment' },
           width: { ideal: 1280 },
           height: { ideal: 720 },
@@ -179,6 +61,7 @@ export default function QRScanner({ onDecode }: Props) {
         video.srcObject = stream
         await video.play()
         setActive(true)
+        setStartedAt(performance.now())
         // Torch capability
         const track = stream.getVideoTracks()[0]
         const caps: any = track.getCapabilities?.() || {}
@@ -193,9 +76,60 @@ export default function QRScanner({ onDecode }: Props) {
         }
         // Try to request continuous autofocus if supported
         try { await (track.applyConstraints as any)({ advanced: [{ focusMode: 'continuous' }] }) } catch {}
-        // Fallback hint after 5s without decode
+        // Fallback hint after 10s without decode
         setShowHint(false)
-        setTimeout(() => { if (active && !showSuccess) setShowHint(true) }, 5000)
+        setTimeout(() => { if (active && !showSuccess) setShowHint(true) }, 10000)
+        // Start low-light monitoring every ~500ms
+        luminanceTimer = window.setInterval(() => {
+          const videoEl = videoRef.current
+          const roiCanvas = roiCanvasRef.current
+          if (!videoEl || !roiCanvas) return
+          const vw = videoEl.videoWidth
+          const vh = videoEl.videoHeight
+          if (!vw || !vh) return
+          const side = Math.floor(Math.min(vw, vh) * roiFraction)
+          const x = Math.floor((vw - side) / 2)
+          const y = Math.floor((vh - side) / 2)
+          roiCanvas.width = side
+          roiCanvas.height = side
+          const rctx = roiCanvas.getContext('2d')
+          if (!rctx) return
+          rctx.drawImage(videoEl, x, y, side, side, 0, 0, side, side)
+          const img = rctx.getImageData(0, 0, side, side)
+          // average luminance (Rec. 601)
+          let sum = 0
+          const d = img.data
+          for (let i = 0; i < d.length; i += 4) {
+            const yv = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+            sum += yv
+          }
+          const avg = sum / (d.length / 4)
+          const now = performance.now()
+          const THRESH = 35 // empirically dark
+          if (avg < THRESH) {
+            if (!lowLightStart) setLowLightStart(now)
+          } else {
+            setLowLightStart(null)
+          }
+          if (lowLightStart && now - lowLightStart > 1000) {
+            // auto-enable torch if supported and not already on
+            if (hasTorch && !torchOn) {
+              void (async () => {
+                try {
+                  const track = (videoEl.srcObject as MediaStream).getVideoTracks()[0]
+                  await (track.applyConstraints as any)({ advanced: [{ torch: true }] })
+                  setTorchOn(true)
+                  setStatusText('Torch ON')
+                } catch {
+                  setAutoTorchFailed(true)
+                }
+              })()
+            } else if (!hasTorch && !darkHintShown) {
+              setDarkHintShown(true)
+              setStatusText('Too dark — add light')
+            }
+          }
+        }, 500)
         tick()
       } catch (e: any) {
         const name = e?.name || ''
@@ -213,6 +147,10 @@ export default function QRScanner({ onDecode }: Props) {
       }
       setActive(false)
       if (rafId) cancelAnimationFrame(rafId)
+      if (luminanceTimer) {
+        clearInterval(luminanceTimer)
+        luminanceTimer = null
+      }
     }
 
     function decodeFromROI(video: HTMLVideoElement) {
@@ -221,17 +159,19 @@ export default function QRScanner({ onDecode }: Props) {
       const vw = video.videoWidth
       const vh = video.videoHeight
       if (!vw || !vh) return null
-      // ROI: centered square covering ~60% of min dimension
-      const side = Math.floor(Math.min(vw, vh) * ROI_FRACTION)
+      // ROI: centered square covering fraction of min dimension
+      const side = Math.floor(Math.min(vw, vh) * roiFraction)
       const x = Math.floor((vw - side) / 2)
       const y = Math.floor((vh - side) / 2)
-      roiCanvas.width = side
-      roiCanvas.height = side
+      const upscale = ROI_UPSCALES[roiUpscaleIndex] || 1.0
+      roiCanvas.width = Math.floor(side * upscale)
+      roiCanvas.height = Math.floor(side * upscale)
       const rctx = roiCanvas.getContext('2d')
       if (!rctx) return null
-      rctx.drawImage(video, x, y, side, side, 0, 0, side, side)
-      const img = rctx.getImageData(0, 0, side, side)
-      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' })
+      rctx.imageSmoothingEnabled = true
+      rctx.drawImage(video, x, y, side, side, 0, 0, roiCanvas.width, roiCanvas.height)
+      const img = rctx.getImageData(0, 0, roiCanvas.width, roiCanvas.height)
+      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' })
       return code?.data || null
     }
 
@@ -245,8 +185,20 @@ export default function QRScanner({ onDecode }: Props) {
       const delta = Math.min(1, (now - lastTick) / 500)
       lastTick = now
       setProgress((p) => (p + delta > 1 ? 0 : p + delta))
+      // Auto-zoom/ROI adjustments after 2s without decode
+      if (startedAt && !lastDecodeAt) {
+        const elapsed = now - startedAt
+        if (elapsed > 2000 && roiUpscaleIndex < 1) {
+          setRoiFraction(Math.max(0.5, ROI_BASE_FRACTION - 0.05))
+          setRoiUpscaleIndex(1)
+        } else if (elapsed > 3500 && roiUpscaleIndex < 2) {
+          setRoiFraction(Math.max(0.45, ROI_BASE_FRACTION - 0.1))
+          setRoiUpscaleIndex(2)
+        }
+      }
       const text = decodeFromROI(video)
       if (text) {
+        setLastDecodeAt(now)
         // Freeze last frame to canvas
         try {
           const canvas = canvasRef.current
@@ -265,6 +217,8 @@ export default function QRScanner({ onDecode }: Props) {
         setShowSuccess(true)
         onDecode(text)
         stop()
+        // hide success after 500ms
+        window.setTimeout(() => setShowSuccess(false), 500)
       }
     }
 
@@ -272,66 +226,7 @@ export default function QRScanner({ onDecode }: Props) {
     return () => {
       stop()
     }
-  }, [onDecode, deviceId])
-
-  async function handleSnap() {
-    setError(null)
-    setTorchError(null)
-    const video = videoRef.current
-    if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) {
-      setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
-      return
-    }
-    const vw = video.videoWidth
-    const vh = video.videoHeight
-    if (!vw || !vh) {
-      setError('Try again: move closer, improve light, keep QR inside the frame.')
-      return
-    }
-    // Center ROI crop and scale up for better decoding
-    const side = Math.floor(Math.min(vw, vh) * ROI_FRACTION)
-    const x = Math.floor((vw - side) / 2)
-    const y = Math.floor((vh - side) / 2)
-    const scale = 3
-    const snapCanvas = document.createElement('canvas')
-    snapCanvas.width = side * scale
-    snapCanvas.height = side * scale
-    const sctx = snapCanvas.getContext('2d')
-    if (!sctx) {
-      setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
-      return
-    }
-    sctx.drawImage(video, x, y, side, side, 0, 0, snapCanvas.width, snapCanvas.height)
-    const data = sctx.getImageData(0, 0, snapCanvas.width, snapCanvas.height)
-    const decoded = decodeWithPreprocessing(data)
-    if (decoded) {
-      // Freeze current frame and show success
-      try {
-        const canvas = canvasRef.current
-        if (canvas) {
-          const w = vw
-          const h = vh
-          canvas.width = w
-          canvas.height = h
-          const ctx = canvas.getContext('2d')
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, w, h)
-            setShowFreeze(true)
-          }
-        }
-      } catch {}
-      setShowSuccess(true)
-      onDecode(decoded)
-      // Stop camera stream
-      const stream = video.srcObject as MediaStream | null
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop())
-      }
-      setActive(false)
-    } else {
-      setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
-    }
-  }
+  }, [onDecode, roiFraction, roiUpscaleIndex])
 
   async function toggleTorch() {
     const stream = videoRef.current?.srcObject as MediaStream | null
@@ -344,63 +239,6 @@ export default function QRScanner({ onDecode }: Props) {
     } catch {
       setTorchError('Unable to toggle torch')
     }
-  }
-
-  async function switchCamera() {
-    // Pick next available camera
-    if (devices.length < 2) return
-    const ids = devices.map((d) => d.deviceId)
-    const idx = deviceId ? ids.indexOf(deviceId) : -1
-    const next = ids[(idx + 1) % ids.length]
-    setDeviceId(next)
-  }
-
-  async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setIsReading(true)
-    setError(null)
-    const url = URL.createObjectURL(file)
-    const img = new Image()
-    img.onload = () => {
-      const canvas = canvasRef.current
-      if (!canvas) return
-      const minSide = Math.min(img.width, img.height)
-      const side = Math.floor(minSide)
-      const sx = Math.floor((img.width - side) / 2)
-      const sy = Math.floor((img.height - side) / 2)
-      const scale = 3
-      const scaledW = side * scale
-      const scaledH = side * scale
-      canvas.width = scaledW
-      canvas.height = scaledH
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
-      // center-crop square and scale up, then decode
-      ctx.drawImage(img, sx, sy, side, side, 0, 0, scaledW, scaledH)
-      const data = ctx.getImageData(0, 0, scaledW, scaledH)
-      const decoded = decodeWithPreprocessing(data)
-      if (decoded) {
-        // Show success, stop camera if active
-        setShowSuccess(true)
-        onDecode(decoded)
-        const stream = videoRef.current?.srcObject as MediaStream | null
-        if (stream) {
-          stream.getTracks().forEach((t) => t.stop())
-        }
-        setActive(false)
-      } else {
-        setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
-      }
-      setIsReading(false)
-      URL.revokeObjectURL(url)
-    }
-    img.onerror = () => {
-      setError('Could not load image')
-      setIsReading(false)
-      URL.revokeObjectURL(url)
-    }
-    img.src = url
   }
 
   return (
@@ -416,11 +254,14 @@ export default function QRScanner({ onDecode }: Props) {
         {/* ROI overlay with darkened outside area */}
         <div className="pointer-events-none absolute inset-0">
           {/* Centered square ROI with outside darkening via large box-shadow */}
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md [width:min(70vw,60vh)] [height:min(70vw,60vh)] border-[3px] border-green-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.5)]" />
+          <div
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md [width:min(70vw,60vh)] [height:min(70vw,60vh)] border-[3px] border-green-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.5)]"
+            style={{ transform: `translate(-50%, -50%) scale(${roiFraction / ROI_BASE_FRACTION})` }}
+          />
         </div>
-        {/* Guidance text */}
+        {/* Status text */}
         <div className="absolute bottom-2 left-0 right-0 px-3 text-center">
-          <div className="text-sm text-white">Tip: put the QR inside the frame, then tap SNAP QR.</div>
+          <div className="text-sm text-white">{statusText}</div>
         </div>
         {/* Progress indicator */}
         <div className="absolute top-2 left-1/2 -translate-x-1/2 w-24 h-1 bg-white/40 rounded">
@@ -435,33 +276,16 @@ export default function QRScanner({ onDecode }: Props) {
             </div>
           </div>
         )}
-        {/* Reading overlay */}
-        {isReading && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="flex items-center gap-2 px-3 py-2 bg-black/70 text-white rounded-full">
-              <span>⏳</span>
-              <span className="text-sm font-medium">Reading QR…</span>
-            </div>
-          </div>
+        {/* Tiny torch indicator when auto-enabled */}
+        {torchOn && (
+          <div className="absolute top-2 right-2 px-2 py-1 bg-black/60 text-white text-xs rounded">Torch ON</div>
         )}
       </div>
 
-      {/* Action bar controls (always visible on mobile) */}
+      {/* Minimal controls: show torch toggle only if auto failed */}
       <div className="mt-2 flex items-center gap-2 flex-wrap">
-        <button type="button" className="btn btn-primary grow" onClick={handleSnap}>Snap QR</button>
-        <label className="btn btn-secondary">
-          Upload QR image
-          <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
-        </label>
-        {hasTorch ? (
+        {hasTorch && autoTorchFailed && (
           <button type="button" className="btn btn-secondary" onClick={toggleTorch}>{torchOn ? 'Torch Off' : 'Torch On'}</button>
-        ) : (
-          <button type="button" className="btn btn-secondary opacity-60 cursor-not-allowed" title="Not supported" disabled>
-            Torch
-          </button>
-        )}
-        {devices.length > 1 && (
-          <button type="button" className="btn btn-secondary" onClick={switchCamera}>Switch camera</button>
         )}
       </div>
 
@@ -477,9 +301,9 @@ export default function QRScanner({ onDecode }: Props) {
           Camera permission denied. Enable camera in browser settings and reload. On iOS Safari: Settings → Safari → Camera → Allow. On Android Chrome: Site settings → Camera → Allow.
         </div>
       )}
-      <div className="mt-2 text-xs text-neutral-500">{active ? 'Tip: put the QR inside the frame, then tap SNAP QR.' : 'Camera stopped.'}</div>
+      <div className="mt-2 text-xs text-neutral-500">{active ? 'Auto-scanning. Hold steady.' : 'Camera stopped.'}</div>
       {showHint && (
-        <div className="mt-2 text-xs text-neutral-700">Try upload image as fallback, or move closer and retry Snap.</div>
+        <div className="mt-2 text-xs text-neutral-700">Move closer / hold steady / increase light</div>
       )}
 
       {/* Hidden canvases */}
