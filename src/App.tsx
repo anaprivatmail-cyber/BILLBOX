@@ -1,6 +1,7 @@
 import './App.css'
 import Login from './pages/Login'
 import BillsPage from './features/bills/components/BillsPage'
+import DashboardPage from './pages/Dashboard'
 import WarrantiesPage from './features/warranties/components/WarrantiesPage'
 import Reset from './pages/Reset'
 import ProtectedRoute from './routes/ProtectedRoute'
@@ -15,7 +16,9 @@ function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/reset" element={<Reset />} />
         <Route path="/app" element={<ProtectedRoute />}>
-          <Route index element={<BillsPage />} />
+          <Route index element={<DashboardPage />} />
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="bills" element={<BillsPage />} />
           <Route path="warranties" element={<WarrantiesPage />} />
           <Route path="payments" element={<PaymentsPage />} />
           <Route path="reports" element={<ReportsPage />} />

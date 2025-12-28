@@ -25,7 +25,8 @@ export default function AppShell({ children }: PropsWithChildren) {
                 <span className="text-sm font-semibold tracking-wide text-neutral-100">BillBox</span>
               </div>
               <nav className="ml-2 hidden md:flex items-center gap-1">
-                <TopLink to="/app" label="Bills" />
+                <TopLink to="/app/dashboard" label="Dashboard" />
+                <TopLink to="/app/bills" label="Bills" />
                 <TopLink to="/app/warranties" label="Warranties" />
                 <TopLink to="/app/payments" label="Payments" />
                 <TopLink to="/app/reports" label="Reports" />
@@ -64,8 +65,9 @@ function MobileNav() {
   return (
     <div className="md:hidden border-t border-neutral-900 bg-neutral-950">
       <div className="mx-auto max-w-7xl px-3 sm:px-4">
-        <div className="grid grid-cols-4">
-          <MobileLink to="/app" label="Bills" />
+        <div className="grid grid-cols-5">
+          <MobileLink to="/app/dashboard" label="Dashboard" />
+          <MobileLink to="/app/bills" label="Bills" />
           <MobileLink to="/app/warranties" label="Warr." />
           <MobileLink to="/app/payments" label="Pay" />
           <MobileLink to="/app/reports" label="Reports" />
