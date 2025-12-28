@@ -4,6 +4,7 @@ import { Tabs } from '../../../components/ui/Tabs'
 import QRScanner from '../../../components/QRScanner'
 import { parseEPC } from '../../../lib/epc'
 import { uploadAttachments as uploadWarrantyAttachments } from '../attachments'
+import { BrowserQRCodeReader } from '@zxing/browser'
 
 interface Props {
   initial?: Warranty | null
@@ -22,6 +23,8 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [uploadMsg, setUploadMsg] = useState<string | null>(null)
   const [decodedText, setDecodedText] = useState<string | null>(null)
+  const [uploadDecoding, setUploadDecoding] = useState(false)
+  const [uploadDecodeError, setUploadDecodeError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -47,6 +50,50 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] || null
     setSelectedFile(file)
+  }
+
+  async function decodeUploadQR() {
+    if (!selectedFile) return
+    setUploadDecodeError(null)
+    setDecodedText(null)
+    if (!selectedFile.type.startsWith('image/')) {
+      setUploadDecodeError('Only images supported for QR decode. PDFs are not yet supported.')
+      return
+    }
+    const url = URL.createObjectURL(selectedFile)
+    setUploadDecoding(true)
+    try {
+      const reader = new BrowserQRCodeReader()
+      const img = new Image()
+      img.src = url
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve()
+        img.onerror = () => reject(new Error('Failed to load image'))
+      })
+      const decodePromise = reader.decodeFromImageUrl(url)
+      const timeoutPromise = new Promise((_resolve, reject) => {
+        const id = setTimeout(() => {
+          clearTimeout(id)
+          reject(new Error('Timeout: QR not found in 6s'))
+        }, 6000)
+      })
+      const result = await Promise.race([decodePromise, timeoutPromise]) as any
+      const text = typeof result?.getText === 'function' ? result.getText() : String(result)
+      if (!text) throw new Error('No QR text decoded')
+      setDecodedText(text)
+      const epc = parseEPC(text)
+      if (epc) {
+        if (epc.creditor_name) setSupplier(epc.creditor_name)
+      }
+    } catch (err: any) {
+      const name = err?.name || 'Error'
+      const msg = err instanceof Error ? err.message : 'QR decode failed'
+      console.error('[QR] Upload decode error:', { name, message: msg })
+      setUploadDecodeError('Could not detect a QR in the photo. Try a sharper, well-lit image.')
+    } finally {
+      setUploadDecoding(false)
+      URL.revokeObjectURL(url)
+    }
   }
 
   async function handleUploadAttachment() {
@@ -122,9 +169,13 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
               )}
               <div className="flex gap-2">
                 <button type="button" className="btn btn-secondary" onClick={handleUploadAttachment} disabled={!selectedFile}>Store attachment</button>
+                <button type="button" className="btn btn-secondary" onClick={decodeUploadQR} disabled={!selectedFile || uploadDecoding}>
+                  {uploadDecoding ? 'Scanning…' : 'Scan QR from photo'}
+                </button>
               </div>
               {uploadMsg && <div className="text-xs text-neutral-600">{uploadMsg}</div>}
-              <div className="text-xs text-neutral-500">OCR for warranties coming later.</div>
+              {uploadDecodeError && <div className="text-xs text-red-600">{uploadDecodeError}</div>}
+              <div className="text-xs text-neutral-500">OCR for warranties coming later. Image QR detection is available.</div>
             </div>
           )}
           {inputMethod === 'qr' && (

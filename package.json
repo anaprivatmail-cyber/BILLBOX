@@ -11,12 +11,13 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.89.0",
+    "@zxing/browser": "^0.1.5",
     "chart.js": "^4.5.1",
     "google-auth-library": "^9.0.0",
     "jspdf": "^2.5.2",
+    "jsqr": "^1.4.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.0",
-    "jsqr": "^1.4.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.11.0"
   },

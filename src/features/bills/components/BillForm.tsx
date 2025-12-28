@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Bill, CreateBillInput } from '../types'
 import { Tabs } from '../../../components/ui/Tabs'
 import QRScanner from '../../../components/QRScanner'
+import { BrowserQRCodeReader } from '@zxing/browser'
 import { parsePaymentQR } from '../../../lib/epc'
 
 interface Props {
@@ -29,6 +30,8 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [decodedText, setDecodedText] = useState<string | null>(null)
   const [qrSuccess, setQrSuccess] = useState<boolean>(false)
   const [flashFilled, setFlashFilled] = useState<boolean>(false)
+  const [uploadDecoding, setUploadDecoding] = useState(false)
+  const [uploadDecodeError, setUploadDecodeError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const paymentRef = useRef<HTMLDivElement>(null)
 
@@ -63,6 +66,64 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] || null
     setSelectedFile(file)
+  }
+
+  async function decodeUploadQR() {
+    if (!selectedFile) return
+    setUploadDecodeError(null)
+    setDecodedText(null)
+    setQrSuccess(false)
+    if (!selectedFile.type.startsWith('image/')) {
+      setUploadDecodeError('Only images supported for QR decode. PDFs are not yet supported.')
+      return
+    }
+    const url = URL.createObjectURL(selectedFile)
+    setUploadDecoding(true)
+    try {
+      const reader = new BrowserQRCodeReader()
+      const img = new Image()
+      img.src = url
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve()
+        img.onerror = () => reject(new Error('Failed to load image'))
+      })
+      const decodePromise = reader.decodeFromImageUrl(url)
+      const timeoutPromise = new Promise((_resolve, reject) => {
+        const id = setTimeout(() => {
+          clearTimeout(id)
+          reject(new Error('Timeout: QR not found in 6s'))
+        }, 6000)
+      })
+      const result = await Promise.race([decodePromise, timeoutPromise]) as any
+      const text = typeof result?.getText === 'function' ? result.getText() : String(result)
+      if (!text) throw new Error('No QR text decoded')
+      setDecodedText(text)
+      const res = parsePaymentQR(text)
+      if (res) {
+        if (res.creditor_name) setCreditorName(res.creditor_name)
+        if (res.iban) setIban(res.iban)
+        if (typeof res.amount === 'number') setAmount(res.amount)
+        if (res.purpose) setPurpose(res.purpose)
+        if (res.reference) setReference(res.reference)
+        if (res.currency) setCurrency(res.currency)
+        setQrSuccess(true)
+        setFlashFilled(true)
+        setTimeout(() => {
+          paymentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }, 200)
+        setTimeout(() => setFlashFilled(false), 1200)
+      } else {
+        setQrSuccess(false)
+      }
+    } catch (err: any) {
+      const name = err?.name || 'Error'
+      const msg = err instanceof Error ? err.message : 'QR decode failed'
+      console.error('[QR] Upload decode error:', { name, message: msg })
+      setUploadDecodeError('Could not detect a QR in the photo. Try a sharper, well-lit image.')
+    } finally {
+      setUploadDecoding(false)
+      URL.revokeObjectURL(url)
+    }
   }
 
 
@@ -142,9 +203,12 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
                 </div>
               )}
               <div className="flex gap-2">
-                <button type="button" className="btn btn-secondary" disabled>Extract data</button>
+                <button type="button" className="btn btn-secondary" onClick={decodeUploadQR} disabled={!selectedFile || uploadDecoding}>
+                  {uploadDecoding ? 'Scanning…' : 'Scan QR from photo'}
+                </button>
               </div>
-              <div className="text-xs text-neutral-600">OCR coming</div>
+              {uploadDecodeError && <div className="text-xs text-red-600">{uploadDecodeError}</div>}
+              <div className="text-xs text-neutral-600">For now, only QR detection from images is supported.</div>
               <div className="text-xs text-neutral-500">Manual editing is always available below.</div>
             </div>
           )}

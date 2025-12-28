@@ -32,6 +32,7 @@ export default function QRScanner({ onDecode }: Props) {
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [lowLightStart, setLowLightStart] = useState<number | null>(null)
   // avg luminance tracked internally; no exposed state needed
+  const decodedRef = useRef(false)
 
   // (preprocessing helpers removed for lean, fast loop)
 
@@ -42,10 +43,12 @@ export default function QRScanner({ onDecode }: Props) {
     let stream: MediaStream | null = null
     let lastTick = 0
     let luminanceTimer: number | null = null
+    let timeoutId: number | null = null
 
     async function start() {
       setError(null)
       setPermissionDenied(false)
+      decodedRef.current = false
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: { ideal: 'environment' },
@@ -131,9 +134,18 @@ export default function QRScanner({ onDecode }: Props) {
           }
         }, 500)
         tick()
+        // Ensure no-hang: stop after 6s without decode
+        timeoutId = window.setTimeout(() => {
+          if (!decodedRef.current) {
+            console.warn('[QR] Live scan timeout after 6s')
+            setError('No QR detected within 6s. Try again with better lighting or move closer.')
+            stop()
+          }
+        }, 6000)
       } catch (e: any) {
         const name = e?.name || ''
         const msg = e instanceof Error ? e.message : 'Unable to access camera'
+        console.error('[QR] Live scan error:', { name, message: msg })
         setError(msg)
         setActive(false)
         if (name === 'NotAllowedError' || name === 'SecurityError') setPermissionDenied(true)
@@ -150,6 +162,10 @@ export default function QRScanner({ onDecode }: Props) {
       if (luminanceTimer) {
         clearInterval(luminanceTimer)
         luminanceTimer = null
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+        timeoutId = null
       }
     }
 
@@ -198,6 +214,7 @@ export default function QRScanner({ onDecode }: Props) {
       }
       const text = decodeFromROI(video)
       if (text) {
+        decodedRef.current = true
         setLastDecodeAt(now)
         // Freeze last frame to canvas
         try {
