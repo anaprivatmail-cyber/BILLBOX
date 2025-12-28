@@ -1,86 +1,133 @@
 import { GoogleAuth } from 'google-auth-library';
 import axios from 'axios';
 
+function jsonResponse(statusCode, payload) {
+  return {
+    statusCode,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  };
+}
+
+function safeDetailFromError(err) {
+  try {
+    const msg =
+      (err && err.response && err.response.data && err.response.data.error && err.response.data.error.message) ||
+      (err && err.message) ||
+      'vision_api_error';
+    const s = String(msg)
+      .replace(/\n/g, ' ')
+      .replace(/private_key/gi, 'redacted');
+    return s.length > 400 ? s.slice(0, 400) : s;
+  } catch (_) {
+    return 'vision_api_error';
+  }
+}
+
 export async function handler() {
   try {
     const raw = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-    if (!raw) {
-      return {
-        statusCode: 400,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ok: false, error: 'Missing GOOGLE_APPLICATION_CREDENTIALS_JSON' }),
-      };
+    if (!raw || String(raw).trim() === '') {
+      return jsonResponse(500, {
+        ok: false,
+        step: 'env',
+        error: 'missing_GOOGLE_APPLICATION_CREDENTIALS_JSON',
+      });
     }
 
     let credentials;
     try {
       credentials = JSON.parse(raw);
     } catch (_) {
-      return {
-        statusCode: 400,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ok: false, error: 'Invalid credentials JSON' }),
-      };
+      return jsonResponse(500, {
+        ok: false,
+        step: 'parse',
+        error: 'invalid_credentials_json',
+      });
+    }
+
+    const required = ['type', 'project_id', 'private_key', 'client_email', 'token_uri'];
+    const missing = required.filter((k) => !credentials[k] || String(credentials[k]).trim() === '');
+    if (missing.length) {
+      return jsonResponse(500, {
+        ok: false,
+        step: 'validate',
+        error: 'credentials_json_missing_fields',
+      });
     }
 
     const auth = new GoogleAuth({
       credentials,
-      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      scopes: ['https://www.googleapis.com/auth/cloud-vision'],
     });
 
-    const client = await auth.getClient();
-    const t = await client.getAccessToken();
-    const accessToken = typeof t === 'string' ? t : (t && t.token) || null;
-    if (!accessToken) {
-      return {
-        statusCode: 500,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ok: false, error: 'Unable to acquire access token' }),
-      };
+    let accessToken;
+    try {
+      const client = await auth.getClient();
+      const t = await client.getAccessToken();
+      accessToken = typeof t === 'string' ? t : (t && t.token) || null;
+    } catch (e) {
+      return jsonResponse(500, {
+        ok: false,
+        step: 'vision',
+        error: 'vision_call_failed',
+        detail: safeDetailFromError(e),
+      });
     }
 
-    // 1x1 transparent PNG
-    const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=';
+    if (!accessToken) {
+      return jsonResponse(500, {
+        ok: false,
+        step: 'vision',
+        error: 'vision_call_failed',
+        detail: 'failed_to_obtain_access_token',
+      });
+    }
 
+    // Minimal Vision call using a 1x1 PNG (no secrets)
+    const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=';
     const payload = {
       requests: [
         {
           image: { content: base64 },
-          features: [{ type: 'TEXT_DETECTION' }],
+          features: [{ type: 'TEXT_DETECTION', maxResults: 1 }],
         },
       ],
     };
 
-    const response = await axios.post('https://vision.googleapis.com/v1/images:annotate', payload, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 10000,
-    });
+    try {
+      const response = await axios.post('https://vision.googleapis.com/v1/images:annotate', payload, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000,
+      });
 
-    if (response.status === 200) {
-      return {
-        statusCode: 200,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ok: true }),
-      };
+      if (response.status === 200) {
+        return jsonResponse(200, { ok: true });
+      }
+
+      return jsonResponse(500, {
+        ok: false,
+        step: 'vision',
+        error: 'vision_call_failed',
+        detail: `status ${response.status} ${response.statusText || ''}`.trim(),
+      });
+    } catch (err) {
+      return jsonResponse(500, {
+        ok: false,
+        step: 'vision',
+        error: 'vision_call_failed',
+        detail: safeDetailFromError(err),
+      });
     }
-
-    return {
-      statusCode: response.status,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ok: false, error: `Vision API returned status ${response.status}` }),
-    };
   } catch (err) {
-    const message =
-      (err && err.response && err.response.data && err.response.data.error && err.response.data.error.message) ||
-      (err && err.message) ||
-      'Unknown error';
-    return {
-      statusCode: 500,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ok: false, error: message }),
-    };
+    return jsonResponse(500, {
+      ok: false,
+      step: 'catch',
+      error: 'unhandled_exception',
+      detail: safeDetailFromError(err),
+    });
   }
 }
