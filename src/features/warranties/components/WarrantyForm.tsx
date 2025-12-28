@@ -1,5 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Warranty, CreateWarrantyInput } from '../types'
+import { Tabs } from '../../../components/ui/Tabs'
+import QRScanner from '../../../components/QRScanner'
+import { parseEPC } from '../../../lib/epc'
+import { uploadAttachments as uploadWarrantyAttachments } from '../attachments'
 
 interface Props {
   initial?: Warranty | null
@@ -14,6 +18,11 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
   const [expiresAt, setExpiresAt] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [inputMethod, setInputMethod] = useState<'manual' | 'upload' | 'qr'>('manual')
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null)
+  const [decodedText, setDecodedText] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (initial) {
@@ -28,6 +37,40 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
       setExpiresAt('')
     }
   }, [initial])
+
+  const inputTabs = useMemo(() => ([
+    { key: 'manual', label: 'Manual' },
+    { key: 'upload', label: 'Photo-PDF' },
+    { key: 'qr', label: 'Scan QR' },
+  ]), [])
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0] || null
+    setSelectedFile(file)
+  }
+
+  async function handleUploadAttachment() {
+    if (!selectedFile) return
+    setUploadMsg(null)
+    if (!initial?.id) {
+      setUploadMsg('Save the warranty first, then upload attachments.')
+      return
+    }
+    const { error } = await uploadWarrantyAttachments(initial.id, [selectedFile])
+    if (error) setUploadMsg(error.message)
+    else setUploadMsg('Attachment uploaded.')
+  }
+
+  function onQrDecode(text: string) {
+    setDecodedText(text)
+    const epc = parseEPC(text)
+    if (epc) {
+      if (epc.creditor_name) setSupplier(epc.creditor_name)
+      if (typeof epc.amount === 'number' && !expiresAt) {
+        // No direct mapping for amount here; keep text available to user.
+      }
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -50,11 +93,52 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
     setLoading(false)
   }
 
+  // Ensure the form container is scrolled to top when opened
+  useEffect(() => {
+    containerRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+  }, [])
+
   return (
-    <div className="p-4">
+    <div ref={containerRef} className="p-4 max-h-[80vh] overflow-y-auto scroll-smooth touch-pan-y">
       <h3 className="text-lg font-semibold">{initial ? 'Edit Warranty' : 'Add Warranty'}</h3>
       {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
       <form onSubmit={handleSubmit} className="mt-2 space-y-3">
+        {/* Sticky input method bar */}
+        <div className="sticky top-0 z-10 -mx-4 px-4 py-2 bg-white/90 backdrop-blur border-b border-neutral-200">
+          <div className="text-xs text-neutral-500 mb-2">Input method</div>
+          <Tabs items={inputTabs} value={inputMethod} onChange={(k) => setInputMethod(k as typeof inputMethod)} />
+          {inputMethod === 'upload' && (
+            <div className="mt-3 space-y-2">
+              <input type="file" accept="application/pdf,image/*" onChange={handleFileChange} className="input" />
+              {selectedFile && (
+                <div className="flex items-center gap-3 text-sm">
+                  <div className="font-medium">{selectedFile.name}</div>
+                  {selectedFile.type.startsWith('image/') ? (
+                    <img src={URL.createObjectURL(selectedFile)} alt="preview" className="h-16 w-16 object-cover rounded border" />
+                  ) : (
+                    <div className="h-16 w-16 flex items-center justify-center rounded border bg-neutral-100">PDF</div>
+                  )}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button type="button" className="btn btn-secondary" onClick={handleUploadAttachment} disabled={!selectedFile}>Store attachment</button>
+              </div>
+              {uploadMsg && <div className="text-xs text-neutral-600">{uploadMsg}</div>}
+              <div className="text-xs text-neutral-500">OCR for warranties coming later.</div>
+            </div>
+          )}
+          {inputMethod === 'qr' && (
+            <div className="mt-3 space-y-2">
+              <QRScanner onDecode={onQrDecode} />
+              {decodedText && (
+                <div className="mt-2">
+                  <div className="text-xs text-neutral-500 mb-1">Decoded text</div>
+                  <textarea className="input w-full h-24" value={decodedText} readOnly />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
         <div>
           <label className="label">Item name</label>
           <input type="text" value={itemName} onChange={(e) => setItemName(e.target.value)} required className="input" />
