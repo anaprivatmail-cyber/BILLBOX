@@ -15,12 +15,14 @@ export default function QRScanner({ onDecode }: Props) {
   const [progress, setProgress] = useState(0)
   const [torchOn, setTorchOn] = useState(false)
   const [hasTorch, setHasTorch] = useState(false)
+  const [torchError, setTorchError] = useState<string | null>(null)
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [deviceId, setDeviceId] = useState<string | null>(null)
   const [permissionDenied, setPermissionDenied] = useState(false)
   const [showFreeze, setShowFreeze] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
   const [showHint, setShowHint] = useState(false)
+  const [isReading, setIsReading] = useState(false)
   const ROI_FRACTION = 0.6
 
   // --- Image preprocessing helpers for robust decoding ---
@@ -182,9 +184,9 @@ export default function QRScanner({ onDecode }: Props) {
         const caps: any = track.getCapabilities?.() || {}
         if (caps && typeof caps.torch !== 'undefined') {
           setHasTorch(true)
-          // Default torch ON in Scan QR mode
-          try { await (track.applyConstraints as any)({ advanced: [{ torch: true }] }) } catch {}
-          setTorchOn(true)
+          // Default OFF; user can enable via toggle
+          setTorchOn(false)
+          setTorchError(null)
         } else {
           setHasTorch(false)
           setTorchOn(false)
@@ -274,9 +276,10 @@ export default function QRScanner({ onDecode }: Props) {
 
   async function handleSnap() {
     setError(null)
+    setTorchError(null)
     const video = videoRef.current
     if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) {
-      setError('Try again: move closer, improve light, keep QR inside the frame.')
+      setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
       return
     }
     const vw = video.videoWidth
@@ -295,7 +298,7 @@ export default function QRScanner({ onDecode }: Props) {
     snapCanvas.height = side * scale
     const sctx = snapCanvas.getContext('2d')
     if (!sctx) {
-      setError('Try again: move closer, improve light, keep QR inside the frame.')
+      setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
       return
     }
     sctx.drawImage(video, x, y, side, side, 0, 0, snapCanvas.width, snapCanvas.height)
@@ -326,7 +329,7 @@ export default function QRScanner({ onDecode }: Props) {
       }
       setActive(false)
     } else {
-      setError('Try again: move closer, improve light, keep QR inside the frame.')
+      setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
     }
   }
 
@@ -337,7 +340,10 @@ export default function QRScanner({ onDecode }: Props) {
     try {
       await (track.applyConstraints as any)({ advanced: [{ torch: !torchOn }] })
       setTorchOn((v) => !v)
-    } catch {}
+      setTorchError(null)
+    } catch {
+      setTorchError('Unable to toggle torch')
+    }
   }
 
   async function switchCamera() {
@@ -352,6 +358,8 @@ export default function QRScanner({ onDecode }: Props) {
   async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
+    setIsReading(true)
+    setError(null)
     const url = URL.createObjectURL(file)
     const img = new Image()
     img.onload = () => {
@@ -373,14 +381,23 @@ export default function QRScanner({ onDecode }: Props) {
       const data = ctx.getImageData(0, 0, scaledW, scaledH)
       const decoded = decodeWithPreprocessing(data)
       if (decoded) {
+        // Show success, stop camera if active
+        setShowSuccess(true)
         onDecode(decoded)
+        const stream = videoRef.current?.srcObject as MediaStream | null
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop())
+        }
+        setActive(false)
       } else {
-        setError('Try again: move closer, improve light, keep QR inside the frame.')
+        setError('Could not read QR. Try better light, move closer, or use Photo-PDF / Manual.')
       }
+      setIsReading(false)
       URL.revokeObjectURL(url)
     }
     img.onerror = () => {
       setError('Could not load image')
+      setIsReading(false)
       URL.revokeObjectURL(url)
     }
     img.src = url
@@ -389,7 +406,7 @@ export default function QRScanner({ onDecode }: Props) {
   return (
     <div className="mt-2">
       {/* Video container with overlay */}
-      <div className="relative w-full aspect-[3/4] max-h-[60vh] rounded-lg overflow-hidden bg-neutral-100">
+      <div className="relative w-full aspect-[3/4] sm:max-h-[60vh] max-h-[50vh] rounded-lg overflow-hidden bg-neutral-100">
         {/* Show captured frame when frozen, else live video */}
         {!showFreeze ? (
           <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" muted playsInline />
@@ -418,26 +435,42 @@ export default function QRScanner({ onDecode }: Props) {
             </div>
           </div>
         )}
+        {/* Reading overlay */}
+        {isReading && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="flex items-center gap-2 px-3 py-2 bg-black/70 text-white rounded-full">
+              <span>⏳</span>
+              <span className="text-sm font-medium">Reading QR…</span>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Controls */}
+      {/* Action bar controls (always visible on mobile) */}
       <div className="mt-2 flex items-center gap-2 flex-wrap">
         <button type="button" className="btn btn-primary grow" onClick={handleSnap}>Snap QR</button>
-        {hasTorch && (
-          <button type="button" className="btn btn-secondary" onClick={toggleTorch}>{torchOn ? 'Torch Off' : 'Torch On'}</button>
-        )}
-        {devices.length > 1 && (
-          <button type="button" className="btn btn-secondary" onClick={switchCamera}>Switch camera</button>
-        )}
         <label className="btn btn-secondary">
           Upload QR image
           <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
         </label>
+        {hasTorch ? (
+          <button type="button" className="btn btn-secondary" onClick={toggleTorch}>{torchOn ? 'Torch Off' : 'Torch On'}</button>
+        ) : (
+          <button type="button" className="btn btn-secondary opacity-60 cursor-not-allowed" title="Not supported" disabled>
+            Torch
+          </button>
+        )}
+        {devices.length > 1 && (
+          <button type="button" className="btn btn-secondary" onClick={switchCamera}>Switch camera</button>
+        )}
       </div>
 
       {/* Status & errors */}
       {error && (
         <div className="mt-2 text-xs text-red-500">{error}</div>
+      )}
+      {torchError && (
+        <div className="mt-2 text-xs text-red-500">{torchError}</div>
       )}
       {permissionDenied && (
         <div className="mt-2 text-xs text-neutral-700 bg-yellow-50 border border-yellow-200 rounded p-2">
