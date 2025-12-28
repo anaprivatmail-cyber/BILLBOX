@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Bill, CreateBillInput } from '../types'
 import { Tabs } from '../../../components/ui/Tabs'
 import QRScanner from '../../../components/QRScanner'
-import { parseEPC } from '../../../lib/epc'
+import { parsePaymentQR } from '../../../lib/epc'
 
 interface Props {
   initial?: Bill | null
@@ -27,6 +27,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   // OCR placeholder: no state needed while feature is pending
   const [decodedText, setDecodedText] = useState<string | null>(null)
+  const [qrSuccess, setQrSuccess] = useState<boolean>(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -65,13 +66,17 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
 
   function onQrDecode(text: string) {
     setDecodedText(text)
-    const epc = parseEPC(text)
-    if (epc) {
-      if (epc.creditor_name) setCreditorName(epc.creditor_name)
-      if (epc.iban) setIban(epc.iban)
-      if (typeof epc.amount === 'number') setAmount(epc.amount)
-      if (epc.purpose) setPurpose(epc.purpose)
-      if (epc.reference) setReference(epc.reference)
+    const res = parsePaymentQR(text)
+    if (res) {
+      if (res.creditor_name) setCreditorName(res.creditor_name)
+      if (res.iban) setIban(res.iban)
+      if (typeof res.amount === 'number') setAmount(res.amount)
+      if (res.purpose) setPurpose(res.purpose)
+      if (res.reference) setReference(res.reference)
+      if (res.currency) setCurrency(res.currency)
+      setQrSuccess(true)
+    } else {
+      setQrSuccess(false)
     }
   }
 
@@ -137,6 +142,9 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
           {inputMethod === 'qr' && (
             <div className="mt-3 space-y-2">
               <QRScanner onDecode={onQrDecode} />
+              {qrSuccess && (
+                <div className="mt-2 text-xs text-green-700 bg-green-50 border border-green-200 rounded p-2">QR recognized. Fields prefilled.</div>
+              )}
               {decodedText && (
                 <div className="mt-2">
                   <div className="text-xs text-neutral-500 mb-1">Decoded text</div>
