@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1200" height="240" viewBox="0 0 1200 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>BILLBOX wordmark</title>
+  <rect width="1200" height="240" fill="none"/>
+  <text
+    x="0"
+    y="168"
+    fill="#0F172A"
+    font-family="Inter, system-ui, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Segoe UI', Roboto, Arial, sans-serif"
+    font-size="160"
+    font-weight="600"
+    letter-spacing="10"
+  >BILLBOX</text>
+</svg>

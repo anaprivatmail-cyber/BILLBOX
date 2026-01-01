@@ -4,35 +4,44 @@
     "slug": "billbox-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/logo/logo-icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/logo/logo-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
+    },
+    "updates": {
+      "enabled": false,
+      "checkAutomatically": "NEVER"
     },
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
         "NSCameraUsageDescription": "This app uses the camera to scan QR codes and capture invoice photos for OCR.",
-        "NSPhotoLibraryUsageDescription": "This app needs access to your photo library to select invoice images for OCR."
+        "NSPhotoLibraryUsageDescription": "This app needs access to your photo library to select invoice images for OCR.",
+        "NSUserNotificationUsageDescription": "BillBox schedules local notifications to remind you of upcoming bills and planned payments."
       }
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.READ_MEDIA_IMAGES"
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.POST_NOTIFICATIONS"
       ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker"
+    ]
   }
 }
