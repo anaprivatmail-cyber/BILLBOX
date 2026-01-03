@@ -29,9 +29,9 @@ export default function ProtectedRoute() {
           console.error('ProtectedRoute: getSession error', error)
         }
         setOk(Boolean(data?.session))
-      } catch (err: unknown) {
+      } catch (err: any) {
         if (!mounted) return
-        const msg = err instanceof Error && err.message ? err.message : 'Unknown error'
+        const msg = err?.message ? String(err.message) : 'Unknown error'
         setLastError(msg)
         console.error('ProtectedRoute: getSession exception', err)
       } finally {

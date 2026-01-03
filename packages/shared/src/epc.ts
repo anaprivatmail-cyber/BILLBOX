@@ -49,12 +49,12 @@ export function parseUPN(text: string): EPCResult | null {
     let amount: number | undefined
     let currency: string | undefined
     for (const l of lines) {
-      const eurMatch = l.match(/EUR\s*([0-9]+(?:[.,][0-9]{1,2})?)/i)
+      const eurMatch = l.match(/EUR\s*([0-9]+(?:[\.,][0-9]{1,2})?)/i)
       if (eurMatch) {
         const val = Number(eurMatch[1].replace(',', '.'))
         if (!Number.isNaN(val)) { amount = val; currency = 'EUR'; break }
       }
-      const amtMatch = l.match(/([0-9]+(?:[.,][0-9]{1,2})?)/)
+      const amtMatch = l.match(/([0-9]+(?:[\.,][0-9]{1,2})?)/)
       if (!amount && amtMatch) {
         const val = Number(amtMatch[1].replace(',', '.'))
         if (!Number.isNaN(val) && val > 0) amount = val
@@ -62,7 +62,7 @@ export function parseUPN(text: string): EPCResult | null {
     }
     let reference: string | undefined
     for (const l of lines) {
-      const m = l.match(/(SI\d{2}[0-9]{4,}|sklic:?\s*([A-Z0-9-/]+))/i)
+      const m = l.match(/(SI\d{2}[0-9]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
       if (m) { reference = (m[1] || m[2] || '').replace(/\s+/g, ''); if (reference) break }
     }
     let purpose: string | undefined

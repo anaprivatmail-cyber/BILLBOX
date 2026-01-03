@@ -15,424 +15,25 @@ import * as DocumentPicker from 'expo-document-picker'
 import * as FileSystem from 'expo-file-system'
 import * as Print from 'expo-print'
 import * as Sharing from 'expo-sharing'
-import * as Clipboard from 'expo-clipboard'
 import Constants from 'expo-constants'
 // @ts-ignore JSZip is provided by dependency
 import JSZip from 'jszip'
 import * as Notifications from 'expo-notifications'
-import QRCode from 'react-native-qrcode-svg'
 import { createClient, SupabaseClient, PostgrestError } from '@supabase/supabase-js'
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker'
 import { Screen, Surface, SectionHeader, AppButton, AppInput, SegmentedControl, Badge, EmptyState, InlineInfo, Disclosure, Divider } from './src/ui/components'
 import { colors as themeColors, layout as themeLayout, spacing as themeSpacing } from './src/ui/theme'
-import { UpgradeModalHost } from './src/ui/UpgradeModal'
-import { PlanCards } from './src/ui/PlanCards'
 import type { Lang } from './src/i18n'
 import { t, loadLang, saveLang } from './src/i18n'
 import type { InboxItem } from './src/inbox'
 import { listInbox, addToInbox, updateInboxItem, removeInboxItem, clearInbox } from './src/inbox'
 import { ensureNotificationConfig, requestPermissionIfNeeded, scheduleBillReminders, cancelBillReminders, snoozeBillReminder, scheduleGroupedPaymentReminder, scheduleWarrantyReminders, cancelWarrantyReminders } from './src/reminders'
-import { ENABLE_PUSH_NOTIFICATIONS, PUBLIC_SITE_URL, ENABLE_IAP, ENABLE_AI } from './src/env'
+import { ENABLE_PUSH_NOTIFICATIONS, PUBLIC_SITE_URL, ENABLE_IAP } from './src/env'
 import type { Space, SpacePlan } from './src/spaces'
-import { ensureDefaults as ensureSpacesDefaults, upsertSpace, removeSpace, loadCurrentSpaceId, saveCurrentSpaceId, loadSpaces, saveSpaces } from './src/spaces'
+import { ensureDefaults as ensureSpacesDefaults, upsertSpace, removeSpace, loadCurrentSpaceId, saveCurrentSpaceId, loadSpaces } from './src/spaces'
 import { showUpgradeAlert, type EntitlementsSnapshot, type PlanId, useEntitlements, EntitlementsProvider } from './src/entitlements'
-import { PLAN_RULES, canExportFormat, canUseAnalytics, canUseReminders, planLabel as planLabelFromRules, planPrice as planPriceFromRules } from './src/plan'
 
 const BRAND_WORDMARK = require('./assets/logo/logo-wordmark.png')
-const BRAND_ICON = require('./assets/logo/logo-icon.png')
-const BRAND_COMBINED = require('./assets/logo/logo-combined.png')
-
-const LS_PREVIEW_MODE = 'billbox.mobile.previewMode'
-const LS_PREVIEW_PLAN = 'billbox.mobile.previewPlan'
-
-type PreviewModeContextValue = {
-  enabled: boolean
-  exit: () => Promise<void>
-}
-
-const PreviewModeContext = React.createContext<PreviewModeContextValue | undefined>(undefined)
-
-function usePreviewModeContext(): PreviewModeContextValue {
-  const ctx = useContext(PreviewModeContext)
-  if (!ctx) return { enabled: false, exit: async () => {} }
-  return ctx
-}
-
-// --- Ask BillBox (AI mini-chat) ---
-type AskBillBoxAction = { label: string; route?: string; params?: any; kind?: 'upgrade' | 'info' }
-type AskBillBoxMessage = { id: string; role: 'user' | 'assistant'; text: string; actions?: AskBillBoxAction[] }
-
-type AskBillBoxContextValue = {
-  open: () => void
-}
-
-const AskBillBoxContext = React.createContext<AskBillBoxContextValue | undefined>(undefined)
-
-function useAskBillBox(): AskBillBoxContextValue {
-  const ctx = useContext(AskBillBoxContext)
-  return ctx || { open: () => {} }
-}
-
-function AskBillBoxProvider({ children, navRef, lang }: { children: React.ReactNode; navRef: React.RefObject<NavigationContainerRef<any>>; lang: Lang }) {
-  // Feature flag: if AI is disabled, render nothing AI-related.
-  // (No local tips UI either, per spec.)
-  if (!ENABLE_AI) {
-    return <>{children}</>
-  }
-
-  const { space, spaceId } = useActiveSpace()
-  const { snapshot: entitlements } = useEntitlements()
-  const [visible, setVisible] = useState(false)
-  const [messages, setMessages] = useState<AskBillBoxMessage[]>([])
-  const [draft, setDraft] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [stats, setStats] = useState<any>(null)
-
-  const functionsBase = getFunctionsBase()
-  const planRules = (PLAN_RULES as any)?.[entitlements.plan] ?? (PLAN_RULES as any)?.free
-  const serverAllowed = ENABLE_AI && planRules.ai.mode === 'server' && !!functionsBase
-
-  const refreshStats = useCallback(async () => {
-    try {
-      const s = getSupabase()
-      let bills: any[] = []
-      let warranties: any[] = []
-      if (s) {
-        const b = await listBills(s, spaceId)
-        bills = b.data || []
-        const w = await listWarranties(s, spaceId)
-        warranties = w.data || []
-      } else {
-        bills = (await loadLocalBills(spaceId)) as any
-        warranties = (await loadLocalWarranties(spaceId)) as any
-      }
-
-      const today = new Date()
-      const todayIso = today.toISOString().slice(0, 10)
-      const inDays = (n: number) => {
-        const d = new Date()
-        d.setDate(d.getDate() + n)
-        return d.toISOString().slice(0, 10)
-      }
-      const due7 = inDays(7)
-      const due30 = inDays(30)
-
-      const unpaid = bills.filter((b) => b.status === 'unpaid')
-      const unpaidDueToday = unpaid.filter((b) => b.due_date && String(b.due_date).slice(0, 10) <= todayIso)
-      const unpaidDue7 = unpaid.filter((b) => b.due_date && String(b.due_date).slice(0, 10) <= due7)
-      const unpaidDue30 = unpaid.filter((b) => b.due_date && String(b.due_date).slice(0, 10) <= due30)
-
-      setStats({
-        plan: entitlements.plan,
-        payer: space?.name || payerLabelFromSpaceId(spaceId),
-        unpaidCount: unpaid.length,
-        dueTodayCount: unpaidDueToday.length,
-        due7Count: unpaidDue7.length,
-        due30Count: unpaidDue30.length,
-        warrantyCount: warranties.length,
-        exportsEnabled: entitlements.exportsEnabled,
-        ocrQuotaMonthly: entitlements.ocrQuotaMonthly,
-      })
-    } catch {
-      setStats({ plan: entitlements.plan })
-    }
-  }, [entitlements.exportsEnabled, entitlements.ocrQuotaMonthly, entitlements.plan, space?.name, spaceId])
-
-  const open = useCallback(() => {
-    setVisible(true)
-    refreshStats()
-    if (messages.length === 0) {
-      setMessages([
-        {
-          id: `m_${Date.now()}`,
-          role: 'assistant',
-          text: 'Ask about bills, warranties, exports, reminders, and next steps. I can suggest steps, but I never complete payments for you.',
-        },
-      ])
-    }
-  }, [messages.length, refreshStats])
-
-  const close = useCallback(() => setVisible(false), [])
-
-  function pushAssistant(text: string, actions?: AskBillBoxAction[]) {
-    setMessages((prev) => [...prev, { id: `a_${Date.now()}_${Math.random().toString(16).slice(2)}`, role: 'assistant', text, actions }])
-  }
-
-  async function bumpCounter(kind: 'localDaily' | 'serverMonthly', userId: string) {
-    const now = new Date()
-    const day = now.toISOString().slice(0, 10)
-    const period = now.toISOString().slice(0, 7)
-    const key = kind === 'localDaily' ? `billbox.ai.localDaily.${userId}.${day}` : `billbox.ai.serverMonthly.${userId}.${period}`
-    const raw = await AsyncStorage.getItem(key)
-    const used = raw ? Number(raw) : 0
-    const next = Number.isFinite(used) ? used + 1 : 1
-    await AsyncStorage.setItem(key, String(next))
-    return next
-  }
-
-  async function getCounter(kind: 'localDaily' | 'serverMonthly', userId: string) {
-    const now = new Date()
-    const day = now.toISOString().slice(0, 10)
-    const period = now.toISOString().slice(0, 7)
-    const key = kind === 'localDaily' ? `billbox.ai.localDaily.${userId}.${day}` : `billbox.ai.serverMonthly.${userId}.${period}`
-    const raw = await AsyncStorage.getItem(key)
-    const used = raw ? Number(raw) : 0
-    return Number.isFinite(used) ? used : 0
-  }
-
-  function localAssistantReply(message: string) {
-    const m = message.toLowerCase()
-
-    if (m.includes('next') || m.includes('what should i do')) {
-      const unpaid = stats?.unpaidCount ?? 0
-      const due7 = stats?.due7Count ?? 0
-      if (unpaid === 0) {
-        return {
-          text: 'You’re in good shape: no unpaid bills right now. Next: scan/upload any new bills, and make sure reminders are enabled so you don’t miss due dates.',
-          actions: [{ label: 'Add a bill', route: 'Scan' }, { label: 'Check reminders', route: 'Settings' }],
-        }
-      }
-      if (due7 > 0) {
-        return {
-          text: `You have ${unpaid} unpaid bill(s), with ${due7} due within 7 days. Next: review Pay and pay the most urgent ones first (BillBox will only prepare steps; you’ll confirm in your bank app).`,
-          actions: [{ label: 'Open Pay', route: 'Pay' }, { label: 'View bills', route: 'Bills' }],
-        }
-      }
-      return {
-        text: `You have ${unpaid} unpaid bill(s). Next: review Bills, attach originals, and pay via your bank app when ready.`,
-        actions: [{ label: 'View bills', route: 'Bills' }, { label: 'Open Pay', route: 'Pay' }],
-      }
-    }
-
-    if (m.includes('add a bill') || m.includes('how to add')) {
-      return {
-        text: 'Go to Scan. Scan the QR or import a photo/PDF. Review the draft, attach the original, then Save. Use “Already paid (archive)” for receipts you don’t need to pay.',
-        actions: [{ label: 'Go to Scan', route: 'Scan' }],
-      }
-    }
-
-    if (m.includes('pay') || m.includes('bank')) {
-      return {
-        text: 'BillBox never pays a bill automatically. In Pay, select bills and copy/open payment details, then confirm the payment in your bank app. Always verify IBAN, amount, and reference.',
-        actions: [{ label: 'Open Pay', route: 'Pay' }],
-      }
-    }
-
-    if (m.includes('export')) {
-      const enabled = !!stats?.exportsEnabled
-      if (!enabled) {
-        return {
-          text: 'Exports are locked on your current plan. You can still manage bills locally; upgrade to unlock exports (CSV/PDF/ZIP/JSON).',
-          actions: [{ label: 'Upgrade', kind: 'upgrade' }, { label: 'Learn exports', route: 'Settings' }],
-        }
-      }
-      return {
-        text: 'Exports let you download your bills/warranties in formats like CSV/PDF/ZIP/JSON. Open Exports, pick a format, then share or save the file.',
-        actions: [{ label: 'Open Exports', route: 'Exports' }],
-      }
-    }
-
-    if (m.includes('locked') || m.includes('why')) {
-      return {
-        text: 'Some features are limited by your subscription plan (e.g., exports, payers, quotas). If something is locked, upgrading will unlock it immediately.',
-        actions: [{ label: 'Upgrade', kind: 'upgrade' }],
-      }
-    }
-
-    return {
-      text: 'I can help with bills, warranties, reminders, exports, and what to do next. Try a quick question like “What should I do next?”',
-      actions: [],
-    }
-  }
-
-  const send = useCallback(async (text: string) => {
-    const message = String(text || '').trim()
-    if (!message || busy) return
-
-    setMessages((prev) => [...prev, { id: `u_${Date.now()}_${Math.random().toString(16).slice(2)}`, role: 'user', text: message }])
-    setDraft('')
-    setBusy(true)
-
-    const s = getSupabase()
-    let userId = 'local'
-    try {
-      const u = s ? await s.auth.getUser() : null
-      if (u?.data?.user?.id) userId = u.data.user.id
-    } catch {}
-
-    try {
-      // Free/local: small daily cap.
-      if (!serverAllowed) {
-        const dailyCap = 5
-        const used = await getCounter('localDaily', userId)
-        if (used >= dailyCap) {
-          pushAssistant('You’ve reached today’s free “Ask BillBox” tip limit. Upgrade for more AI help, or try again tomorrow.', [
-            { label: 'Upgrade', kind: 'upgrade' },
-          ])
-          return
-        }
-        await bumpCounter('localDaily', userId)
-        const reply = localAssistantReply(message)
-        pushAssistant(reply.text, reply.actions)
-        return
-      }
-
-      // Server mode: monthly cap from plan rules.
-      const quota = planRules.ai.monthlyQuota
-      const usedMonthly = await getCounter('serverMonthly', userId)
-      if (usedMonthly >= quota) {
-        pushAssistant('You’ve reached your AI monthly quota for this plan. You can still use local tips, or upgrade for a higher quota.', [
-          { label: 'Use local tips', kind: 'info' },
-          { label: 'Upgrade', kind: 'upgrade' },
-        ])
-        const reply = localAssistantReply(message)
-        pushAssistant(reply.text, reply.actions)
-        return
-      }
-
-      await bumpCounter('serverMonthly', userId)
-
-      const resp = await fetch(`${functionsBase}/.netlify/functions/ai-assistant`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message,
-          context: {
-            locale: lang,
-            plan: entitlements.plan,
-            activePayerId: spaceId,
-            summaryStats: stats,
-            lastMessages: messages.slice(-6).map((m) => ({ role: m.role, text: m.text })),
-          },
-        }),
-      })
-
-      if (!resp.ok) throw new Error('AI request failed')
-      const json = await resp.json().catch(() => null)
-      const outText = json?.message || 'Here are a few helpful next steps.'
-      const actions: AskBillBoxAction[] = Array.isArray(json?.suggestedActions)
-        ? json.suggestedActions.map((a: any) => ({ label: a.label, route: a.route, params: a.params || null }))
-        : []
-      pushAssistant(outText, actions)
-    } catch (e: any) {
-      const reply = localAssistantReply(message)
-      pushAssistant(`${reply.text}\n\n(Using local tips — server AI is unavailable right now.)`, reply.actions)
-    } finally {
-      setBusy(false)
-    }
-  }, [busy, entitlements.plan, functionsBase, lang, localAssistantReply, messages, planRules.ai.monthlyQuota, serverAllowed, spaceId, stats])
-
-  const value = useMemo(() => ({ open }), [open])
-
-  return (
-    <AskBillBoxContext.Provider value={value}>
-      {children}
-
-      {!visible ? (
-        <Pressable onPress={open} style={styles.fab} hitSlop={12}>
-          <Surface elevated padded={false} style={styles.fabButton}>
-            <Ionicons name="chatbubble-ellipses-outline" size={22} color="#FFFFFF" />
-          </Surface>
-        </Pressable>
-      ) : null}
-
-      <Modal visible={visible} transparent animationType="fade" onRequestClose={close}>
-        <Pressable style={styles.askOverlay} onPress={close}>
-          <Pressable style={styles.askSheet} onPress={() => {}}>
-            <View style={styles.askHeaderRow}>
-              <View style={styles.askHeaderIcon}>
-                <Ionicons name="chatbubble-ellipses-outline" size={18} color={themeColors.primary} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.askTitle}>Ask BillBox</Text>
-                <Text style={styles.askSubtitle}>Ask about bills, warranties, exports, reminders, and next steps.</Text>
-              </View>
-            </View>
-
-            <View style={styles.askChipsRow}>
-              {[
-                'What should I do next?',
-                'How to add a bill?',
-                'How to pay via bank app?',
-                'How do exports work?',
-                'Why is feature locked?',
-              ].map((q) => (
-                <Pressable key={q} onPress={() => send(q)} style={styles.askChip}>
-                  <Text style={styles.askChipText}>{q}</Text>
-                </Pressable>
-              ))}
-            </View>
-
-            <ScrollView style={styles.askMessages} contentContainerStyle={{ paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
-              {messages.map((m) => (
-                <View key={m.id} style={[styles.askMsgRow, m.role === 'user' ? styles.askMsgRowUser : styles.askMsgRowAssistant]}>
-                  <View style={[styles.askBubble, m.role === 'user' ? styles.askBubbleUser : styles.askBubbleAssistant]}>
-                    <Text style={[styles.askBubbleText, m.role === 'user' ? styles.askBubbleTextUser : styles.askBubbleTextAssistant]}>{m.text}</Text>
-                  </View>
-                  {m.actions?.length ? (
-                    <View style={styles.askActionsRow}>
-                      {m.actions.slice(0, 3).map((a, idx) => (
-                        <Pressable
-                          key={`${m.id}_${idx}`}
-                          onPress={() => {
-                            if (a.kind === 'upgrade') {
-                              close()
-                              showUpgradeAlert('upgrade')
-                              return
-                            }
-                            if (a.route) {
-                              close()
-                              navRef.current?.navigate(a.route, a.params || undefined)
-                            }
-                          }}
-                          style={styles.askActionBtn}
-                        >
-                          <Text style={styles.askActionBtnText}>{a.label}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  ) : null}
-                </View>
-              ))}
-            </ScrollView>
-
-            <View style={styles.askInfoRow}>
-              <Ionicons name="information-circle-outline" size={14} color={themeColors.textMuted} />
-              <Text style={styles.askInfoText}>AI suggestions may be imperfect. Always verify payment details.</Text>
-            </View>
-
-            <View style={styles.askInputRow}>
-              <TextInput
-                value={draft}
-                onChangeText={setDraft}
-                placeholder="Type a question…"
-                placeholderTextColor={themeColors.textMuted}
-                style={styles.askInput}
-              />
-              <Pressable
-                onPress={() => send(draft)}
-                disabled={busy}
-                style={[styles.askSendBtn, busy ? { opacity: 0.6 } : null]}
-              >
-                {busy ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="send-outline" size={18} color="#FFFFFF" />}
-              </Pressable>
-            </View>
-
-            <View style={{ marginTop: themeSpacing.sm }}>
-              <AppButton label="Close" variant="ghost" onPress={close} />
-            </View>
-          </Pressable>
-        </Pressable>
-      </Modal>
-    </AskBillBoxContext.Provider>
-  )
-}
-
-let PREVIEW_MODE = false
-
-function setPreviewModeEnabled(enabled: boolean) {
-  PREVIEW_MODE = enabled
-}
 
 function payerLabelFromSpaceId(spaceId: string | null | undefined): 'Payer 1' | 'Payer 2' {
   return spaceId === 'personal2' ? 'Payer 2' : 'Payer 1'
@@ -451,11 +52,15 @@ async function removeAllLocalKeysWithPrefix(prefix: string): Promise<void> {
 }
 
 function planLabel(plan: PlanId): string {
-  return planLabelFromRules(plan)
+  if (plan === 'pro') return 'Pro'
+  if (plan === 'basic') return 'Basic'
+  return 'Free'
 }
 
 function planPrice(plan: PlanId): string {
-  return planPriceFromRules(plan)
+  if (plan === 'pro') return '€4 / month or €38 / year'
+  if (plan === 'basic') return '€2.20 / month or €20 / year'
+  return '€0'
 }
 
 const isIOS = Platform.OS === 'ios'
@@ -563,7 +168,6 @@ function coerceBool(val: unknown): boolean {
 
 // --- Supabase helpers (mobile) ---
 function getSupabase(): SupabaseClient | null {
-  if (PREVIEW_MODE) return null
   const url = process.env.EXPO_PUBLIC_SUPABASE_URL
   const anon = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY
   if (!url || !anon) return null
@@ -1030,7 +634,6 @@ type SpaceContextValue = {
   rename: (id: string, name: string) => Promise<void>
   updatePlan: (id: string, plan: SpacePlan) => Promise<void>
   remove: (id: string) => Promise<void>
-  reset: (items: Space[], currentId: string) => Promise<void>
 }
 
 const SpaceContext = React.createContext<SpaceContextValue | undefined>(undefined)
@@ -1158,15 +761,6 @@ function SpaceProvider({ children }: { children: React.ReactNode }) {
     ])
   }, [spaces])
 
-  const resetHandler = useCallback(async (items: Space[], currentId: string) => {
-    try {
-      await saveSpaces(items)
-      await saveCurrentSpaceId(currentId)
-    } catch {}
-    setSpaces(items)
-    setSpaceId(currentId)
-  }, [])
-
   const current = spaces.find((s) => s.id === spaceId) || null
 
   const value: SpaceContextValue = {
@@ -1179,7 +773,6 @@ function SpaceProvider({ children }: { children: React.ReactNode }) {
     rename: renameHandler,
     updatePlan: updatePlanHandler,
     remove: removeHandler,
-    reset: resetHandler,
   }
 
   return <SpaceContext.Provider value={value}>{children}</SpaceContext.Provider>
@@ -1192,7 +785,6 @@ function BillDetailsScreen() {
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
-  const { snapshot: entitlements } = useEntitlements()
 
   useEffect(() => { (async ()=>{
     if (!bill || spaceLoading || !space) return
@@ -1328,26 +920,6 @@ function BillDetailsScreen() {
 
                   const s = getSupabase()
                   let createdId: string | null = null
-
-                  if (entitlements.plan === 'free') {
-                    try {
-                      let currentCount = 0
-                      if (s) {
-                        let q = s.from('warranties').select('id', { count: 'exact', head: true })
-                        if (spaceId) q = q.eq('space_id', spaceId)
-                        const { count } = await q
-                        currentCount = typeof count === 'number' ? count : 0
-                      } else {
-                        const locals = await loadLocalWarranties(spaceId)
-                        currentCount = Array.isArray(locals) ? locals.length : 0
-                      }
-                      if (currentCount >= 5) {
-                        showUpgradeAlert('warranties_limit')
-                        return
-                      }
-                    } catch {}
-                  }
-
                   if (s) {
                     const { data, error } = await createWarranty(s, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id, space_id: spaceId })
                     if (error) { Alert.alert('Warranty error', error.message); return }
@@ -1374,7 +946,7 @@ function BillDetailsScreen() {
             <AppButton
               label="Schedule defaults"
               variant="secondary"
-              iconName={'alarm-outline'}
+              iconName="alarm-outline"
               onPress={async ()=>{
                 if (!bill.due_date) { Alert.alert('Missing due date', 'Add a due date to schedule reminders.'); return }
                 await ensureNotificationConfig()
@@ -1522,12 +1094,11 @@ type AuthFeedback = {
 
 type LoginScreenProps = {
   onLoggedIn: () => void
-  onEnterPreviewMode: () => void
   lang: Lang
   setLang: (value: Lang) => void
 }
 
-function LoginScreen({ onLoggedIn, onEnterPreviewMode, lang, setLang }: LoginScreenProps) {
+function LoginScreen({ onLoggedIn, lang, setLang }: LoginScreenProps) {
   const supabase = useMemo(() => getSupabase(), [])
   const [mode, setMode] = useState<LoginMode>('signIn')
   const [email, setEmail] = useState('')
@@ -1540,15 +1111,6 @@ function LoginScreen({ onLoggedIn, onEnterPreviewMode, lang, setLang }: LoginScr
   const supabaseRedirect = process.env.EXPO_PUBLIC_SUPABASE_REDIRECT_URL
   const googleEnabled = Boolean(supabase)
   const appleEnabled = Platform.OS === 'ios' && Boolean(supabase)
-
-  const handleEnterPreview = useCallback(async () => {
-    try {
-      setPreviewModeEnabled(true)
-      await AsyncStorage.setItem(LS_PREVIEW_MODE, '1')
-    } catch {}
-    onEnterPreviewMode()
-    onLoggedIn()
-  }, [onEnterPreviewMode, onLoggedIn])
 
   useEffect(() => {
     let mounted = true
@@ -1799,7 +1361,10 @@ function LoginScreen({ onLoggedIn, onEnterPreviewMode, lang, setLang }: LoginScr
         <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
           <View style={styles.loginWrapper}>
             <View style={styles.loginHeader}>
-              <Image source={BRAND_COMBINED} style={styles.brandCombinedLoginHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />
+              <View style={styles.loginLogo}>
+                <Ionicons name="cube-outline" size={28} color={themeColors.primary} />
+              </View>
+              <Text style={styles.loginTitle}>{t(lang, 'app_title')}</Text>
               <Text style={styles.loginSubtitle}>{t(lang, 'login_tagline')}</Text>
             </View>
 
@@ -1919,13 +1484,6 @@ function LoginScreen({ onLoggedIn, onEnterPreviewMode, lang, setLang }: LoginScr
                 onPress={onLoggedIn}
               />
             )}
-
-            <AppButton
-              label="Preview / Guest mode"
-              variant="outline"
-              iconName="eye-outline"
-              onPress={handleEnterPreview}
-            />
 
             <Surface elevated style={styles.languageCard}>
               <Text style={styles.languageTitle}>{t(lang, 'language')}</Text>
@@ -2135,7 +1693,7 @@ function ScanBillScreen() {
       setUseDataActive(true)
       setCameraVisible(false)
       setTorch('off')
-      Alert.alert('OCR extracted', `${summary}\n\nThe selected file will be attached on save.`)
+      Alert.alert('OCR extracted', `${summary}\n\nThe selected image will be attached on save.`)
     } catch (e: any) {
       const msg = e?.message || 'OCR failed'
       setOcrError(msg)
@@ -2176,28 +1734,19 @@ function ScanBillScreen() {
   }
 
   const handleSaveBill = async () => {
-    const supplierTrimmed = supplier.trim()
-    const currencyTrimmed = currency.trim()
-    const parsedAmt = Number(String(amountStr).replace(',', '.'))
-
-    if (!archiveOnly) {
-      if (!supplierTrimmed) {
-        Alert.alert('Supplier required', 'Enter the supplier or issuer of the bill.')
-        return
-      }
-      if (!currencyTrimmed) {
-        Alert.alert('Currency required', 'Enter a currency (for example EUR).')
-        return
-      }
-      if (Number.isNaN(parsedAmt) || parsedAmt <= 0) {
-        Alert.alert('Invalid amount', 'Provide a numeric amount greater than 0.')
-        return
-      }
+    if (!supplier.trim()) {
+      Alert.alert('Supplier required', 'Enter the supplier or issuer of the bill.')
+      return
     }
-
-    const effectiveSupplier = supplierTrimmed || 'Archived bill'
-    const effectiveCurrency = currencyTrimmed || 'EUR'
-    const effectiveAmount = !Number.isNaN(parsedAmt) && parsedAmt > 0 ? parsedAmt : 0
+    if (!currency.trim()) {
+      Alert.alert('Currency required', 'Enter a currency (for example EUR).')
+      return
+    }
+    const amt = Number(String(amountStr).replace(',', '.'))
+    if (Number.isNaN(amt) || amt <= 0) {
+      Alert.alert('Invalid amount', 'Provide a numeric amount greater than 0.')
+      return
+    }
 
     const trimmedDue = dueDate.trim()
     const effectiveDueDate = trimmedDue || new Date().toISOString().slice(0, 10)
@@ -2239,10 +1788,8 @@ function ScanBillScreen() {
         try {
           let currentCount = 0
           if (s) {
-            let q = s.from('bills').select('id', { count: 'exact', head: true })
-            if (spaceId) q = q.eq('space_id', spaceId)
-            const { count } = await q
-            currentCount = typeof count === 'number' ? count : 0
+            const { data } = await s.from('bills').select('id')
+            currentCount = Array.isArray(data) ? data.length : 0
           } else {
             const locals = await loadLocalBills(spaceId)
             currentCount = Array.isArray(locals) ? locals.length : 0
@@ -2257,12 +1804,12 @@ function ScanBillScreen() {
       let savedId: string | null = null
       if (s) {
         const { data, error } = await createBill(s, {
-          supplier: effectiveSupplier,
-          amount: effectiveAmount,
-          currency: effectiveCurrency,
+          supplier: supplier.trim(),
+          amount: amt,
+          currency: currency.trim() || 'EUR',
           due_date: effectiveDueDate,
           status: archiveOnly ? 'archived' : 'unpaid',
-          creditor_name: (creditorName.trim() || supplierTrimmed) || null,
+          creditor_name: (creditorName.trim() || supplier.trim()) || null,
           iban: iban.trim() || null,
           reference: reference.trim() || null,
           purpose: purpose.trim() || null,
@@ -2276,12 +1823,12 @@ function ScanBillScreen() {
         savedId = data?.id || null
       } else {
         const local = await addLocalBill(spaceId, {
-          supplier: effectiveSupplier,
-          amount: effectiveAmount,
-          currency: effectiveCurrency,
+          supplier: supplier.trim(),
+          amount: amt,
+          currency: currency.trim() || 'EUR',
           due_date: effectiveDueDate,
           status: archiveOnly ? 'archived' : 'unpaid',
-          creditor_name: (creditorName.trim() || supplierTrimmed) || null,
+          creditor_name: (creditorName.trim() || supplier.trim()) || null,
           iban: iban.trim() || null,
           reference: reference.trim() || null,
           purpose: purpose.trim() || null,
@@ -2323,12 +1870,20 @@ function ScanBillScreen() {
   return (
     <Screen>
       <View style={styles.pageStack}>
-        <SectionHeader
-          title="Scan"
-          leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-        />
+        <SectionHeader title="Scan" />
 
-
+        {spacesCtx.spaces.length > 1 ? (
+          <Surface elevated>
+            <SectionHeader title="Payer" />
+            <SegmentedControl
+              value={spacesCtx.current?.id || spaceId || ''}
+              onChange={(id) => { spacesCtx.setCurrent(id) }}
+              options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
+              style={{ marginTop: themeSpacing.xs }}
+            />
+            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Bills you save are assigned to the active payer.</Text>
+          </Surface>
+        ) : null}
 
         <Text style={[styles.mutedText, { marginBottom: themeSpacing.xs }]}>
           Scan or import a bill, review the draft below, then save.
@@ -2464,35 +2019,30 @@ function ScanBillScreen() {
           <View style={styles.formSection}>
             <Text style={styles.formSectionTitle}>Summary</Text>
             <View style={styles.formStack}>
-              <AppInput placeholder={archiveOnly ? 'Supplier' : 'Supplier *'} value={supplier} onChangeText={setSupplier} />
+              <AppInput placeholder="Supplier" value={supplier} onChangeText={setSupplier} />
               <View style={styles.formRow}>
-                <AppInput placeholder={archiveOnly ? 'Amount' : 'Amount *'} value={amountStr} onChangeText={setAmountStr} keyboardType="numeric" style={styles.flex1} />
-                <AppInput placeholder={archiveOnly ? 'Currency' : 'Currency *'} value={currency} onChangeText={setCurrency} style={styles.currencyInput} />
+                <AppInput placeholder="Amount" value={amountStr} onChangeText={setAmountStr} keyboardType="numeric" style={styles.flex1} />
+                <AppInput placeholder="Currency" value={currency} onChangeText={setCurrency} style={styles.currencyInput} />
               </View>
 
-              <View style={styles.segmentWrap}>
-                <View style={styles.inboxFilterRow}>
-                  <TouchableOpacity
-                    style={[styles.secondaryBtn, !archiveOnly ? styles.secondaryBtnActive : null]}
-                    onPress={() => setArchiveOnly(false)}
-                  >
-                    <Text style={[styles.secondaryBtnText, !archiveOnly ? styles.secondaryBtnTextActive : null]}>To pay</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.secondaryBtn, archiveOnly ? styles.secondaryBtnActive : null]}
-                    onPress={() => setArchiveOnly(true)}
-                  >
-                    <Text style={[styles.secondaryBtnText, archiveOnly ? styles.secondaryBtnTextActive : null]}>Already paid (archive)</Text>
-                  </TouchableOpacity>
-                </View>
-                <Text style={styles.helperText}>Archived bills are treated as paid and won’t appear in Pay.</Text>
+              <View style={styles.filterToggle}>
+                <Switch value={archiveOnly} onValueChange={setArchiveOnly} />
+                <Text style={styles.toggleLabel}>Archive / already paid (no payment)</Text>
               </View>
+              {archiveOnly && (
+                <InlineInfo
+                  tone="info"
+                  iconName="archive-outline"
+                  message="Archived bills are excluded from Pay by default. Payment fields and attachments become optional."
+                  style={styles.formNotice}
+                />
+              )}
 
               <View style={{ gap: themeSpacing.xs }}>
                 <Text style={styles.formSectionTitle}>Dates</Text>
                 <View style={styles.formRow}>
                   <AppInput
-                    placeholder={archiveOnly ? 'Due date (YYYY-MM-DD)' : 'Due date (YYYY-MM-DD) *'}
+                    placeholder="Due date (YYYY-MM-DD)"
                     value={dueDate}
                     onChangeText={setDueDate}
                     hint="Due date (used for reminders and overdue status)."
@@ -2529,10 +2079,10 @@ function ScanBillScreen() {
           <View style={styles.formSection}>
             <Text style={styles.formSectionTitle}>Payment details</Text>
             <View style={styles.formStack}>
-              <AppInput placeholder={archiveOnly ? 'Creditor' : 'Creditor *'} value={creditorName} onChangeText={setCreditorName} />
-              <AppInput placeholder={archiveOnly ? 'IBAN' : 'IBAN *'} value={iban} onChangeText={setIban} />
-              <AppInput placeholder={archiveOnly ? 'Reference' : 'Reference *'} value={reference} onChangeText={setReference} />
-              <AppInput placeholder={archiveOnly ? 'Purpose' : 'Purpose *'} value={purpose} onChangeText={setPurpose} multiline />
+              <AppInput placeholder="Creditor" value={creditorName} onChangeText={setCreditorName} />
+              <AppInput placeholder="IBAN" value={iban} onChangeText={setIban} />
+              <AppInput placeholder="Reference" value={reference} onChangeText={setReference} />
+              <AppInput placeholder="Purpose" value={purpose} onChangeText={setPurpose} multiline />
             </View>
           </View>
 
@@ -2730,7 +2280,7 @@ function InboxScreen() {
           <FlatList
             data={filtered}
             keyExtractor={(item) => item.id}
-            ListEmptyComponent={<Text>No documents yet. Share a PDF, image, or email attachment to your inbox.</Text>}
+            ListEmptyComponent={<Text>No documents yet. Share a PDF, image, or email attachment to BillBox.</Text>}
             renderItem={({ item }) => (
               <Surface elevated style={[styles.card, highlightId === item.id ? styles.inboxItemHighlighted : null]}>
                 <Text style={styles.cardTitle}>{item.name}</Text>
@@ -3022,7 +2572,8 @@ function BillsListScreen() {
   const renderEmpty = useCallback(() => {
     if (loadingBills) return null
     return (
-      <View style={styles.emptyStateWrapper}>
+      <View style={styles.brandEmptyWrap}>
+        <Image source={BRAND_WORDMARK} style={styles.wordmarkEmpty} resizeMode="contain" accessibilityLabel="BILLBOX" />
         <EmptyState
           iconName="document-text-outline"
           title="No bills found"
@@ -3132,10 +2683,7 @@ function BillsListScreen() {
   return (
     <Screen scroll={false}>
       <View style={styles.pageStack}>
-        <SectionHeader
-          title="Bills"
-          leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-        />
+        <SectionHeader title="Bills" />
 
         {!supabase && (
           <InlineInfo
@@ -3325,7 +2873,6 @@ function BillsListScreen() {
 
 function HomeScreen() {
   const navigation = useNavigation<any>()
-  const { open: openAskBillBox } = useAskBillBox()
   const { space, spaceId, loading } = useActiveSpace()
   const spacesCtx = useSpacesContext()
   const { snapshot: entitlements } = useEntitlements()
@@ -3335,6 +2882,7 @@ function HomeScreen() {
   const [needsPayerName, setNeedsPayerName] = useState(false)
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
+  const [upgradeModalVisible, setUpgradeModalVisible] = useState(false)
   const [renameVisible, setRenameVisible] = useState(false)
   const [renameDraft, setRenameDraft] = useState('')
 
@@ -3394,7 +2942,7 @@ function HomeScreen() {
 
   const handlePayerChange = useCallback(async (id: string) => {
     if (id === '__locked_payer2__') {
-      showUpgradeAlert('space_limit')
+      setUpgradeModalVisible(true)
       return
     }
     if (id === '__create_payer2__') {
@@ -3418,6 +2966,17 @@ function HomeScreen() {
     })
     setCreatingPayer2(false)
   }, [payer2NameDraft, spacesCtx])
+
+  const planSavings = useMemo(() => {
+    const basicMonthly = 2.2
+    const basicYearly = 20
+    const proMonthly = 4
+    const proYearly = 38
+    return {
+      basic: Math.max(0, Math.round((basicMonthly * 12 - basicYearly) * 100) / 100),
+      pro: Math.max(0, Math.round((proMonthly * 12 - proYearly) * 100) / 100),
+    }
+  }, [])
 
   useEffect(() => {
     (async () => {
@@ -3483,10 +3042,8 @@ function HomeScreen() {
     <Screen>
       <View style={[styles.pageStack, { gap: themeSpacing.xs }]}>
         <Surface elevated padded={false} style={[styles.card, styles.homeSummaryCard]}>
-          <View style={[styles.screenHeader, styles.homeScreenHeader]}>
-            <View style={styles.homeHeaderLeft}>
-              <Image source={BRAND_ICON} style={styles.brandIconHomeHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />
-              <View style={styles.screenHeaderText}>
+          <View style={styles.screenHeader}>
+            <View style={styles.screenHeaderText}>
               <Pressable
                 onPress={() => {
                   setRenameDraft(space?.name || '')
@@ -3498,24 +3055,35 @@ function HomeScreen() {
               <Text style={styles.screenHeaderSubtitle}>
                 {payerLabelFromSpaceId(space?.id)} • {planLabel(entitlements.plan)}
               </Text>
-              </View>
             </View>
             {space?.plan === 'free' ? (
               <View style={styles.screenHeaderTrailing}>
-                <View style={styles.homeHeaderTrailingRow}>
-                  <AppButton
-                    label="Upgrade"
-                    variant="secondary"
-                    iconName="arrow-up-circle-outline"
-                    onPress={() => showUpgradeAlert('upgrade')}
-                  />
-                </View>
+                <AppButton
+                  label="Upgrade"
+                  variant="secondary"
+                  iconName="arrow-up-circle-outline"
+                  onPress={() => {
+                    if (IS_EXPO_GO) {
+                      Alert.alert(
+                        'Upgrade',
+                        'Purchases are disabled in Expo Go preview. Use an EAS dev/prod build with EXPO_PUBLIC_ENABLE_IAP=true to enable real in-app purchases.'
+                      )
+                      return
+                    }
+                    navigation.navigate('Payments')
+                  }}
+                />
               </View>
-            ) : (
+            ) : spacesCtx.spaces.length > 1 ? (
               <View style={styles.screenHeaderTrailing}>
-                <Image source={BRAND_COMBINED} style={styles.brandCombinedHomeHeader} resizeMode="contain" accessibilityLabel="BILLBOX logo" />
+                <AppButton
+                  label="Switch space"
+                  variant="secondary"
+                  iconName="swap-horizontal-outline"
+                  onPress={() => navigation.navigate('Settings')}
+                />
               </View>
-            )}
+            ) : null}
           </View>
 
           <View style={{ marginTop: themeSpacing.xs }}>
@@ -3547,6 +3115,7 @@ function HomeScreen() {
 
             {needsPayerName ? (
               <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
+                <Image source={BRAND_WORDMARK} style={styles.wordmarkOnboarding} resizeMode="contain" accessibilityLabel="BILLBOX" />
                 <Text style={styles.bodyText}>Name your Payer 1 to continue.</Text>
                 <AppInput placeholder="Payer 1 name" value={payerNameDraft} onChangeText={setPayerNameDraft} />
                 <AppButton label="Save" iconName="checkmark-outline" onPress={savePayer1Name} />
@@ -3576,10 +3145,6 @@ function HomeScreen() {
                   Alert.alert('Name required', 'Please name Payer 1 to continue.')
                   return
                 }
-                if (tile.target === 'Reports' && !canUseAnalytics(entitlements.plan)) {
-                  showUpgradeAlert('analytics')
-                  return
-                }
                 navigation.navigate(tile.target)
               }}
               style={({ pressed }) => [styles.statCardPressable, pressed && styles.statCardPressed]}
@@ -3596,18 +3161,37 @@ function HomeScreen() {
             </Pressable>
           ))}
         </View>
-
-        {ENABLE_AI ? (
-          <View style={{ marginTop: themeSpacing.sm }}>
-            <AppButton
-              label="Ask BillBox"
-              variant="secondary"
-              iconName="chatbubble-ellipses-outline"
-              onPress={openAskBillBox}
-            />
-          </View>
-        ) : null}
       </View>
+
+      <Modal visible={upgradeModalVisible} transparent animationType="fade" onRequestClose={() => setUpgradeModalVisible(false)}>
+        <View style={styles.iosPickerOverlay}>
+          <Surface elevated style={styles.iosPickerSheet}>
+            <SectionHeader title="Add a second payer" />
+            <Text style={styles.bodyText}>Payer 2 is available on Pro.</Text>
+            <View style={{ gap: themeSpacing.xs, marginTop: themeSpacing.sm }}>
+              <Text style={styles.bodyText}>• Keep personal and business bills separate</Text>
+              <Text style={styles.bodyText}>• Independent exports and reports</Text>
+              <Text style={styles.bodyText}>• Two payers on one subscription</Text>
+              <Text style={styles.mutedText}>Save with yearly billing: Basic saves €{planSavings.basic} • Pro saves €{planSavings.pro}</Text>
+            </View>
+            <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
+              <AppButton label="Not now" variant="ghost" onPress={() => setUpgradeModalVisible(false)} />
+              <AppButton
+                label="Upgrade to Pro"
+                iconName="arrow-up-outline"
+                onPress={() => {
+                  setUpgradeModalVisible(false)
+                  if (IS_EXPO_GO) {
+                    Alert.alert('Upgrade', 'Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.')
+                    return
+                  }
+                  navigation.navigate('Payments')
+                }}
+              />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
 
       <Modal visible={renameVisible} transparent animationType="fade" onRequestClose={() => setRenameVisible(false)}>
         <View style={styles.iosPickerOverlay}>
@@ -3692,25 +3276,6 @@ function WarrantiesScreen() {
     }
     if (!itemName) { Alert.alert('Validation', 'Enter item name'); return }
     if (!pendingAttachment) { Alert.alert('Attachment required', 'Warranties must include an image or PDF attachment.'); return }
-
-    if (entitlements.plan === 'free') {
-      try {
-        let currentCount = 0
-        if (supabase) {
-          let q = supabase.from('warranties').select('id', { count: 'exact', head: true })
-          if (spaceId) q = q.eq('space_id', spaceId)
-          const { count } = await q
-          currentCount = typeof count === 'number' ? count : 0
-        } else {
-          const locals = await loadLocalWarranties(spaceId)
-          currentCount = Array.isArray(locals) ? locals.length : 0
-        }
-        if (currentCount >= 5) {
-          showUpgradeAlert('warranties_limit')
-          return
-        }
-      } catch {}
-    }
     // Calculate expiry if duration and purchase date provided
     let computedExpires = expiresAt
     if (!computedExpires && durationMonths && purchaseDate) {
@@ -3816,13 +3381,21 @@ function WarrantiesScreen() {
   return (
     <Screen>
       <View style={styles.pageStack}>
-        <SectionHeader
-          title="Warranties"
-          leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-        />
+        <SectionHeader title="Warranties" />
 
         <Surface elevated>
           <SectionHeader title="New warranty" />
+          {spacesCtx.spaces.length > 1 ? (
+            <View style={{ marginBottom: themeSpacing.sm }}>
+              <Text style={styles.mutedText}>Payer</Text>
+              <SegmentedControl
+                value={spacesCtx.current?.id || spaceId || ''}
+                onChange={(id) => { spacesCtx.setCurrent(id) }}
+                options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
+                style={{ marginTop: themeSpacing.xs }}
+              />
+            </View>
+          ) : null}
 
           <Disclosure title="Linked bill (required)">
             <Text style={styles.bodyText}>Warranties must be linked 1:1 to a bill.</Text>
@@ -3882,26 +3455,23 @@ function WarrantiesScreen() {
             </View>
             <View style={{ flexDirection: 'row', gap: themeSpacing.sm }}>
               <AppInput
-                placeholder="Purchase"
+                placeholder="Purchase YYYY-MM-DD"
                 value={purchaseDate}
                 onChangeText={setPurchaseDate}
                 style={{ flex: 1 }}
-                inputStyle={styles.warrantyDateInput}
               />
               <AppInput
-                placeholder="Expires"
+                placeholder="Expires YYYY-MM-DD"
                 value={expiresAt}
                 onChangeText={setExpiresAt}
                 style={{ flex: 1 }}
-                inputStyle={styles.warrantyDateInput}
               />
               <AppInput
-                placeholder="Duration"
+                placeholder="Duration (months)"
                 value={durationMonths}
                 onChangeText={setDurationMonths}
                 keyboardType="numeric"
                 style={{ flex: 1 }}
-                inputStyle={styles.warrantyDateInput}
               />
             </View>
           </View>
@@ -3933,17 +3503,6 @@ function WarrantiesScreen() {
           Alert.alert('Attachment selected', 'PDF will be attached on save.')
         }}
             />
-            <AppButton
-              label="OCR from photo"
-              variant="secondary"
-              iconName="scan-outline"
-              onPress={ocrPhoto}
-            />
-            <AppButton
-              label="Save warranty"
-              iconName="save-outline"
-              onPress={addManual}
-            />
           </View>
 
           {!!pendingAttachment && (
@@ -3957,19 +3516,32 @@ function WarrantiesScreen() {
             </View>
           )}
 
-          {/* Actions moved above to ensure "Save warranty" is last */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+            <AppButton
+              label="Save warranty"
+              iconName="save-outline"
+              onPress={addManual}
+            />
+            <AppButton
+              label="OCR from photo"
+              variant="secondary"
+              iconName="scan-outline"
+              onPress={ocrPhoto}
+            />
+          </View>
         </Surface>
 
         <Surface elevated>
           <SectionHeader title="Existing warranties" />
           {items.length === 0 ? (
-            <View style={styles.emptyStateWrapper}>
+            <View style={styles.brandEmptyWrap}>
+              <Image source={BRAND_WORDMARK} style={styles.wordmarkEmpty} resizeMode="contain" accessibilityLabel="BILLBOX" />
               <EmptyState
-                iconName="shield-outline"
                 title="No warranties yet"
-                description="Add your first warranty to track expiry dates and keep receipts together."
+                message="Save a warranty and attach a receipt or invoice to keep proof of purchase in one place."
                 actionLabel="Add warranty"
                 onActionPress={addManual}
+                iconName="shield-checkmark-outline"
               />
             </View>
           ) : (
@@ -4155,7 +3727,7 @@ function WarrantyDetailsScreen() {
             <AppButton
               label="Schedule defaults"
               variant="secondary"
-              iconName={'alarm-outline'}
+              iconName="alarm-outline"
               onPress={async ()=>{
                 if (!warranty.expires_at) { Alert.alert('Missing expiry date', 'Add an expiry date to schedule reminders.'); return }
                 await ensureNotificationConfig()
@@ -4280,44 +3852,10 @@ function ReportsScreen() {
     )
   }
 
-  if (!canUseAnalytics(entitlements.plan)) {
-    return (
-      <Screen>
-        <View style={styles.pageStack}>
-          <SectionHeader
-            title="Reports"
-            leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-          />
-          <Surface elevated>
-            <InlineInfo
-              tone="info"
-              iconName="sparkles-outline"
-              title="Upgrade to unlock analytics"
-              message="Analytics are locked on the Free plan. Upgrade to Basic to enable reports."
-            />
-            <View style={{ marginTop: themeSpacing.sm }}>
-              <AppButton
-                label="Upgrade to Basic"
-                variant="secondary"
-                iconName="arrow-up-circle-outline"
-                onPress={() => {
-                  showUpgradeAlert('analytics')
-                }}
-              />
-            </View>
-          </Surface>
-        </View>
-      </Screen>
-    )
-  }
-
   return (
     <Screen>
       <View style={styles.pageStack}>
-        <SectionHeader
-          title="Reports"
-          leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-        />
+        <SectionHeader title="Reports" />
 
         <Surface elevated>
           <SectionHeader title="Filters" />
@@ -4357,7 +3895,7 @@ function ReportsScreen() {
               <InlineInfo
                 tone="info"
                 iconName="sparkles-outline"
-                message="Exports are available on Pro only. Upgrade to Pro to enable CSV, PDF, ZIP, and JSON exports."
+                message="Exports are locked on the Free plan. Upgrade to Basic or Pro to enable CSV, PDF, ZIP, and JSON exports."
               />
             </View>
           ) : null}
@@ -4539,7 +4077,9 @@ function ExportsScreen() {
   }
 
   async function exportJSONRange() {
-    if (!canExportFormat(entitlements.plan, 'json')) {
+    if (entitlements.plan === 'basic' || entitlements.plan === 'pro' || entitlements.plan === 'free') {
+      // allowed
+    } else {
       showUpgradeAlert('export')
       return
     }
@@ -4589,7 +4129,7 @@ function ExportsScreen() {
   }
 
   async function exportCSV() {
-    if (!canExportFormat(entitlements.plan, 'csv')) {
+    if (entitlements.plan === 'free') {
       showUpgradeAlert('export')
       return
     }
@@ -4663,7 +4203,7 @@ function ExportsScreen() {
   }
 
   async function exportPDFRange() {
-    if (!canExportFormat(entitlements.plan, 'pdf')) {
+    if (entitlements.plan !== 'pro') {
       showUpgradeAlert('export')
       return
     }
@@ -4677,7 +4217,7 @@ function ExportsScreen() {
   }
 
   async function exportPDFSingle(bill: Bill) {
-    if (!canExportFormat(entitlements.plan, 'pdf')) {
+    if (entitlements.plan !== 'pro') {
       showUpgradeAlert('export')
       return
     }
@@ -4689,7 +4229,7 @@ function ExportsScreen() {
   }
 
   async function exportAttachmentsZip() {
-    if (!canExportFormat(entitlements.plan, 'zip')) {
+    if (entitlements.plan !== 'pro') {
       showUpgradeAlert('export')
       return
     }
@@ -4789,10 +4329,7 @@ function ExportsScreen() {
   return (
     <Screen>
       <View style={styles.pageStack}>
-        <SectionHeader
-          title="Exports"
-          leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-        />
+        <SectionHeader title="Exports" />
 
         <Surface elevated>
           <SectionHeader title="Filters" />
@@ -4846,32 +4383,12 @@ function ExportsScreen() {
           <SectionHeader title="Export range" />
           <Text style={styles.bodyText}>Exports include linked warranty files when present.</Text>
           <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-            <AppButton
-              label="Export CSV"
-              variant="secondary"
-              iconName={canExportFormat(entitlements.plan, 'csv') ? 'document-outline' : 'lock-closed-outline'}
-              onPress={canExportFormat(entitlements.plan, 'csv') ? exportCSV : () => showUpgradeAlert('export')}
-            />
-            <AppButton
-              label="Export PDF report"
-              variant="secondary"
-              iconName={canExportFormat(entitlements.plan, 'pdf') ? 'print-outline' : 'lock-closed-outline'}
-              onPress={canExportFormat(entitlements.plan, 'pdf') ? exportPDFRange : () => showUpgradeAlert('export')}
-            />
-            <AppButton
-              label="Export ZIP (attachments)"
-              variant="secondary"
-              iconName={canExportFormat(entitlements.plan, 'zip') ? 'cloud-download-outline' : 'lock-closed-outline'}
-              onPress={canExportFormat(entitlements.plan, 'zip') ? exportAttachmentsZip : () => showUpgradeAlert('export')}
-            />
-            <AppButton
-              label="Export JSON (backup)"
-              variant="secondary"
-              iconName={canExportFormat(entitlements.plan, 'json') ? 'code-outline' : 'lock-closed-outline'}
-              onPress={canExportFormat(entitlements.plan, 'json') ? exportJSONRange : () => showUpgradeAlert('export')}
-            />
+            <AppButton label="Export CSV" variant="secondary" iconName="document-outline" onPress={exportCSV} />
+            <AppButton label="Export PDF report" variant="secondary" iconName="print-outline" onPress={exportPDFRange} />
+            <AppButton label="Export ZIP (attachments)" variant="secondary" iconName="cloud-download-outline" onPress={exportAttachmentsZip} />
+            <AppButton label="Export JSON (backup)" variant="secondary" iconName="code-outline" onPress={exportJSONRange} />
           </View>
-          <Text style={[styles.mutedText, { marginTop: themeSpacing.sm }]}>Free: locked • Basic: locked • Pro: CSV + PDF + ZIP + JSON</Text>
+          <Text style={[styles.mutedText, { marginTop: themeSpacing.sm }]}>Free: JSON only • Basic: CSV + JSON • Pro: CSV + PDF + ZIP + JSON</Text>
         </Surface>
 
         <Surface elevated>
@@ -4892,12 +4409,7 @@ function ExportsScreen() {
                     </View>
                   </View>
                   <View style={styles.billActionsRow}>
-                    <AppButton
-                      label="Export PDF"
-                      variant="secondary"
-                      iconName={canExportFormat(entitlements.plan, 'pdf') ? 'print-outline' : 'lock-closed-outline'}
-                      onPress={canExportFormat(entitlements.plan, 'pdf') ? () => exportPDFSingle(item) : () => showUpgradeAlert('export')}
-                    />
+                    <AppButton label="Export PDF" variant="secondary" iconName="print-outline" onPress={() => exportPDFSingle(item)} />
                   </View>
                 </Surface>
               )}
@@ -4910,103 +4422,52 @@ function ExportsScreen() {
 }
 
 function PayScreen() {
-  const { snapshot: entitlements } = useEntitlements()
   const supabase = useMemo(() => getSupabase(), [])
   const [items, setItems] = useState<Bill[]>([])
   const [selected, setSelected] = useState<Record<string, boolean>>({})
-  const [filter, setFilter] = useState<'today' | 'week' | 'month' | 'all'>('all')
+  const [planningDate, setPlanningDate] = useState(new Date().toISOString().slice(0,10))
   const [permissionExplained, setPermissionExplained] = useState(false)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
-
-  const [payFlowVisible, setPayFlowVisible] = useState(false)
-  const [payFlowStep, setPayFlowStep] = useState<'review' | 'payment'>('review')
-
-  useEffect(() => {
-    ;(async () => {
-      if (!permissionExplained && canUseReminders(entitlements.plan)) {
-        await ensureNotificationConfig()
-        await requestPermissionIfNeeded()
-        setPermissionExplained(true)
-      } else if (!permissionExplained) {
-        setPermissionExplained(true)
+  useEffect(() => { (async ()=>{
+    if (!permissionExplained) {
+      await ensureNotificationConfig()
+      const ok = await requestPermissionIfNeeded()
+      if (!ok) {
+        // Continue without notifications
       }
-
-      if (spaceLoading || !space) return
-
-      if (supabase) {
-        const { data } = await listBills(supabase, spaceId)
-        setItems(data)
-      } else {
-        const locals = await loadLocalBills(spaceId)
-        setItems(locals as any)
-      }
-    })()
-  }, [supabase, permissionExplained, spaceLoading, space, spaceId, entitlements.plan])
-
-  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), [])
-  const weekEndIso = useMemo(() => new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 10), [])
-  const monthEndIso = useMemo(() => new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString().slice(0, 10), [])
-
-  const unpaid = useMemo(() => {
-    return items
-      .filter((b) => b.status === 'unpaid')
-      .sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''))
-  }, [items])
-
-  const buckets = useMemo(() => {
-    const dueToday = unpaid.filter((b) => b.due_date === todayIso)
-    const due7 = unpaid.filter((b) => b.due_date > todayIso && b.due_date <= weekEndIso)
-    const due30 = unpaid.filter((b) => b.due_date > weekEndIso && b.due_date <= monthEndIso)
-    const total = unpaid
-
-    const sumEur = (arr: Bill[]) => arr.reduce((sum, b) => sum + (b.currency === 'EUR' ? b.amount : 0), 0)
-
-    return {
-      dueToday,
-      due7,
-      due30,
-      total,
-      eur: {
-        dueToday: sumEur(dueToday),
-        due7: sumEur(due7),
-        due30: sumEur(due30),
-        total: sumEur(total),
-      },
+      setPermissionExplained(true)
     }
-  }, [unpaid, todayIso, weekEndIso, monthEndIso])
-
-  const filteredBills = useMemo(() => {
-    if (filter === 'today') return buckets.dueToday
-    if (filter === 'week') return buckets.dueToday.concat(buckets.due7)
-    if (filter === 'month') return buckets.dueToday.concat(buckets.due7, buckets.due30)
-    return unpaid
-  }, [filter, buckets.dueToday, buckets.due7, buckets.due30, unpaid])
-
-  const selectedBills = useMemo(() => unpaid.filter((b) => selected[b.id]), [unpaid, selected])
-
-  function toggleSelected(id: string) {
-    setSelected((prev) => ({ ...prev, [id]: !prev[id] }))
+    if (spaceLoading || !space) return
+    if (supabase) { const { data } = await listBills(supabase, spaceId); setItems(data) } else { const locals = await loadLocalBills(spaceId); setItems(locals as any) }
+  })() }, [supabase, permissionExplained, spaceLoading, space, spaceId])
+  const upcoming = items.filter(b=> b.status==='unpaid').sort((a,b)=> (a.pay_date||a.due_date).localeCompare(b.pay_date||b.due_date))
+  const today = new Date().toISOString().slice(0,10)
+  const thisWeekEnd = new Date(Date.now()+7*24*3600*1000).toISOString().slice(0,10)
+  const groups = {
+    today: upcoming.filter(b=> (b.pay_date||b.due_date)===today),
+    thisWeek: upcoming.filter(b=> (b.pay_date||b.due_date)>today && (b.pay_date||b.due_date)<=thisWeekEnd),
+    later: upcoming.filter(b=> (b.pay_date||b.due_date)>thisWeekEnd),
   }
-
-  function removeSelected(id: string) {
-    setSelected((prev) => ({ ...prev, [id]: false }))
-  }
-
   async function markPaid(b: Bill) {
-    if (supabase) {
-      const { data } = await setBillStatus(supabase!, b.id, 'paid', spaceId)
-      if (data) setItems((prev) => prev.map((x) => (x.id === b.id ? data : x)))
-    } else {
-      await setLocalBillStatus(spaceId, b.id, 'paid')
-      setItems((prev) => prev.map((x: any) => (x.id === b.id ? { ...x, status: 'paid' } : x)))
-    }
+    if (supabase) { const { data } = await setBillStatus(supabase!, b.id, 'paid', spaceId); if (data) setItems(prev=>prev.map(x=>x.id===b.id?data:x)) }
+    else { await setLocalBillStatus(spaceId, b.id, 'paid'); setItems(prev=>prev.map((x:any)=>x.id===b.id? { ...x, status: 'paid' }:x)) }
     await cancelBillReminders(b.id, spaceId)
   }
-
-  async function snooze(b: Bill, days: number) {
-    await snoozeBillReminder({ ...b, space_id: spaceId } as any, days, spaceId)
+  async function snooze(b: Bill, days: number) { await snoozeBillReminder({ ...b, space_id: spaceId } as any, days, spaceId) }
+  async function planSelected() {
+    const dateISO = planningDate
+    const picked = upcoming.filter(b=> selected[b.id])
+    if (!picked.length) { Alert.alert('Select bills', 'Pick 2+ bills to plan'); return }
+    for (const b of picked) {
+      if (supabase) { await setBillStatus(supabase!, b.id, b.status, spaceId) }
+      // locally store pay_date using local map (since remote schema may not have it)
+      setItems(prev=> prev.map(x=> x.id===b.id ? { ...x, pay_date: dateISO } as any : x))
+      await scheduleBillReminders({ ...b, due_date: dateISO, space_id: spaceId } as any, undefined, spaceId)
+    }
+    await scheduleGroupedPaymentReminder(dateISO, picked.length, spaceId)
+    Alert.alert('Planned', `Payment planned for ${picked.length} bill(s) on ${dateISO}`)
   }
-
+  function toggleSel(id: string) { setSelected(prev=> ({ ...prev, [id]: !prev[id] })) }
   function Chip({ text }: { text: string }) {
     return (
       <View style={{ backgroundColor: '#EDF2F7', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3 }}>
@@ -5017,137 +4478,12 @@ function PayScreen() {
     )
   }
 
-  function dueChip(bill: Bill): string {
-    const due = bill.due_date
-    if (!due) return 'Upcoming'
-    if (due < todayIso) return 'Overdue'
-    if (due === todayIso) return 'Due today'
-    return 'Upcoming'
-  }
-
-  function openPayFlow() {
-    setPayFlowStep('review')
-    setPayFlowVisible(true)
-  }
-
-  function closePayFlow() {
-    setPayFlowVisible(false)
-    setPayFlowStep('review')
-  }
-
-  function isSelectionCompatible(bills: Bill[]): { ok: boolean; reason?: string } {
-    if (bills.length === 0) return { ok: false, reason: 'Select at least one bill.' }
-    if (!bills.every((b) => b.currency === 'EUR')) return { ok: false, reason: 'Only EUR bills can be paid via EPC/SEPA QR.' }
-    const iban = (bills[0].iban || '').trim()
-    const name = (bills[0].creditor_name || bills[0].supplier || '').trim()
-    if (!iban || iban.length < 10) return { ok: false, reason: 'Missing IBAN on the selected bill(s).' }
-    if (!name) return { ok: false, reason: 'Missing recipient name on the selected bill(s).' }
-    if (!bills.every((b) => (b.iban || '').trim() === iban)) return { ok: false, reason: 'Selected bills must have the same IBAN to generate one QR.' }
-    if (!bills.every((b) => ((b.creditor_name || b.supplier || '').trim() === name))) {
-      return { ok: false, reason: 'Selected bills must have the same recipient name to generate one QR.' }
-    }
-    return { ok: true }
-  }
-
-  function buildEpcPayload(args: { iban: string; name: string; amount: number; reference?: string; purpose?: string }) {
-    const iban = args.iban.replace(/\s+/g, '')
-    const name = args.name
-    const amount = Math.max(0, Math.round(args.amount * 100) / 100)
-    const amountLine = `EUR${amount.toFixed(2)}`
-    const purpose = (args.purpose || '').slice(0, 35)
-    const reference = (args.reference || '').slice(0, 35)
-    return [
-      'BCD',
-      '001',
-      '1',
-      'SCT',
-      '',
-      name,
-      iban,
-      amountLine,
-      purpose,
-      reference,
-      '',
-    ].join('\n')
-  }
-
-  function buildBillPaymentModel(b: Bill) {
-    const iban = (b.iban || '').trim()
-    const name = ((b.creditor_name || b.supplier || '') as string).trim()
-    const amount = b.currency === 'EUR' ? b.amount : 0
-    const reference = (b.reference || '').trim() || 'BILLBOX'
-    const purpose = ((b.purpose || b.supplier || '') as string).trim() || 'BillBox payment'
-    if (!iban || iban.length < 10) return null
-    if (!name) return null
-    if (b.currency !== 'EUR') return null
-    const payload = buildEpcPayload({ iban, name, amount, reference, purpose })
-    const details = [
-      `Recipient: ${name}`,
-      `IBAN: ${iban}`,
-      `Amount: EUR ${amount.toFixed(2)}`,
-      reference ? `Reference: ${reference}` : null,
-      purpose ? `Purpose: ${purpose}` : null,
-    ].filter(Boolean).join('\n')
-    return { iban, name, amount, reference, purpose, payload, details }
-  }
-
-  const perBillCheck = useMemo(() => {
-    if (selectedBills.length === 0) return { ok: false, reason: 'Select at least one bill.' }
-    if (!selectedBills.every((b) => b.currency === 'EUR')) return { ok: false, reason: 'Only EUR bills can be paid via EPC/SEPA QR.' }
-    if (!selectedBills.every((b) => (b.iban || '').trim().length >= 10)) return { ok: false, reason: 'Missing IBAN on one or more selected bills.' }
-    if (!selectedBills.every((b) => ((b.creditor_name || b.supplier || '') as string).trim().length > 0)) return { ok: false, reason: 'Missing recipient name on one or more selected bills.' }
-    return { ok: true }
-  }, [selectedBills])
-
-  const combinedCheck = useMemo(() => isSelectionCompatible(selectedBills), [selectedBills])
-
-  const paymentModel = useMemo(() => {
-    if (!combinedCheck.ok) return null
-    const iban = (selectedBills[0].iban || '').trim()
-    const name = ((selectedBills[0].creditor_name || selectedBills[0].supplier || '') as string).trim()
-    const amount = selectedBills.reduce((sum, b) => sum + (b.currency === 'EUR' ? b.amount : 0), 0)
-    const reference = selectedBills.length === 1 ? (selectedBills[0].reference || '') : 'BILLBOX'
-    const purpose = selectedBills.length === 1 ? (selectedBills[0].purpose || selectedBills[0].supplier || '') : 'BillBox payment'
-    const payload = buildEpcPayload({ iban, name, amount, reference, purpose })
-    const details = [
-      `Recipient: ${name}`,
-      `IBAN: ${iban}`,
-      `Amount: EUR ${amount.toFixed(2)}`,
-      reference ? `Reference: ${reference}` : null,
-      purpose ? `Purpose: ${purpose}` : null,
-    ].filter(Boolean).join('\n')
-    return { iban, name, amount, reference, purpose, payload, details }
-  }, [selectedBills, combinedCheck.ok])
-
-  const perBillModels = useMemo(() => {
-    return selectedBills
-      .map((b) => {
-        const model = buildBillPaymentModel(b)
-        return model ? { bill: b, model } : null
-      })
-      .filter(Boolean) as Array<{ bill: Bill; model: any }>
-  }, [selectedBills])
-
-  async function openBankApp() {
-    try {
-      await Linking.openURL('bank://')
-    } catch {
-      // Best-effort only (bank URL schemes vary)
-    }
-  }
-
-  async function copyPaymentDetails(details: string) {
-    if (!details) return
-    await Clipboard.setStringAsync(details)
-    Alert.alert('Copied', 'Payment details copied to clipboard.')
-  }
-
   if (spaceLoading || !space) {
     return (
       <Screen scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
-          <Text style={styles.mutedText}>Loading payments…</Text>
+          <Text style={styles.mutedText}>Loading payment plan…</Text>
         </View>
       </Screen>
     )
@@ -5156,262 +4492,99 @@ function PayScreen() {
   return (
     <Screen>
       <View style={styles.pageStack}>
-        <SectionHeader
-          title="Pay"
-          leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-        />
+        <SectionHeader title="Pay" />
 
-        <Surface elevated>
-          <SectionHeader title="Payments" />
-          <Text style={styles.bodyText}>BillBox prepares payment details; your bank completes the payment.</Text>
-
-          <View style={styles.payChipsRow}>
-            <Pressable
-              onPress={() => setFilter('today')}
-              style={[styles.payChip, styles.payChipDanger, filter === 'today' && styles.payChipSelected]}
-            >
-              <Text style={[styles.payChipLabel, filter === 'today' && styles.payChipLabelSelected]}>Due today</Text>
-              <Text style={[styles.payChipValue, filter === 'today' && styles.payChipValueSelected]}>
-                {buckets.dueToday.length} • €{buckets.eur.dueToday.toFixed(2)}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => setFilter('week')}
-              style={[styles.payChip, styles.payChipWarning, filter === 'week' && styles.payChipSelected]}
-            >
-              <Text style={[styles.payChipLabel, filter === 'week' && styles.payChipLabelSelected]}>Next 7 days</Text>
-              <Text style={[styles.payChipValue, filter === 'week' && styles.payChipValueSelected]}>
-                {buckets.due7.length} • €{buckets.eur.due7.toFixed(2)}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => setFilter('month')}
-              style={[styles.payChip, styles.payChipPrimary, filter === 'month' && styles.payChipSelected]}
-            >
-              <Text style={[styles.payChipLabel, filter === 'month' && styles.payChipLabelSelected]}>Next 30 days</Text>
-              <Text style={[styles.payChipValue, filter === 'month' && styles.payChipValueSelected]}>
-                {buckets.due30.length} • €{buckets.eur.due30.toFixed(2)}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => setFilter('all')}
-              style={[styles.payChip, styles.payChipNeutral, filter === 'all' && styles.payChipSelected]}
-            >
-              <Text style={[styles.payChipLabel, filter === 'all' && styles.payChipLabelSelected]}>Total unpaid</Text>
-              <Text style={[styles.payChipValue, filter === 'all' && styles.payChipValueSelected]}>
-                {buckets.total.length} • €{buckets.eur.total.toFixed(2)}
-              </Text>
-            </Pressable>
-          </View>
-
-          <View style={{ marginTop: themeSpacing.sm }}>
+        <Surface elevated padded={false} style={styles.paySectionCard}>
+          <SectionHeader title="Batch payment" />
+          <View style={styles.payBatchRow}>
+            <AppInput
+              placeholder="Pay YYYY-MM-DD"
+              value={planningDate}
+              onChangeText={setPlanningDate}
+              style={{ flex: 1 }}
+            />
             <AppButton
-              label="Pay via bank app"
-              iconName="paper-plane-outline"
-              onPress={openPayFlow}
-              disabled={selectedBills.length === 0}
+              label="Pay batch"
+              iconName="card-outline"
+              onPress={planSelected}
             />
           </View>
-          {selectedBills.length === 0 ? (
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Select bill(s) below to enable payment.</Text>
-          ) : null}
+        </Surface>
 
-          <Divider style={{ marginTop: themeSpacing.md }} />
-
-          <View style={{ marginTop: themeSpacing.sm }}>
-            <SectionHeader title="Bills" />
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Tap the checkbox to add/remove a bill.</Text>
-          </View>
-
-          {filteredBills.length === 0 ? (
-            <View style={{ marginTop: themeSpacing.sm }}>
-              <EmptyState
-                title="No bills"
-                description="No unpaid bills match the selected filter."
-                iconName="checkmark-done-outline"
-              />
-            </View>
+        <Surface elevated>
+          <SectionHeader title="Upcoming bills" />
+          {upcoming.length === 0 ? (
+            <EmptyState
+              title="No unpaid bills"
+              message="Once you have unpaid bills, they will appear here so you can plan payments."
+              iconName="checkmark-done-outline"
+            />
           ) : (
-            <View style={{ marginTop: themeSpacing.sm }}>
-              {filteredBills.map((item) => (
-                <Surface key={item.id} elevated style={styles.billRowCard}>
+            <FlatList
+              data={upcoming}
+              keyExtractor={(b)=>b.id}
+              contentContainerStyle={styles.listContent}
+              renderItem={({ item })=> (
+                <Surface elevated style={styles.billRowCard}>
                   <View style={styles.billRowHeader}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.cardTitle}>{item.supplier}</Text>
                       <Text style={styles.mutedText}>
-                        {item.currency} {item.amount.toFixed(2)} • due {item.due_date}
+                        {item.currency} {item.amount.toFixed(2)} • due {item.due_date}{item.pay_date? ` • planned ${item.pay_date}`:''}
                       </Text>
                     </View>
-                    <Pressable onPress={() => toggleSelected(item.id)}>
+                    <Pressable onPress={()=>toggleSel(item.id)}>
                       <Ionicons
                         name={selected[item.id] ? 'checkbox-outline' : 'square-outline'}
-                        size={22}
+                        size={20}
                         color={themeColors.primary}
                       />
                     </Pressable>
                   </View>
                   <View style={styles.billActionsRow}>
-                    <Chip text={dueChip(item)} />
+                    <Chip text={item.pay_date ? `Planned for ${item.pay_date}` : (new Date(item.due_date).getTime()-Date.now())/(24*3600*1000) < 1 ? 'Due today' : 'Upcoming reminder'} />
                     <AppButton
                       label="Mark as paid"
                       variant="secondary"
                       iconName="checkmark-circle-outline"
-                      onPress={() => markPaid(item)}
+                      onPress={()=>markPaid(item)}
                     />
                     <AppButton
                       label="Snooze"
                       variant="secondary"
-                      iconName={canUseReminders(entitlements.plan) ? 'time-outline' : 'lock-closed-outline'}
-                      onPress={() => snooze(item, 1)}
+                      iconName="time-outline"
+                      onPress={()=>snooze(item, 1)}
+                    />
+                    <AppButton
+                      label="Use due date"
+                      variant="ghost"
+                      iconName="calendar-outline"
+                      onPress={()=> setPlanningDate(item.due_date)}
                     />
                   </View>
                 </Surface>
-              ))}
-            </View>
+              )}
+            />
           )}
         </Surface>
 
-        <Modal transparent visible={payFlowVisible} animationType="slide" onRequestClose={closePayFlow}>
-          <View style={styles.iosPickerOverlay}>
-            <Surface elevated style={styles.iosPickerSheet}>
-              <View style={{ gap: 4 }}>
-                <Text style={styles.filterLabel}>Pay via bank app</Text>
-                <Text style={styles.mutedText}>
-                  Selected: {selectedBills.length} • Total: €{selectedBills.reduce((s, b) => s + (b.currency === 'EUR' ? b.amount : 0), 0).toFixed(2)}
-                </Text>
-              </View>
-
-              {payFlowStep === 'review' ? (
-                <View style={{ gap: themeSpacing.sm }}>
-                  <InlineInfo
-                    tone="info"
-                    iconName="wallet-outline"
-                    title="Review"
-                    message="BillBox prepares an EPC/SEPA QR code. Your bank app completes the payment."
-                  />
-
-                  {!perBillCheck.ok ? (
-                    <InlineInfo
-                      tone="info"
-                      iconName="information-circle-outline"
-                      title="Selection needs attention"
-                      message={perBillCheck.reason || 'Please adjust your selection.'}
-                    />
-                  ) : !combinedCheck.ok && selectedBills.length > 1 ? (
-                    <InlineInfo
-                      tone="info"
-                      iconName="qr-code-outline"
-                      title="Multiple payments"
-                      message="Your selection contains different recipients/IBANs. BillBox will generate one QR per bill."
-                    />
-                  ) : null}
-
-                  <Surface elevated style={{ padding: themeSpacing.sm }}>
-                    <Text style={styles.filterLabel}>Selected bills</Text>
-                    {selectedBills.length === 0 ? (
-                      <Text style={styles.mutedText}>No bills selected.</Text>
-                    ) : (
-                      <View style={{ marginTop: themeSpacing.xs, gap: themeSpacing.xs }}>
-                        {selectedBills.slice(0, 8).map((b) => (
-                          <View key={b.id} style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
-                            <View style={{ flex: 1 }}>
-                              <Text style={styles.bodyText} numberOfLines={1}>{b.supplier}</Text>
-                              <Text style={styles.mutedText} numberOfLines={1}>€{b.amount.toFixed(2)} • due {b.due_date}</Text>
-                            </View>
-                            <Pressable onPress={() => removeSelected(b.id)}>
-                              <Ionicons name="close-circle-outline" size={20} color={themeColors.textMuted} />
-                            </Pressable>
-                          </View>
-                        ))}
-                        {selectedBills.length > 8 ? (
-                          <Text style={styles.mutedText}>+{selectedBills.length - 8} more…</Text>
-                        ) : null}
-                      </View>
-                    )}
-                  </Surface>
-
-                  <View style={styles.iosPickerActions}>
-                    <AppButton label="Close" variant="ghost" onPress={closePayFlow} />
-                    <AppButton
-                      label="Confirm payment"
-                      onPress={() => setPayFlowStep('payment')}
-                      disabled={!perBillCheck.ok}
-                    />
-                  </View>
-                </View>
-              ) : null}
-
-              {payFlowStep === 'payment' ? (
-                <View style={{ gap: themeSpacing.sm }}>
-                  <InlineInfo
-                    tone="info"
-                    iconName="qr-code-outline"
-                    title="EPC/SEPA QR"
-                    message="Scan the QR code in your bank app, then complete the payment there."
-                  />
-
-                  {paymentModel ? (
-                    <Surface elevated style={{ padding: themeSpacing.sm, alignItems: 'center', gap: themeSpacing.sm }}>
-                      <QRCode value={paymentModel.payload} size={200} />
-                      <Text style={styles.mutedText} numberOfLines={3}>
-                        {paymentModel.name} • {paymentModel.iban} • €{paymentModel.amount.toFixed(2)}
-                      </Text>
-                    </Surface>
-                  ) : perBillModels.length ? (
-                    <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 420 }}>
-                      <View style={{ gap: themeSpacing.sm }}>
-                        {perBillModels.map(({ bill, model }) => (
-                          <Surface key={bill.id} elevated style={{ padding: themeSpacing.sm, alignItems: 'center', gap: themeSpacing.sm }}>
-                            <Text style={styles.bodyText} numberOfLines={1}>{bill.supplier}</Text>
-                            <QRCode value={model.payload} size={180} />
-                            <Text style={styles.mutedText} numberOfLines={3}>
-                              {model.name} • {model.iban} • €{model.amount.toFixed(2)}
-                            </Text>
-                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap }}>
-                              <AppButton
-                                label="Copy details"
-                                variant="secondary"
-                                iconName="copy-outline"
-                                onPress={() => copyPaymentDetails(model.details)}
-                              />
-                            </View>
-                          </Surface>
-                        ))}
-                      </View>
-                    </ScrollView>
-                  ) : (
-                    <Text style={styles.mutedText}>Payment details are not available for this selection.</Text>
-                  )}
-
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap }}>
-                    <AppButton
-                      label="Open bank app"
-                      variant="secondary"
-                      iconName="exit-outline"
-                      onPress={openBankApp}
-                      disabled={!paymentModel && perBillModels.length === 0}
-                    />
-                    <AppButton
-                      label="Copy payment details"
-                      variant="secondary"
-                      iconName="copy-outline"
-                      onPress={() => copyPaymentDetails(paymentModel?.details || '')}
-                      disabled={!paymentModel}
-                    />
-                  </View>
-
-                  <View style={styles.iosPickerActions}>
-                    <AppButton label="Back" variant="ghost" onPress={() => setPayFlowStep('review')} />
-                    <AppButton label="Done" onPress={closePayFlow} />
-                  </View>
-                </View>
-              ) : null}
+        <Surface elevated padded={false} style={styles.paySectionCard}>
+          <SectionHeader title="Payment plan overview" />
+          <View style={styles.payOverviewRow}>
+            <Surface elevated padded={false} style={[styles.payOverviewCard, { flex: 1 }]}> 
+              <Text style={styles.cardTitle}>Today</Text>
+              <Text style={styles.bodyText}>{groups.today.length} bills</Text>
+            </Surface>
+            <Surface elevated padded={false} style={[styles.payOverviewCard, { flex: 1 }]}> 
+              <Text style={styles.cardTitle}>This week</Text>
+              <Text style={styles.bodyText}>{groups.thisWeek.length} bills</Text>
+            </Surface>
+            <Surface elevated padded={false} style={[styles.payOverviewCard, { flex: 1 }]}> 
+              <Text style={styles.cardTitle}>Later</Text>
+              <Text style={styles.bodyText}>{groups.later.length} bills</Text>
             </Surface>
           </View>
-        </Modal>
+        </Surface>
       </View>
     </Screen>
   )
@@ -5426,10 +4599,7 @@ function PaymentsScreen() {
 
   async function handleSubscribe(plan: PlanId, interval: Interval) {
     if (!iapAvailable) {
-      Alert.alert(
-        'Purchases unavailable',
-        'Subscriptions are billed through Apple App Store / Google Play and are available only in a store/dev build (not Expo Go preview).'
-      )
+      Alert.alert('Purchases unavailable', 'Purchases are available only in the store build.')
       return
     }
     const productId = resolveProductId(plan, interval)
@@ -5460,10 +4630,7 @@ function PaymentsScreen() {
 
   async function handleRestore() {
     if (!iapAvailable) {
-      Alert.alert(
-        'Purchases unavailable',
-        'Restore works only in a store/dev build (Apple App Store / Google Play). Expo Go preview does not support purchases.'
-      )
+      Alert.alert('Purchases unavailable', 'Purchases are available only in the store build.')
       return
     }
     try {
@@ -5499,24 +4666,45 @@ function PaymentsScreen() {
 
         <Surface elevated>
           <SectionHeader title="Current plan" />
-          <Text style={styles.bodyText}>Your plan: {planLabel(entitlements.plan)} ({planPrice(entitlements.plan)})</Text>
+          <Text style={styles.bodyText}>Your plan: {entitlements.plan.toUpperCase()}</Text>
           <Text style={styles.bodyText}>
             Payers: {entitlements.payerLimit} • OCR: {entitlements.canUseOCR ? 'enabled' : 'disabled'} • Exports:{' '}
             {entitlements.exportsEnabled ? 'enabled' : 'disabled'}
           </Text>
-          <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Billing: Apple App Store / Google Play</Text>
-          <Text style={styles.mutedText}>Manage or cancel in your device subscription settings.</Text>
         </Surface>
 
         <Surface elevated>
           <SectionHeader title="Subscription plans" />
-
-          <PlanCards
-            currentPlan={entitlements.plan}
-            onUpgradeBasic={() => showUpgradeAlert('upgrade')}
-            onUpgradePro={() => showUpgradeAlert('upgrade')}
-          />
-
+          <Text style={styles.bodyText}>Free: €0 • Basic: €2.20 / month or €20 / year • Pro: €4 / month or €38 / year.</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+            <AppButton
+              label="Basic monthly"
+              iconName="card-outline"
+              onPress={() => handleSubscribe('basic', 'monthly')}
+              disabled={busy}
+            />
+            <AppButton
+              label="Basic yearly"
+              variant="secondary"
+              iconName="card-outline"
+              onPress={() => handleSubscribe('basic', 'yearly')}
+              disabled={busy}
+            />
+            <AppButton
+              label="Pro monthly"
+              variant="secondary"
+              iconName="card-outline"
+              onPress={() => handleSubscribe('pro', 'monthly')}
+              disabled={busy}
+            />
+            <AppButton
+              label="Pro yearly"
+              variant="secondary"
+              iconName="card-outline"
+              onPress={() => handleSubscribe('pro', 'yearly')}
+              disabled={busy}
+            />
+          </View>
           <View style={{ marginTop: themeSpacing.sm }}>
             <AppButton
               label="Restore purchases"
@@ -5590,7 +4778,6 @@ function MainTabs() {
 function SettingsScreen() {
   const supabase = useMemo(() => getSupabase(), [])
   const navigation = useNavigation<any>()
-  const ask = useAskBillBox()
   const [lang, setLang] = useState<Lang>('en')
   useEffect(()=>{ (async()=> setLang(await loadLang()))() }, [])
   async function changeLang(l: Lang) { setLang(l); await saveLang(l) }
@@ -5599,12 +4786,22 @@ function SettingsScreen() {
   const spacesCtx = useSpacesContext()
   const { space } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
-  const preview = usePreviewModeContext()
   const [renameTarget, setRenameTarget] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renameVisible, setRenameVisible] = useState(false)
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
+
+  const planSavings = useMemo(() => {
+    const basicMonthly = 2.2
+    const basicYearly = 20
+    const proMonthly = 4
+    const proYearly = 38
+    return {
+      basic: Math.max(0, Math.round((basicMonthly * 12 - basicYearly) * 100) / 100),
+      pro: Math.max(0, Math.round((proMonthly * 12 - proYearly) * 100) / 100),
+    }
+  }, [])
 
   const saveRename = useCallback(async () => {
     if (!renameTarget) return
@@ -5643,145 +4840,8 @@ function SettingsScreen() {
   return (
     <Screen>
       <View style={styles.pageStack}>
-        <SectionHeader
-          title="Settings"
-          leading={<Image source={BRAND_ICON} style={styles.brandIconSectionHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />}
-        />
-
-        {preview.enabled ? (
-          <Surface elevated>
-            <SectionHeader title="Preview mode" />
-            <Text style={styles.bodyText}>Preview / Guest mode is enabled (offline).</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-              <AppButton
-                label="Exit preview mode"
-                variant="secondary"
-                iconName="log-out-outline"
-                onPress={() => {
-                  Alert.alert('Exit preview mode?', 'This will return you to the login screen.', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Exit', style: 'destructive', onPress: () => preview.exit() },
-                  ])
-                }}
-              />
-            </View>
-
-            <View style={{ marginTop: themeSpacing.sm }}>
-              <Text style={styles.bodyText}>Demo accounts</Text>
-              <Text style={styles.mutedText}>Loads sample bills and warranties so you can test analytics, search, exports, and payers.</Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                <AppButton
-                  label="Demo 1 (Free)"
-                  variant="secondary"
-                  iconName="sparkles-outline"
-                  onPress={async () => {
-                    const now = new Date().toISOString()
-                    try {
-                      await AsyncStorage.setItem(LS_PREVIEW_PLAN, 'free')
-                      await AsyncStorage.setItem(LS_PREVIEW_MODE, '1')
-                      await AsyncStorage.setItem('billbox.onboarding.payer1Named', '1')
-                    } catch {}
-                    await spacesCtx.reset([{ id: 'personal', name: 'Demo Free', kind: 'personal', plan: 'free', seats: 1, created_at: now }], 'personal')
-                    await purgePayerData('personal')
-                    const today = new Date()
-                    const iso = (d: Date) => d.toISOString().slice(0, 10)
-                    await saveLocalBills('personal', [
-                      { id: 'demo_free_1', user_id: 'local', created_at: now, supplier: 'Electricity Co', amount: 54.2, currency: 'EUR', due_date: iso(new Date(today.getTime() + 3 * 86400000)), status: 'unpaid', space_id: 'personal' },
-                      { id: 'demo_free_2', user_id: 'local', created_at: now, supplier: 'Water Utility', amount: 22.1, currency: 'EUR', due_date: iso(new Date(today.getTime() + 6 * 86400000)), status: 'unpaid', space_id: 'personal' },
-                      { id: 'demo_free_3', user_id: 'local', created_at: now, supplier: 'Internet Provider', amount: 39.99, currency: 'EUR', due_date: iso(new Date(today.getTime() - 2 * 86400000)), status: 'unpaid', space_id: 'personal' },
-                      { id: 'demo_free_4', user_id: 'local', created_at: now, supplier: 'Home Insurance', amount: 88.0, currency: 'EUR', due_date: iso(new Date(today.getTime() + 21 * 86400000)), status: 'unpaid', space_id: 'personal' },
-                    ] as any)
-                    await saveLocalWarranties('personal', [
-                      { id: 'demo_free_w1', user_id: 'local', created_at: now, item_name: 'Laptop', supplier: 'Electronics', purchase_date: iso(new Date(today.getTime() - 220 * 86400000)), expires_at: iso(new Date(today.getTime() + 140 * 86400000)), space_id: 'personal' },
-                      { id: 'demo_free_w2', user_id: 'local', created_at: now, item_name: 'Vacuum Cleaner', supplier: 'Appliance Store', purchase_date: iso(new Date(today.getTime() - 60 * 86400000)), expires_at: iso(new Date(today.getTime() + 300 * 86400000)), space_id: 'personal' },
-                    ] as any)
-                    Alert.alert('Demo loaded', 'Demo 1 (Free) loaded. Open Bills and try search.')
-                  }}
-                />
-
-                <AppButton
-                  label="Demo 2 (Basic + Analytics)"
-                  variant="secondary"
-                  iconName="bar-chart-outline"
-                  onPress={async () => {
-                    const now = new Date().toISOString()
-                    try {
-                      await AsyncStorage.setItem(LS_PREVIEW_PLAN, 'basic')
-                      await AsyncStorage.setItem(LS_PREVIEW_MODE, '1')
-                      await AsyncStorage.setItem('billbox.onboarding.payer1Named', '1')
-                    } catch {}
-                    await spacesCtx.reset([{ id: 'personal', name: 'Demo Basic', kind: 'personal', plan: 'premium', seats: 1, created_at: now }], 'personal')
-                    await purgePayerData('personal')
-                    const today = new Date()
-                    const iso = (d: Date) => d.toISOString().slice(0, 10)
-                    const suppliers = ['Rent', 'Electricity Co', 'Water Utility', 'Internet Provider', 'Mobile Plan', 'Gym', 'Car Lease', 'Insurance']
-                    const bills = Array.from({ length: 16 }).map((_, i) => {
-                      const due = new Date(today.getTime() + (i - 6) * 86400000 * 3)
-                      const paid = i % 4 === 0
-                      return {
-                        id: `demo_basic_${i + 1}`,
-                        user_id: 'local',
-                        created_at: now,
-                        supplier: suppliers[i % suppliers.length],
-                        amount: Math.round((18 + (i % 7) * 11.25) * 100) / 100,
-                        currency: 'EUR',
-                        due_date: iso(due),
-                        status: paid ? 'paid' : 'unpaid',
-                        space_id: 'personal',
-                      }
-                    })
-                    await saveLocalBills('personal', bills as any)
-                    await saveLocalWarranties('personal', [
-                      { id: 'demo_basic_w1', user_id: 'local', created_at: now, item_name: 'Phone', supplier: 'Mobile Shop', purchase_date: iso(new Date(today.getTime() - 120 * 86400000)), expires_at: iso(new Date(today.getTime() + 240 * 86400000)), space_id: 'personal' },
-                      { id: 'demo_basic_w2', user_id: 'local', created_at: now, item_name: 'Coffee Machine', supplier: 'Appliance Store', purchase_date: iso(new Date(today.getTime() - 30 * 86400000)), expires_at: iso(new Date(today.getTime() + 365 * 86400000)), space_id: 'personal' },
-                    ] as any)
-                    Alert.alert('Demo loaded', 'Demo 2 (Basic) loaded. Reports are enabled.')
-                  }}
-                />
-
-                <AppButton
-                  label="Demo 3 (Pro + 2 payers)"
-                  variant="secondary"
-                  iconName="people-outline"
-                  onPress={async () => {
-                    const now = new Date().toISOString()
-                    try {
-                      await AsyncStorage.setItem(LS_PREVIEW_PLAN, 'pro')
-                      await AsyncStorage.setItem(LS_PREVIEW_MODE, '1')
-                      await AsyncStorage.setItem('billbox.onboarding.payer1Named', '1')
-                    } catch {}
-                    await spacesCtx.reset(
-                      [
-                        { id: 'personal', name: 'Demo Pro • Personal', kind: 'personal', plan: 'duo', seats: 1, created_at: now },
-                        { id: 'personal2', name: 'Demo Pro • Business', kind: 'personal', plan: 'duo', seats: 1, created_at: now },
-                      ],
-                      'personal'
-                    )
-                    await purgePayerData('personal')
-                    await purgePayerData('personal2')
-                    const today = new Date()
-                    const iso = (d: Date) => d.toISOString().slice(0, 10)
-                    await saveLocalBills('personal', [
-                      { id: 'demo_pro_p1_1', user_id: 'local', created_at: now, supplier: 'Mortgage', amount: 650, currency: 'EUR', due_date: iso(new Date(today.getTime() + 7 * 86400000)), status: 'unpaid', space_id: 'personal' },
-                      { id: 'demo_pro_p1_2', user_id: 'local', created_at: now, supplier: 'Electricity Co', amount: 72.4, currency: 'EUR', due_date: iso(new Date(today.getTime() - 1 * 86400000)), status: 'unpaid', space_id: 'personal' },
-                    ] as any)
-                    await saveLocalBills('personal2', [
-                      { id: 'demo_pro_p2_1', user_id: 'local', created_at: now, supplier: 'Office Rent', amount: 320, currency: 'EUR', due_date: iso(new Date(today.getTime() + 5 * 86400000)), status: 'unpaid', space_id: 'personal2' },
-                      { id: 'demo_pro_p2_2', user_id: 'local', created_at: now, supplier: 'Cloud Services', amount: 129.99, currency: 'EUR', due_date: iso(new Date(today.getTime() + 2 * 86400000)), status: 'unpaid', space_id: 'personal2' },
-                    ] as any)
-                    await saveLocalWarranties('personal', [
-                      { id: 'demo_pro_w1', user_id: 'local', created_at: now, item_name: 'TV', supplier: 'Electronics', purchase_date: iso(new Date(today.getTime() - 300 * 86400000)), expires_at: iso(new Date(today.getTime() + 65 * 86400000)), space_id: 'personal' },
-                    ] as any)
-                    await saveLocalWarranties('personal2', [
-                      { id: 'demo_pro_w2', user_id: 'local', created_at: now, item_name: 'Printer', supplier: 'Office Supplies', purchase_date: iso(new Date(today.getTime() - 90 * 86400000)), expires_at: iso(new Date(today.getTime() + 400 * 86400000)), space_id: 'personal2' },
-                    ] as any)
-                    Alert.alert('Demo loaded', 'Demo 3 (Pro) loaded. Use Home to switch payers and see separate data.')
-                  }}
-                />
-              </View>
-            </View>
-          </Surface>
-        ) : null}
+        <Image source={BRAND_WORDMARK} style={styles.wordmarkSettingsHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />
+        <SectionHeader title={space?.name ? `Settings • ${space.name}` : 'Settings'} />
 
         <Surface elevated>
           <SectionHeader title="Workspace" />
@@ -5790,7 +4850,6 @@ function SettingsScreen() {
 
         <Surface elevated>
           <SectionHeader title="Payers" />
-          <Text style={[styles.mutedText, { marginBottom: themeSpacing.xs }]}>Active payer is selected on Home.</Text>
           {(['personal', 'personal2'] as const).map((id) => {
             const sp = spacesCtx.spaces.find((s) => s.id === id) || null
             const active = spacesCtx.current?.id === id
@@ -5812,7 +4871,11 @@ function SettingsScreen() {
                         variant="secondary"
                         iconName="arrow-up-circle-outline"
                         onPress={() => {
-                          showUpgradeAlert('space_limit')
+                          if (IS_EXPO_GO) {
+                            Alert.alert('Upgrade', 'Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.')
+                            return
+                          }
+                          navigation.navigate('Payments')
                         }}
                       />
                     ) : (
@@ -5839,14 +4902,14 @@ function SettingsScreen() {
                 <Text style={{ fontWeight: '600' }}>{slotLabel} {active ? '• Active' : ''}</Text>
                 <Text style={styles.mutedText}>Name: {sp.name || '—'}</Text>
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                  {!active ? (
+                  {!active && (
                     <AppButton
-                      label="Switch on Home"
+                      label="Switch"
                       variant="secondary"
                       iconName="swap-horizontal-outline"
-                      onPress={() => navigation.navigate('Home')}
+                      onPress={() => spacesCtx.setCurrent(sp.id)}
                     />
-                  ) : null}
+                  )}
                   <AppButton
                     label="Rename"
                     variant="secondary"
@@ -5871,42 +4934,83 @@ function SettingsScreen() {
 
         <Surface elevated>
           <SectionHeader title="Subscription" />
+          <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.xs }}>
+            <View style={[styles.planRow, entitlements.plan === 'free' && styles.planRowActive]}>
+              <View style={styles.planRowHeader}>
+                <Text style={styles.planRowTitle}>FREE</Text>
+                {entitlements.plan === 'free' ? <Badge label="Active" tone="info" /> : null}
+              </View>
+              <Text style={styles.planRowItem}>• 1 payer</Text>
+              <Text style={styles.planRowItem}>• Basic scan</Text>
+              <Text style={styles.planRowItem}>• Limited OCR</Text>
+              <Text style={styles.planRowItem}>• No exports</Text>
+            </View>
 
-          <View style={{ marginTop: themeSpacing.xs }}>
-            <PlanCards
-              currentPlan={entitlements.plan}
-              onUpgradeBasic={() => showUpgradeAlert('upgrade')}
-              onUpgradePro={() => showUpgradeAlert('upgrade')}
-            />
+            <View style={[styles.planRow, entitlements.plan === 'basic' && styles.planRowActive]}>
+              <View style={styles.planRowHeader}>
+                <Text style={styles.planRowTitle}>BASIC</Text>
+                {entitlements.plan === 'basic' ? <Badge label="Active" tone="info" /> : null}
+              </View>
+              <Text style={styles.planRowItem}>• 1 payer</Text>
+              <Text style={styles.planRowItem}>• Unlimited bills + warranties</Text>
+              <Text style={styles.planRowItem}>• Reminders</Text>
+              <Text style={styles.planRowItem}>• CSV + JSON export</Text>
+            </View>
+
+            <View style={[styles.planRow, entitlements.plan === 'pro' && styles.planRowActive]}>
+              <View style={styles.planRowHeader}>
+                <Text style={styles.planRowTitle}>PRO</Text>
+                {entitlements.plan === 'pro' ? <Badge label="Active" tone="info" /> : null}
+              </View>
+              <Text style={styles.planRowItem}>• 2 payers</Text>
+              <Text style={styles.planRowItem}>• Separate data</Text>
+              <Text style={styles.planRowItem}>• CSV + PDF + ZIP + JSON export</Text>
+            </View>
+
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, alignItems: 'center' }}>
+              <AppButton
+                label={entitlements.plan === 'free' ? 'Upgrade to Basic' : entitlements.plan === 'basic' ? 'Upgrade to Pro' : 'Manage subscription'}
+                variant="secondary"
+                iconName="arrow-up-circle-outline"
+                onPress={() => {
+                  if (IS_EXPO_GO) {
+                    Alert.alert('Subscription', 'Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.')
+                    return
+                  }
+                  navigation.navigate('Payments')
+                }}
+              />
+              {entitlements.plan !== 'pro' ? (
+                <Text style={styles.mutedText}>
+                  {entitlements.plan === 'free'
+                    ? `Save €${planSavings.basic} with yearly billing`
+                    : `Save €${planSavings.pro} with yearly billing`}
+                </Text>
+              ) : null}
+            </View>
           </View>
         </Surface>
 
         <Surface elevated style={{ marginTop: themeSpacing.md }}>
           <SectionHeader title="Language" />
-          <View style={styles.languageGrid}>
-            {(['sl', 'en', 'hr', 'it', 'de'] as Lang[]).map((code) => {
-              const selected = lang === code
-              const label = t(lang, code === 'sl' ? 'slovenian' : code === 'en' ? 'english' : code === 'hr' ? 'croatian' : code === 'it' ? 'italian' : 'german')
-              return (
-                <Pressable key={code} style={[styles.languageOption, selected && styles.languageOptionSelected]} onPress={() => changeLang(code)}>
-                  <Text style={[styles.languageOptionLabel, selected && styles.languageOptionLabelSelected]}>{label}</Text>
-                </Pressable>
-              )
-            })}
+          <View style={{ flexDirection: 'row', gap: themeSpacing.sm, flexWrap: 'wrap', marginTop: themeSpacing.xs, paddingBottom: themeSpacing.xs }}>
+          {(['sl','en','hr','it','de'] as Lang[]).map(code => (
+            <TouchableOpacity key={code} style={[styles.secondaryBtn, { backgroundColor: lang===code? '#2b6cb0':'#00000088' }]} onPress={()=> changeLang(code)}>
+              <Text style={[styles.secondaryBtnText, lang===code ? styles.secondaryBtnTextActive : null]}>{t(lang, code==='sl'?'slovenian':code==='en'?'english':code==='hr'?'croatian':code==='it'?'italian':'german')}</Text>
+            </TouchableOpacity>
+          ))}
           </View>
         </Surface>
 
         <Surface elevated>
           <SectionHeader title="Reminders & notifications" />
           <Text style={styles.bodyText}>Status: {notifStatus || 'unknown'}</Text>
-          <Text style={[styles.bodyText, { marginTop: themeSpacing.xs }]}>
-            Local reminders are included on all plans. Push notifications are only available in standalone builds when enabled for this project.
-          </Text>
+          <Text style={[styles.bodyText, { marginTop: themeSpacing.xs }]}>Local reminders work in Expo Go. Push notifications are only available in standalone builds when enabled for this project.</Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
             <AppButton
               label="Enable reminders"
               variant="secondary"
-              iconName={'notifications-outline'}
+              iconName="notifications-outline"
               onPress={async ()=>{
                 const ok = await requestPermissionIfNeeded()
                 const p = await Notifications.getPermissionsAsync()
@@ -5992,10 +5096,9 @@ type AppNavigationProps = {
   lang: Lang
   setLang: (value: Lang) => void
   authLoading: boolean
-  onEnterPreviewMode: () => void
 }
 
-function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading, onEnterPreviewMode }: AppNavigationProps) {
+function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: AppNavigationProps) {
   const { space, spaceId, loading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
   const spacesCtx = useSpacesContext()
@@ -6030,7 +5133,15 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading, onEn
         if (guessed) fileName = guessed
       }
       try {
-        const targetSpaceId = spaceId
+        let targetSpaceId = spaceId
+        if (spacesCtx.spaces.length > 1) {
+          targetSpaceId = await new Promise<string | null>((resolve) => {
+            const buttons = spacesCtx.spaces.map((s) => ({ text: s.name, onPress: () => resolve(s.id) }))
+            buttons.push({ text: 'Cancel', style: 'cancel', onPress: () => resolve(null) } as any)
+            Alert.alert('Choose payer', 'Import this file into which payer?', buttons)
+          })
+          if (!targetSpaceId) return
+        }
 
         const item = await addToInbox({ spaceId: targetSpaceId, uri: targetUri, name: fileName, mimeType })
         Alert.alert('Inbox', `${item.name} added to Inbox`) 
@@ -6082,25 +5193,13 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading, onEn
   } else {
     content = (
       <NavigationContainer ref={navRef}>
-        {!loggedIn ? (
-          <Stack.Navigator>
+        <Stack.Navigator>
+          {!loggedIn ? (
             <Stack.Screen name="Login" options={{ headerShown: coerceBool(false) }}>
-              {() => (
-                <LoginScreen
-                  onLoggedIn={() => setLoggedIn(true)}
-                  onEnterPreviewMode={onEnterPreviewMode}
-                  lang={lang}
-                  setLang={(l) => {
-                    setLang(l)
-                    saveLang(l)
-                  }}
-                />
-              )}
+              {() => <LoginScreen onLoggedIn={()=>setLoggedIn(true)} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} />}
             </Stack.Screen>
-          </Stack.Navigator>
-        ) : (
-          <AskBillBoxProvider navRef={navRef} lang={lang}>
-            <Stack.Navigator>
+          ) : (
+            <>
               <Stack.Screen name="BillBox" component={MainTabs} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Inbox" component={InboxScreen} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Warranties" component={WarrantiesScreen} options={{ headerShown: coerceBool(false) }} />
@@ -6109,9 +5208,9 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading, onEn
               <Stack.Screen name="Payments" component={PaymentsScreen} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Bill Details" component={BillDetailsScreen} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Warranty Details" component={WarrantyDetailsScreen} options={{ headerShown: coerceBool(false) }} />
-            </Stack.Navigator>
-          </AskBillBoxProvider>
-        )}
+            </>
+          )}
+        </Stack.Navigator>
       </NavigationContainer>
     )
   }
@@ -6120,71 +5219,13 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading, onEn
 }
 
 export default function App() {
-  const [previewReady, setPreviewReady] = useState(false)
-  const [previewMode, setPreviewMode] = useState(false)
-  const supabase = useMemo(() => (previewReady ? getSupabase() : null), [previewReady, previewMode])
+  const supabase = useMemo(() => getSupabase(), [])
   const [loggedIn, setLoggedIn] = useState(false)
   const [authLoading, setAuthLoading] = useState(true)
   const [lang, setLang] = useState<Lang>('en')
   useEffect(()=>{ (async()=> setLang(await loadLang()))() }, [])
-
-  const exitPreviewMode = useCallback(async () => {
-    try {
-      await AsyncStorage.multiRemove([LS_PREVIEW_MODE, LS_PREVIEW_PLAN])
-    } catch {}
-
-    // Flip global + stateful preview mode off first.
-    try {
-      setPreviewModeEnabled(false)
-    } catch {}
-    setPreviewMode(false)
-
-    // Ensure we land on Login, even if a stale session exists.
-    try {
-      const sb = getSupabase()
-      if (sb) await sb.auth.signOut()
-    } catch {}
-
-    setLoggedIn(false)
-  }, [])
-
   useEffect(() => {
     let mounted = true
-    ;(async () => {
-      try {
-        const raw = await AsyncStorage.getItem(LS_PREVIEW_MODE)
-        const enabled = raw === '1'
-        if (mounted) {
-          setPreviewModeEnabled(enabled)
-          setPreviewMode(enabled)
-        }
-      } catch {
-        if (mounted) {
-          setPreviewModeEnabled(false)
-          setPreviewMode(false)
-        }
-      } finally {
-        if (mounted) setPreviewReady(true)
-      }
-    })()
-    return () => {
-      mounted = false
-    }
-  }, [])
-
-  // Keep global flag in sync for getSupabase() calls throughout the app.
-  setPreviewModeEnabled(previewMode)
-
-  useEffect(() => {
-    let mounted = true
-    if (!previewReady) {
-      return
-    }
-    if (previewMode) {
-      setLoggedIn(true)
-      setAuthLoading(false)
-      return
-    }
     if (!supabase) {
       setLoggedIn(true)
       setAuthLoading(false)
@@ -6207,7 +5248,7 @@ export default function App() {
       mounted = false
       listener?.subscription?.unsubscribe()
     }
-  }, [previewMode, previewReady, supabase])
+  }, [supabase])
   useEffect(() => { (async ()=>{ 
     await ensureNotificationConfig()
     // iOS action buttons
@@ -6252,43 +5293,15 @@ export default function App() {
     }
     return () => { sub && Notifications.removeNotificationSubscription(sub) }
   })() }, [])
-  if (!previewReady) {
-    return (
-      <SafeAreaView style={{ flex: 1 }}>
-        <StatusBar style="dark" />
-        <Screen scroll={false}>
-          <View style={styles.centered}
-          >
-            <ActivityIndicator size="large" color={themeColors.primary} />
-            <Text style={styles.mutedText}>Preparing…</Text>
-          </View>
-        </Screen>
-      </SafeAreaView>
-    )
-  }
-
   return (
-    <PreviewModeContext.Provider value={{ enabled: previewMode, exit: exitPreviewMode }}>
-      <EntitlementsProvider supabase={supabase}>
-        <SpaceProvider>
-          <UpgradeModalHost />
-          <SafeAreaView style={{ flex: 1 }}>
-            <StatusBar style="dark" />
-            <AppNavigation
-              loggedIn={loggedIn}
-              setLoggedIn={setLoggedIn}
-              lang={lang}
-              setLang={(l) => {
-                setLang(l)
-                saveLang(l)
-              }}
-              authLoading={authLoading}
-              onEnterPreviewMode={() => setPreviewMode(true)}
-            />
-          </SafeAreaView>
-        </SpaceProvider>
-      </EntitlementsProvider>
-    </PreviewModeContext.Provider>
+    <EntitlementsProvider supabase={supabase}>
+      <SpaceProvider>
+        <SafeAreaView style={{ flex: 1 }}>
+          <StatusBar style="dark" />
+          <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} authLoading={authLoading} />
+        </SafeAreaView>
+      </SpaceProvider>
+    </EntitlementsProvider>
   )
 }
 
@@ -6299,7 +5312,6 @@ const styles = StyleSheet.create({
   loginWrapper: { flexGrow: 1, gap: themeSpacing.lg },
   loginHeader: { alignItems: 'center', gap: themeSpacing.sm },
   loginLogo: { width: 56, height: 56, borderRadius: 28, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  brandCombinedLoginHeader: { height: 42, width: 210 },
   loginTitle: { fontSize: 24, fontWeight: '700', color: themeColors.text },
   loginSubtitle: { fontSize: 15, color: themeColors.textMuted, textAlign: 'center' },
   feedbackBanner: { alignSelf: 'stretch' },
@@ -6317,32 +5329,18 @@ const styles = StyleSheet.create({
   languageCard: { gap: themeSpacing.md },
   languageTitle: { fontSize: 16, fontWeight: '600', color: themeColors.text },
   languageGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm },
-  languageOption: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.borderMuted, backgroundColor: themeColors.surfaceMuted },
+  languageOption: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: themeColors.surface },
   languageOptionSelected: { backgroundColor: themeColors.primary, borderColor: themeColors.primary },
-  languageOptionLabel: { fontSize: 14, color: themeColors.text, fontWeight: '600' },
+  languageOptionLabel: { fontSize: 14, color: themeColors.textMuted, fontWeight: '500' },
   languageOptionLabelSelected: { color: '#FFFFFF' },
   container: { flex: 1, padding: themeLayout.screenPadding },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: themeLayout.screenPadding },
   pageStack: { flex: 1, gap: themeSpacing.sm },
   screenHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: themeSpacing.sm, gap: themeLayout.gap },
-  homeScreenHeader: { alignItems: 'center' },
   screenHeaderText: { flexShrink: 1, gap: 2 },
-  brandIconHomeHeader: { width: 22, height: 22 },
-  brandIconSectionHeader: { width: 18, height: 18 },
-  brandCombinedHomeHeader: { width: 132, height: 28 },
   screenHeaderTitle: { fontSize: 18, fontWeight: '700', color: themeColors.text },
   screenHeaderSubtitle: { fontSize: 12, color: themeColors.textMuted },
   screenHeaderTrailing: { marginLeft: 'auto' },
-  homeHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm, flexShrink: 1 },
-  homeHeaderTrailingRow: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm },
-
-  modalHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm },
-  modalHeaderIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  modalTitle: { fontSize: 16, fontWeight: '700', color: themeColors.text },
-  modalSubtitle: { fontSize: 13, color: themeColors.textMuted, marginTop: 2 },
-  modalPlanRow: { borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, padding: themeSpacing.md, backgroundColor: themeColors.surface },
-  modalPlanHeader: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm, marginBottom: themeSpacing.xs },
-  modalPlanTitle: { fontSize: 14, fontWeight: '700', color: themeColors.text },
   primaryBtn: { backgroundColor: themeColors.primary, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   primaryBtnDisabled: { opacity: 0.6 },
   primaryBtnText: { color: '#FFFFFF', fontWeight: '600' },
@@ -6416,70 +5414,6 @@ const styles = StyleSheet.create({
   attachmentPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: 'rgba(30, 78, 216, 0.12)' },
   attachmentText: { fontSize: 12, color: themeColors.primary },
   fab: { position: 'absolute', right: themeSpacing.xl, bottom: isIOS ? themeSpacing.xl : themeSpacing.xxl + themeSpacing.lg },
-  fabButton: { width: 52, height: 52, borderRadius: 26, backgroundColor: themeColors.primary, alignItems: 'center', justifyContent: 'center' },
-
-  // Ask BillBox
-  askOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.35)',
-    justifyContent: 'flex-end',
-    padding: themeLayout.screenPadding,
-  },
-  askSheet: {
-    backgroundColor: themeColors.surface,
-    borderRadius: 20,
-    padding: themeSpacing.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: themeColors.border,
-    maxHeight: '85%',
-  },
-  askHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm },
-  askHeaderIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  askTitle: { fontSize: 16, fontWeight: '700', color: themeColors.text },
-  askSubtitle: { marginTop: 2, fontSize: 13, color: themeColors.textMuted },
-  askChipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: themeSpacing.sm },
-  askChip: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-    backgroundColor: themeColors.surfaceMuted,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: themeColors.border,
-  },
-  askChipText: { fontSize: 12, fontWeight: '600', color: themeColors.text },
-  askMessages: { marginTop: themeSpacing.sm },
-  askMsgRow: { marginBottom: 10 },
-  askMsgRowUser: { alignItems: 'flex-end' },
-  askMsgRowAssistant: { alignItems: 'flex-start' },
-  askBubble: { maxWidth: '92%', borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12 },
-  askBubbleUser: { backgroundColor: themeColors.primary },
-  askBubbleAssistant: { backgroundColor: themeColors.surfaceMuted, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
-  askBubbleText: { fontSize: 14, lineHeight: 20 },
-  askBubbleTextUser: { color: '#FFFFFF', fontWeight: '600' },
-  askBubbleTextAssistant: { color: themeColors.text },
-  askActionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
-  askActionBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-    backgroundColor: themeColors.primarySoft,
-  },
-  askActionBtnText: { fontSize: 12, fontWeight: '700', color: themeColors.primary },
-  askInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 },
-  askInfoText: { fontSize: 12, color: themeColors.textMuted, flex: 1 },
-  askInputRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: themeSpacing.sm },
-  askInput: {
-    flex: 1,
-    minHeight: themeLayout.inputHeight,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: themeColors.border,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: '#FFFFFF',
-    color: themeColors.text,
-  },
-  askSendBtn: { width: themeLayout.buttonHeight, height: themeLayout.buttonHeight, borderRadius: 12, backgroundColor: themeColors.primary, alignItems: 'center', justifyContent: 'center' },
   iosPickerOverlay: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.35)', justifyContent: 'flex-end', padding: themeLayout.screenPadding },
   iosPickerSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: themeSpacing.lg, gap: themeSpacing.md },
   iosPickerActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap },
@@ -6510,7 +5444,6 @@ const styles = StyleSheet.create({
   formRow: { flexDirection: 'row', gap: themeLayout.gap },
   flex1: { flex: 1 },
   currencyInput: { width: 96 },
-  warrantyDateInput: { minHeight: 58, paddingVertical: 16 },
   datePickerContainer: { marginTop: themeSpacing.sm, gap: themeLayout.gap },
   datePickerActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap },
   formDivider: { marginVertical: themeSpacing.sm },
@@ -6523,7 +5456,7 @@ const styles = StyleSheet.create({
 
   // Home tiles
   gridWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
-  statCardPressable: { width: '48%', height: 96, marginBottom: themeSpacing.sm },
+  statCardPressable: { width: '48%', height: 104, marginBottom: themeSpacing.sm },
   statCardPressed: { opacity: 0.9 },
   homeSummaryCard: { padding: themeSpacing.sm },
   statCard: { paddingVertical: themeSpacing.xs, paddingHorizontal: themeSpacing.sm, gap: themeSpacing.xs, flex: 1, justifyContent: 'space-between' },
@@ -6546,26 +5479,4 @@ const styles = StyleSheet.create({
   payBatchRow: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs, flexWrap: 'wrap' },
   payOverviewRow: { flexDirection: 'row', gap: themeSpacing.xs },
   payOverviewCard: { borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 10, paddingVertical: themeSpacing.sm, paddingHorizontal: themeSpacing.sm, backgroundColor: '#FFFFFF' },
-  payChipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.xs, marginTop: themeSpacing.sm },
-  payChip: {
-    minWidth: '48%',
-    paddingVertical: themeSpacing.sm,
-    paddingHorizontal: themeSpacing.sm,
-    borderRadius: 12,
-    backgroundColor: themeColors.surfaceMuted,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: themeColors.border,
-  },
-  payChipSelected: {
-    backgroundColor: themeColors.surface,
-    borderWidth: 1,
-  },
-  payChipDanger: { borderColor: themeColors.danger },
-  payChipWarning: { borderColor: themeColors.warning },
-  payChipPrimary: { borderColor: themeColors.primary },
-  payChipNeutral: { borderColor: themeColors.border },
-  payChipLabel: { fontSize: 12, fontWeight: '600', color: themeColors.textMuted },
-  payChipLabelSelected: { color: themeColors.text },
-  payChipValue: { marginTop: 2, fontSize: 13, fontWeight: '700', color: themeColors.text },
-  payChipValueSelected: { color: themeColors.text },
 })

@@ -5,13 +5,9 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 function getViteEnv(key: string): string | undefined {
-  try {
-    const meta = (typeof import.meta !== 'undefined' ? import.meta : undefined) as { env?: Record<string, unknown> } | undefined
-    const val = meta?.env?.[key]
-    return typeof val === 'string' ? val : undefined
-  } catch {
-    return undefined
-  }
+  const im = (typeof import !== 'undefined' ? (import.meta as unknown) : undefined) as { env?: Record<string, unknown> } | undefined
+  const val = im?.env?.[key]
+  return typeof val === 'string' ? val : undefined
 }
 
 function getExpoEnv(key: string): string | undefined {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Warranty, WarrantyStatus } from '../types'
 import { listWarranties, createWarranty, updateWarranty, deleteWarranty, getWarrantyStatus } from '../api'
 import WarrantyForm from './WarrantyForm'
@@ -13,33 +13,15 @@ export default function WarrantiesPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Warranty | null>(null)
 
-  const reload = useCallback(async () => {
+  async function reload() {
     setLoading(true)
-    setError(null)
-    try {
-      const { data, error } = await listWarranties()
-      if (error) setError(error.message)
-      else setItems(data)
-    } catch (err) {
-      const message = err instanceof Error && err.message ? err.message : 'Failed to load warranties'
-      setError(message)
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+    const { data, error } = await listWarranties()
+    if (error) setError(error.message)
+    else setItems(data)
+    setLoading(false)
+  }
 
-  useEffect(() => {
-    let cancelled = false
-    const timer = setTimeout(() => {
-      if (!cancelled) {
-        void reload()
-      }
-    }, 0)
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [reload])
+  useEffect(() => { reload() }, [])
 
   const filtered = useMemo(() => {
     let arr = items.slice()
@@ -63,14 +45,14 @@ export default function WarrantiesPage() {
     }
     setFormOpen(false)
     setEditing(null)
-    void reload()
+    reload()
   }
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this warranty?')) return
     const { error } = await deleteWarranty(id)
     if (error) setError(error.message)
-    void reload()
+    reload()
   }
 
   return (

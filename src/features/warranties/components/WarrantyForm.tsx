@@ -5,8 +5,6 @@ import QRScanner from '../../../components/QRScanner'
 import { parseEPC } from '../../../lib/epc'
 import { uploadAttachments as uploadWarrantyAttachments } from '../attachments'
 import { BrowserQRCodeReader } from '@zxing/browser'
-import type { Result } from '@zxing/library'
-import { supabase } from '../../../lib/supabase'
 
 interface Props {
   initial?: Warranty | null
@@ -30,20 +28,6 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrError, setOcrError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-
-  function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null
-  }
-
-  function extractOcrFields(data: unknown): { ok: boolean; supplier?: string; due_date?: string; message?: string } {
-    if (!isRecord(data)) return { ok: false }
-    const ok = data.ok === true
-    const message = typeof data.error === 'string' ? data.error : undefined
-    const fields = isRecord(data.fields) ? data.fields : undefined
-    const supplier = typeof fields?.supplier === 'string' ? fields.supplier : undefined
-    const due_date = typeof fields?.due_date === 'string' ? fields.due_date : undefined
-    return { ok, supplier, due_date, message }
-  }
 
   useEffect(() => {
     if (initial) {
@@ -75,25 +59,20 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
     setOcrError(null)
     setOcrBusy(true)
     try {
-      const { data } = await supabase.auth.getSession()
-      const token = data?.session?.access_token
-      const headers: HeadersInit = { 'Content-Type': selectedFile.type || 'application/octet-stream' }
-      if (token) (headers as Record<string, string>).Authorization = `Bearer ${token}`
       const resp = await fetch('/.netlify/functions/ocr', {
         method: 'POST',
-        headers,
+        headers: { 'Content-Type': selectedFile.type || 'application/octet-stream' },
         body: selectedFile,
       })
-      const raw = await resp.json().catch(() => null)
-      const { ok, supplier: supplierField, due_date: dueDateField, message } = extractOcrFields(raw)
-      if (!resp.ok || !ok) {
-        throw new Error(message || `OCR failed (${resp.status})`)
+      const data = await resp.json().catch(() => null)
+      if (!resp.ok || !data?.ok) {
+        throw new Error(data?.error || `OCR failed (${resp.status})`)
       }
-      if (supplierField) setSupplier((prev) => prev || supplierField)
-      if (dueDateField && !expiresAt) setExpiresAt(dueDateField)
-    } catch (e: unknown) {
-      const message = e instanceof Error && e.message ? e.message : 'OCR failed'
-      setOcrError(message)
+      const f = data.fields || {}
+      if (f.supplier) setSupplier((prev)=> prev || f.supplier)
+      if (f.due_date && !expiresAt) setExpiresAt(f.due_date)
+    } catch (e: any) {
+      setOcrError(e?.message || 'OCR failed')
     } finally {
       setOcrBusy(false)
     }
@@ -118,22 +97,22 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
         img.onerror = () => reject(new Error('Failed to load image'))
       })
       const decodePromise = reader.decodeFromImageUrl(url)
-      const timeoutPromise = new Promise<Result>((_resolve, reject) => {
+      const timeoutPromise = new Promise((_resolve, reject) => {
         const id = setTimeout(() => {
           clearTimeout(id)
           reject(new Error('Timeout: QR not found in 6s'))
         }, 6000)
       })
-      const result = await Promise.race([decodePromise, timeoutPromise])
-      const text = result.getText()
+      const result = await Promise.race([decodePromise, timeoutPromise]) as any
+      const text = typeof result?.getText === 'function' ? result.getText() : String(result)
       if (!text) throw new Error('No QR text decoded')
       setDecodedText(text)
       const epc = parseEPC(text)
       if (epc) {
         if (epc.creditor_name) setSupplier(epc.creditor_name)
       }
-    } catch (err: unknown) {
-      const name = err instanceof Error && err.name ? err.name : 'Error'
+    } catch (err: any) {
+      const name = err?.name || 'Error'
       const msg = err instanceof Error ? err.message : 'QR decode failed'
       console.error('[QR] Upload decode error:', { name, message: msg })
       setUploadDecodeError('Could not detect a QR in the photo. Try a sharper, well-lit image.')

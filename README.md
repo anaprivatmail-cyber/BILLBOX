@@ -66,45 +66,6 @@ Set these in Netlify → Site settings → Environment variables:
 
 No OCR keys in frontend code. Expo uploads the file to the Netlify OCR function; the function returns parsed JSON only.
 
-### Stripe Checkout (Subscriptions)
-
-Set up products/prices in Stripe Dashboard first, then configure Netlify env vars:
-
-- `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_SERVICE_ROLE_KEY`: Service role key (needed to update `entitlements`)
-- `STRIPE_SECRET_KEY`: Stripe secret key (starts with `sk_`)
-- `STRIPE_WEBHOOK_SECRET`: Webhook signing secret from the Stripe CLI/Dashboard
-- `STRIPE_BASIC_MONTHLY_PRICE_ID`: Price ID for Basic monthly (€2.20)
-- `STRIPE_BASIC_YEARLY_PRICE_ID`: Price ID for Basic yearly (€20.00)
-- `STRIPE_PRO_MONTHLY_PRICE_ID`: Price ID for Pro monthly (€4.00)
-- `STRIPE_PRO_YEARLY_PRICE_ID`: Price ID for Pro yearly (€38.00)
-- (optional) `PUBLIC_SITE_URL`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`
-
-Netlify functions created:
-
-- `/.netlify/functions/create-checkout-session` – POST `{ plan: 'basic'|'pro', interval: 'monthly'|'yearly', userId: '<supabase_user_id>' }` → returns `{ url }` to redirect
-- `/.netlify/functions/stripe-webhook` – Stripe webhook receiver; activates the `entitlements` record
-
-Example test:
-
-```
-curl -s -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"plan":"basic","interval":"monthly","userId":"YOUR_SUPABASE_USER_ID"}' \
-  https://YOUR_SITE.netlify.app/.netlify/functions/create-checkout-session
-```
-
-On successful checkout, the webhook sets:
-
-- `plan` to `basic` or `pro`
-- `subscription_source` to `stripe`
-- `exports_enabled` to `true`
-- `ocr_quota_monthly` to a plan-specific quota (adjust in `netlify/functions/stripe-webhook.js`)
-
-### Supabase Policies (entitlements)
-
-RLS base select policy is in `supabase/policies.sql`. If you want clients (non-service-role) to insert/update their own entitlements (e.g., IAP flows), run `supabase/entitlements_policies.sql` in the Supabase SQL editor. If only server-side (Netlify webhook/service role) updates entitlements, you can skip it.
-
 ### Features Implemented
 
 - Bills: QR scan (raw text shown), EPC/UPN parsing, OCR from photo, manual entry, review + explicit save
