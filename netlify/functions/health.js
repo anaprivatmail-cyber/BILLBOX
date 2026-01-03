@@ -18,6 +18,11 @@ export async function handler(event) {
     ok: true,
     service: 'billbox-functions',
     node: process.version,
+    deploy: {
+      commitRef: process.env.COMMIT_REF || null,
+      deployId: process.env.DEPLOY_ID || null,
+      context: process.env.CONTEXT || null,
+    },
     has: {
       supabaseUrl: Boolean(env.SUPABASE_URL),
       supabaseServiceRoleKey: Boolean(env.SUPABASE_SERVICE_ROLE_KEY),
