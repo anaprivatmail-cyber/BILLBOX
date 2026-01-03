@@ -1,0 +1,28 @@
+{
+  "cli": {
+    "version": ">= 10.2.4"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "image": "ubuntu-22.04-jdk-17-ndk-r25b"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "image": "ubuntu-22.04-jdk-17-ndk-r25b"
+      }
+    },
+    "production": {
+      "android": {
+        "image": "ubuntu-22.04-jdk-17-ndk-r25b"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
