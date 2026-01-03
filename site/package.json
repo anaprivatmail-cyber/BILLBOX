@@ -1,0 +1,9 @@
+{
+  "name": "billbox-site",
+  "private": true,
+  "description": "Static site for store compliance pages (privacy/terms/account deletion).",
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
+  }
+}

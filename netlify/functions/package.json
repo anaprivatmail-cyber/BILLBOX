@@ -1,0 +1,15 @@
+{
+  "name": "billbox-netlify-functions",
+  "private": true,
+  "description": "Dependencies for Netlify Functions only (kept separate from monorepo workspaces).",
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.89.0",
+    "google-auth-library": "9.0.0",
+    "pdf-parse": "1.1.1",
+    "stripe": "16.6.0"
+  }
+}
