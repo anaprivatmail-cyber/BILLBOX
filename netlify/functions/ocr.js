@@ -1,6 +1,5 @@
 import { GoogleAuth } from 'google-auth-library'
 import { createClient } from '@supabase/supabase-js'
-import pdf from 'pdf-parse'
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
@@ -81,6 +80,15 @@ async function getUserFromAuthHeader(event) {
 function isSameMonth(a, b) {
   if (!a || !b) return false
   return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth()
+}
+
+async function parsePdfText(pdfBuffer) {
+  // Important: do NOT import `pdf-parse` package root here.
+  // The package entrypoint contains a CLI/test block that can misbehave under bundlers.
+  const mod = await import('pdf-parse/lib/pdf-parse.js')
+  const pdfParse = mod?.default || mod
+  const parsed = await pdfParse(pdfBuffer)
+  return (parsed?.text || '').trim()
 }
 
 function extractFields(rawText) {
@@ -302,8 +310,7 @@ export async function handler(event) {
     // PDF path: try text extraction first (works for many accounting PDFs)
     if (isPdf) {
       try {
-        const parsed = await pdf(pdfBuffer)
-        const text = (parsed?.text || '').trim()
+        const text = await parsePdfText(pdfBuffer)
         if (!text) {
           return jsonResponse(400, {
             ok: false,
