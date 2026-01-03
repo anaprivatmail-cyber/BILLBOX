@@ -3,7 +3,9 @@ import type { Bill, CreateBillInput } from '../types'
 import { Tabs } from '../../../components/ui/Tabs'
 import QRScanner from '../../../components/QRScanner'
 import { BrowserQRCodeReader } from '@zxing/browser'
+import type { Result } from '@zxing/library'
 import { parsePaymentQR } from '../../../lib/epc'
+import { supabase } from '../../../lib/supabase'
 
 interface Props {
   initial?: Bill | null
@@ -90,14 +92,14 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         img.onerror = () => reject(new Error('Failed to load image'))
       })
       const decodePromise = reader.decodeFromImageUrl(url)
-      const timeoutPromise = new Promise((_resolve, reject) => {
+      const timeoutPromise = new Promise<Result>((_resolve, reject) => {
         const id = setTimeout(() => {
           clearTimeout(id)
           reject(new Error('Timeout: QR not found in 6s'))
         }, 6000)
       })
-      const result = await Promise.race([decodePromise, timeoutPromise]) as any
-      const text = typeof result?.getText === 'function' ? result.getText() : String(result)
+      const result = await Promise.race([decodePromise, timeoutPromise])
+      const text = result.getText()
       if (!text) throw new Error('No QR text decoded')
       setDecodedText(text)
       const res = parsePaymentQR(text)
@@ -117,8 +119,8 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       } else {
         setQrSuccess(false)
       }
-    } catch (err: any) {
-      const name = err?.name || 'Error'
+    } catch (err: unknown) {
+      const name = err instanceof Error && err.name ? err.name : 'Error'
       const msg = err instanceof Error ? err.message : 'QR decode failed'
       console.error('[QR] Upload decode error:', { name, message: msg })
       setUploadDecodeError('Could not detect a QR in the photo. Try a sharper, well-lit image.')
@@ -133,16 +135,20 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
     setOcrError(null)
     setOcrBusy(true)
     try {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const token = sessionData?.session?.access_token
+      const headers: HeadersInit = { 'Content-Type': selectedFile.type || 'application/octet-stream' }
+      if (token) (headers as Record<string, string>).Authorization = `Bearer ${token}`
       const resp = await fetch('/.netlify/functions/ocr', {
         method: 'POST',
-        headers: { 'Content-Type': selectedFile.type || 'application/octet-stream' },
+        headers,
         body: selectedFile,
       })
-      const data = await resp.json().catch(() => null)
+      const data = await resp.json().catch(() => null as any)
       if (!resp.ok || !data?.ok) {
-        throw new Error(data?.error || `OCR failed (${resp.status})`)
+        throw new Error((data && data.error) || `OCR failed (${resp.status})`)
       }
-      const f = data.fields || {}
+      const f = (data && data.fields) || {}
       if (f.creditor_name) setCreditorName(f.creditor_name)
       if (f.supplier) setSupplier((prev)=> prev || f.supplier)
       if (typeof f.amount === 'number') setAmount(f.amount)
@@ -156,8 +162,9 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         paymentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }, 200)
       setTimeout(() => setFlashFilled(false), 1200)
-    } catch (e: any) {
-      setOcrError(e?.message || 'OCR failed')
+    } catch (e: unknown) {
+      const message = e instanceof Error && e.message ? e.message : 'OCR failed'
+      setOcrError(message)
     } finally {
       setOcrBusy(false)
     }
@@ -206,8 +213,9 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         reference: reference || null,
         purpose: purpose || null,
       }, initial?.id)
-    } catch (err: any) {
-      setError(err?.message || 'Could not save bill')
+    } catch (err: unknown) {
+      const message = err instanceof Error && err.message ? err.message : 'Could not save bill'
+      setError(message)
     }
     setLoading(false)
   }

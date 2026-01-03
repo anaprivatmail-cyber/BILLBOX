@@ -31,8 +31,9 @@ export default function Login() {
           navigate('/app', { replace: true })
         }
       }
-    } catch (err: any) {
-      setError(err?.message || 'Unexpected error')
+    } catch (err: unknown) {
+      const message = err instanceof Error && err.message ? err.message : 'Unexpected error'
+      setError(message)
     } finally {
       setLoading(false)
     }

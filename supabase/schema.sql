@@ -34,3 +34,21 @@ create index if not exists warranties_bill_id_idx on public.warranties(bill_id);
 alter table public.warranties add column if not exists supplier text;
 alter table public.warranties add column if not exists purchase_date date;
 alter table public.warranties add column if not exists bill_id uuid;
+
+-- Entitlements: subscription / plan state per user
+create table if not exists public.entitlements (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  plan text not null default 'free', -- free | basic | pro
+  payer_limit integer not null default 1,
+  ocr_quota_monthly integer,
+  ocr_used_this_month integer not null default 0,
+  exports_enabled boolean not null default false,
+  subscription_source text, -- iap_google | iap_apple | stripe | manual
+  status text not null default 'active', -- active | expired
+  active_until timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists entitlements_user_id_idx on public.entitlements(user_id);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import type { Bill, BillFilter } from '../types'
 import { listBills, createBill, updateBill, deleteBill, setBillStatus, isOverdue } from '../api'
@@ -23,13 +23,20 @@ export default function BillsPage() {
   const [openAttachmentsFor, setOpenAttachmentsFor] = useState<string | null>(null)
   const [attachments, setAttachments] = useState<Record<string, { items: { name: string; path: string; created_at?: string }[]; loading: boolean; uploading: boolean; error: string | null }>>({})
 
-  async function reload() {
+  const reload = useCallback(async () => {
     setLoading(true)
-    const { data, error } = await listBills()
-    if (error) setError(error.message)
-    else setBills(data)
-    setLoading(false)
-  }
+    setError(null)
+    try {
+      const { data, error } = await listBills()
+      if (error) setError(error.message)
+      else setBills(data)
+    } catch (err) {
+      const message = err instanceof Error && err.message ? err.message : 'Failed to load bills'
+      setError(message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
   async function loadAttachments(billId: string) {
     setAttachments((prev) => ({
       ...prev,
@@ -97,21 +104,33 @@ export default function BillsPage() {
   }
 
   useEffect(() => {
-    reload()
-  }, [])
+    let cancelled = false
+    const timer = setTimeout(() => {
+      if (!cancelled) {
+        void reload()
+      }
+    }, 0)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [reload])
 
   // Read query params for initial UI state (no business logic changes)
   useEffect(() => {
-    const sp = new URLSearchParams(location.search)
-    const f = sp.get('filter') as BillFilter | null
-    if (f && ['all', 'unpaid', 'paid', 'overdue'].includes(f)) {
-      setFilter(f)
-    }
-    const add = sp.get('add')
-    if (add === '1') {
-      setFormOpen(true)
-      setEditing(null)
-    }
+    const timer = setTimeout(() => {
+      const sp = new URLSearchParams(location.search)
+      const f = sp.get('filter') as BillFilter | null
+      if (f && ['all', 'unpaid', 'paid', 'overdue'].includes(f)) {
+        setFilter(f)
+      }
+      const add = sp.get('add')
+      if (add === '1') {
+        setFormOpen(true)
+        setEditing(null)
+      }
+    }, 0)
+    return () => clearTimeout(timer)
   }, [location.search])
 
   const filtered = useMemo(() => {
@@ -153,20 +172,20 @@ export default function BillsPage() {
     }
     setFormOpen(false)
     setEditing(null)
-    reload()
+    void reload()
   }
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this bill? This cannot be undone.')) return
     const { error } = await deleteBill(id)
     if (error) setError(error.message)
-    reload()
+    void reload()
   }
 
   async function handleMark(id: string, status: 'paid' | 'unpaid') {
     const { error } = await setBillStatus(id, status)
     if (error) setError(error.message)
-    reload()
+    void reload()
   }
 
   return (
