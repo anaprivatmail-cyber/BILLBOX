@@ -24,7 +24,7 @@ export async function handler(event) {
       stripeSecretKey: Boolean(env.STRIPE_SECRET_KEY),
       stripeWebhookSecret: Boolean(env.STRIPE_WEBHOOK_SECRET),
       openaiApiKey: Boolean(env.OPENAI_API_KEY),
-      googleCredentialsJson: Boolean(env.GOOGLE_APPLICATION_CREDENTIALS_JSON),
+      googleCredentialsJson: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON || env.GOOGLE_APPLICATION_CREDENTIALS_JSON),
     },
   });
 }

@@ -22,12 +22,12 @@ function safeDetailFromError(err) {
 
 export async function handler() {
   try {
-    const raw = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+    const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
     if (!raw || String(raw).trim() === '') {
       return jsonResponse(500, {
         ok: false,
         step: 'env',
-        error: 'missing_GOOGLE_APPLICATION_CREDENTIALS_JSON',
+        error: 'missing_google_credentials_json',
       });
     }
 
