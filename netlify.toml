@@ -1,11 +1,12 @@
 [build]
   base = "site"
   publish = "."
-  command = "echo \"skip build\""
-  functions = "../netlify/functions"
+  command = "rm -rf functions && cp -R ../netlify/functions ./functions && npm --prefix functions install --omit=dev"
+  functions = "functions"
 
 [functions]
-  directory = "../netlify/functions"
+  directory = "functions"
+  node_bundler = "esbuild"
 
 [build.environment]
   NODE_VERSION = "20"

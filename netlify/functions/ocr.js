@@ -1,4 +1,27 @@
 import { GoogleAuth } from 'google-auth-library'
+import { createClient } from '@supabase/supabase-js'
+import pdf from 'pdf-parse'
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+
+function resolveModel() {
+  const raw = process.env.OPENAI_MODEL
+  const model = typeof raw === 'string' ? raw.trim() : ''
+  return model || 'gpt-4.1-mini'
+}
+
+function isAiOcrEnabled() {
+  const flag = process.env.ENABLE_OCR_AI
+  return String(flag || '').toLowerCase() === 'true' && !!OPENAI_API_KEY
+}
+
+function safeParseJson(s) {
+  try {
+    return s ? JSON.parse(s) : null
+  } catch {
+    return null
+  }
+}
 
 function jsonResponse(statusCode, payload) {
   return {
@@ -21,6 +44,43 @@ function safeDetailFromError(err) {
 function bufferToBase64(buf) {
   if (typeof buf === 'string') return buf
   return Buffer.from(buf).toString('base64')
+}
+
+function bodyToBuffer(event) {
+  if (event.isBase64Encoded) return Buffer.from(event.body || '', 'base64')
+  if (Buffer.isBuffer(event.body)) return event.body
+  return Buffer.from(event.body || '')
+}
+
+function getSupabaseAdmin() {
+  const url = process.env.SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) return null
+  return createClient(url, serviceKey, { auth: { persistSession: false } })
+}
+
+async function getUserFromAuthHeader(event) {
+  const header = event.headers.authorization || event.headers.Authorization || ''
+  if (!header || typeof header !== 'string') return { userId: null, error: 'missing_authorization' }
+  const parts = header.split(' ')
+  if (parts.length !== 2 || parts[0] !== 'Bearer' || !parts[1]) {
+    return { userId: null, error: 'invalid_authorization' }
+  }
+  const token = parts[1]
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return { userId: null, error: 'supabase_admin_not_configured' }
+  try {
+    const { data, error } = await supabase.auth.getUser(token)
+    if (error || !data?.user?.id) return { userId: null, error: 'invalid_token' }
+    return { userId: data.user.id, error: null, supabase }
+  } catch (e) {
+    return { userId: null, error: safeDetailFromError(e) }
+  }
+}
+
+function isSameMonth(a, b) {
+  if (!a || !b) return false
+  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth()
 }
 
 function extractFields(rawText) {
@@ -75,32 +135,108 @@ function extractFields(rawText) {
   return out
 }
 
+async function extractFieldsWithAI(rawText) {
+  if (!isAiOcrEnabled()) return null
+  const text = String(rawText || '').trim()
+  if (!text) return null
+
+  const system =
+    'You extract structured payment/invoice fields from OCR text for a bill-tracking app. ' +
+    'Return JSON ONLY with schema: ' +
+    '{"supplier": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null}. ' +
+    'Rules: ' +
+    '- Do NOT guess. Use null if uncertain. ' +
+    '- due_date must be ISO YYYY-MM-DD if present, else null. ' +
+    '- currency must be 3-letter uppercase (e.g., EUR) if present. ' +
+    '- iban should be compact (no spaces) if present. ' +
+    '- amount should be numeric (e.g., 12.34).'
+
+  const user =
+    'OCR text (may be messy):\n' +
+    text.slice(0, 8000)
+
+  try {
+    const model = resolveModel()
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.1,
+        max_tokens: 220,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+    })
+
+    const data = await resp.json().catch(() => null)
+    if (!resp.ok) return null
+    const content = data?.choices?.[0]?.message?.content
+    const parsed = safeParseJson(content)
+    if (!parsed || typeof parsed !== 'object') return null
+
+    const out = {
+      supplier: typeof parsed.supplier === 'string' ? parsed.supplier.trim() || null : null,
+      amount: typeof parsed.amount === 'number' && Number.isFinite(parsed.amount) ? parsed.amount : null,
+      currency: typeof parsed.currency === 'string' ? parsed.currency.trim().toUpperCase() || null : null,
+      due_date: typeof parsed.due_date === 'string' ? parsed.due_date.trim() || null : null,
+      iban: typeof parsed.iban === 'string' ? parsed.iban.replace(/\s+/g, '').trim() || null : null,
+      reference: typeof parsed.reference === 'string' ? parsed.reference.trim() || null : null,
+      purpose: typeof parsed.purpose === 'string' ? parsed.purpose.trim() || null : null,
+    }
+
+    if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(out.due_date)) out.due_date = null
+    if (out.currency && !/^[A-Z]{3}$/.test(out.currency)) out.currency = null
+    if (out.iban && !/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(out.iban)) out.iban = null
+
+    return out
+  } catch {
+    return null
+  }
+}
+
+function mergeFields(base, override) {
+  const out = { ...base }
+  if (!override) return out
+  for (const k of Object.keys(out)) {
+    if (override[k] !== null && override[k] !== undefined && override[k] !== '') out[k] = override[k]
+  }
+  return out
+}
+
 export async function handler(event) {
   try {
     if (event.httpMethod !== 'POST') {
       return jsonResponse(405, { ok: false, error: 'method_not_allowed' })
     }
 
-    const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
-    if (!rawCreds || String(rawCreds).trim() === '') {
-      return jsonResponse(500, { ok: false, step: 'env', error: 'missing_google_credentials_json' })
+    const authInfo = await getUserFromAuthHeader(event)
+    if (!authInfo.userId || !authInfo.supabase) {
+      // Do not leak details about why auth failed to the client
+      return jsonResponse(401, { ok: false, error: 'auth_required', message: 'Sign in to use OCR.' })
     }
 
-    let credentials
-    try { credentials = JSON.parse(rawCreds) } catch {
-      return jsonResponse(500, { ok: false, step: 'parse', error: 'invalid_credentials_json' })
-    }
-
-    const required = ['private_key', 'client_email']
-    const missing = required.filter(k => !credentials[k] || String(credentials[k]).trim() === '')
-    if (missing.length) {
-      return jsonResponse(500, { ok: false, step: 'validate', error: 'credentials_json_missing_fields' })
-    }
+    const supabase = authInfo.supabase
+    const userId = authInfo.userId
 
     const contentType = event.headers['content-type'] || event.headers['Content-Type'] || ''
 
+    const isPdf = /application\/pdf/i.test(contentType)
+
     let base64Image
-    if (/^image\//i.test(contentType)) {
+    let pdfBuffer
+    if (isPdf) {
+      pdfBuffer = bodyToBuffer(event)
+      if (!pdfBuffer || pdfBuffer.length < 16) {
+        return jsonResponse(400, { ok: false, error: 'empty_pdf' })
+      }
+    } else if (/^image\//i.test(contentType)) {
       // Netlify sends base64 string when isBase64Encoded=true
       if (event.isBase64Encoded) base64Image = event.body
       else base64Image = bufferToBase64(event.body)
@@ -118,8 +254,96 @@ export async function handler(event) {
       base64Image = event.isBase64Encoded ? event.body : bufferToBase64(event.body)
     }
 
-    if (!base64Image || String(base64Image).length < 16) {
+    if (!isPdf && (!base64Image || String(base64Image).length < 16)) {
       return jsonResponse(400, { ok: false, error: 'empty_image' })
+    }
+
+    // Load entitlements and enforce plan / quota
+    let ent
+    try {
+      const { data, error } = await supabase
+        .from('entitlements')
+        .select('*')
+        .eq('user_id', userId)
+        .order('active_until', { ascending: false, nullsFirst: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (error && error.code !== 'PGRST116') {
+        // Unexpected error; treat as free and block to avoid giving away OCR
+        return jsonResponse(403, { ok: false, error: 'ocr_not_allowed', message: 'OCR not available on your plan.' })
+      }
+
+      ent = data || {
+        plan: 'free',
+        ocr_quota_monthly: null,
+        ocr_used_this_month: 0,
+        updated_at: null,
+      }
+    } catch {
+      return jsonResponse(403, { ok: false, error: 'ocr_not_allowed', message: 'OCR not available on your plan.' })
+    }
+
+    const plan = String(ent.plan || 'free')
+
+    const now = new Date()
+    const updatedAt = ent.updated_at ? new Date(ent.updated_at) : null
+    // Default quotas if not configured in DB
+    const quota = typeof ent.ocr_quota_monthly === 'number'
+      ? ent.ocr_quota_monthly
+      : (plan === 'free' ? 3 : null)
+    let used = typeof ent.ocr_used_this_month === 'number' ? ent.ocr_used_this_month : 0
+    if (!isSameMonth(now, updatedAt)) used = 0
+
+    if (quota !== null && used >= quota) {
+      return jsonResponse(403, { ok: false, error: 'ocr_quota_exceeded', message: 'OCR monthly quota exceeded for your plan.' })
+    }
+
+    // PDF path: try text extraction first (works for many accounting PDFs)
+    if (isPdf) {
+      try {
+        const parsed = await pdf(pdfBuffer)
+        const text = (parsed?.text || '').trim()
+        if (!text) {
+          return jsonResponse(400, {
+            ok: false,
+            error: 'pdf_no_text',
+            message: 'This PDF has no extractable text (likely scanned). Please take a photo or upload an image instead.',
+          })
+        }
+
+        // Increment usage (counts as OCR/document extraction)
+        try {
+          const newUsed = used + 1
+          await supabase
+            .from('entitlements')
+            .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+            .eq('user_id', userId)
+        } catch {}
+
+        const fields0 = extractFields(text)
+        const aiFields = await extractFieldsWithAI(text)
+        const fields = mergeFields(fields0, aiFields)
+        return jsonResponse(200, { ok: true, rawText: text, fields, ai: !!aiFields })
+      } catch (e) {
+        return jsonResponse(500, { ok: false, error: 'pdf_parse_failed', detail: safeDetailFromError(e) })
+      }
+    }
+
+    const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
+    if (!rawCreds || String(rawCreds).trim() === '') {
+      return jsonResponse(500, { ok: false, step: 'env', error: 'missing_google_credentials_json' })
+    }
+
+    let credentials
+    try { credentials = JSON.parse(rawCreds) } catch {
+      return jsonResponse(500, { ok: false, step: 'parse', error: 'invalid_credentials_json' })
+    }
+
+    const required = ['private_key', 'client_email']
+    const missing = required.filter(k => !credentials[k] || String(credentials[k]).trim() === '')
+    if (missing.length) {
+      return jsonResponse(500, { ok: false, step: 'validate', error: 'credentials_json_missing_fields' })
     }
 
     // Auth
@@ -166,11 +390,24 @@ export async function handler(event) {
       return jsonResponse(500, { ok: false, step: 'vision', error: 'vision_call_failed', detail: safeDetailFromError(e) })
     }
 
+    // Increment OCR usage on success before returning
+    try {
+      const newUsed = used + 1
+      await supabase
+        .from('entitlements')
+        .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+        .eq('user_id', userId)
+    } catch {
+      // If this fails, we still return success; usage may be slightly off but users are not blocked
+    }
+
     const annotation = raw?.responses?.[0]
     const fullText = annotation?.fullTextAnnotation?.text || annotation?.textAnnotations?.[0]?.description || ''
-    const fields = extractFields(fullText || '')
+    const fields0 = extractFields(fullText || '')
+    const aiFields = await extractFieldsWithAI(fullText || '')
+    const fields = mergeFields(fields0, aiFields)
 
-    return jsonResponse(200, { ok: true, rawText: fullText || '', fields })
+    return jsonResponse(200, { ok: true, rawText: fullText || '', fields, ai: !!aiFields })
   } catch (err) {
     return jsonResponse(500, { ok: false, step: 'catch', error: 'unhandled_exception', detail: safeDetailFromError(err) })
   }
