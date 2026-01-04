@@ -11,7 +11,7 @@
       }
     },
     "preview": {
-      "node": "20",
+      "node": "20.18.1",
       "distribution": "internal",
       "android": {
         "image": "ubuntu-22.04-jdk-17-ndk-r25b"
