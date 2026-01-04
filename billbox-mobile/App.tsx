@@ -4842,6 +4842,7 @@ function SettingsScreen() {
       <View style={styles.pageStack}>
         <Image source={BRAND_WORDMARK} style={styles.wordmarkSettingsHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />
         <SectionHeader title={space?.name ? `Settings • ${space.name}` : 'Settings'} />
+        <Text style={[styles.mutedText, { marginTop: -8, marginBottom: themeSpacing.sm }]}>{t(lang, 'internal_test_build')}</Text>
 
         <Surface elevated>
           <SectionHeader title="Workspace" />

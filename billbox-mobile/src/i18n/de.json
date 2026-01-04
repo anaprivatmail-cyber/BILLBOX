@@ -43,6 +43,8 @@
   "german": "Deutsch",
   "checking_session": "Sitzung wird geprüft ...",
 
+  "internal_test_build": "Internal test build",
+
   "common_cancel": "Abbrechen",
   "app_name": "BILLBOX",
   "dash_placeholder": "—",
