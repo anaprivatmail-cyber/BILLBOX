@@ -629,9 +629,6 @@ type SpaceContextValue = {
   current: Space | null
   spaceId: string | null
   loading: boolean
-  initError: string | null
-  initTimedOut: boolean
-  retryInit: () => void
   setCurrent: (id: string) => Promise<void>
   addSpace: (space: { name: string; kind: Space['kind']; plan: SpacePlan; seats?: number }) => Promise<void>
   rename: (id: string, name: string) => Promise<void>
@@ -652,102 +649,23 @@ function useActiveSpace() {
   return { space: ctx.current, spaceId: ctx.spaceId, loading: ctx.loading }
 }
 
-function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactNode; enabled: boolean; demoMode: boolean }) {
+function SpaceProvider({ children }: { children: React.ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([])
   const [spaceId, setSpaceId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [initError, setInitError] = useState<string | null>(null)
-  const [initTimedOut, setInitTimedOut] = useState(false)
-  const [initNonce, setInitNonce] = useState(0)
   const { snapshot: entitlements } = useEntitlements()
 
-  const retryInit = useCallback(() => {
-    setInitError(null)
-    setInitTimedOut(false)
-    setInitNonce((n) => n + 1)
-  }, [])
-
   useEffect(() => {
-    let mounted = true
-
-    // Before auth/demo is finalized, do not initialize payers/spaces at all.
-    if (!enabled) {
-      setSpaces([])
-      setSpaceId(null)
-      setInitError(null)
-      setInitTimedOut(false)
-      setLoading(false)
-      return () => {
-        mounted = false
-      }
-    }
-
-    const start = Date.now()
-    console.log('[startup] payer init start', { demoMode })
-    setLoading(true)
-    setInitError(null)
-    setInitTimedOut(false)
-
-    const timeoutMs = 10_000
-    const timeout = setTimeout(() => {
-      if (!mounted) return
-      setInitTimedOut(true)
-      setLoading(false)
-      // Fallback to an in-memory payer list so the app stays usable.
-      if (!spaces.length) {
-        setSpaces([{ id: 'personal', name: 'Personal (Payer 1)', plan: 'free' } as any])
-        setSpaceId('personal')
-      }
-      console.warn('[startup] payer init timeout')
-    }, timeoutMs)
-
-    ;(async () => {
+    (async () => {
       try {
-        if (demoMode) {
-          // Demo must work without network/auth; keep payers in-memory.
-          if (!mounted) return
-          setSpaces([{ id: 'personal', name: 'Personal (Payer 1)', plan: 'free' } as any])
-          setSpaceId('personal')
-          return
-        }
-
-        // Strict fallback: if no payer exists, ensure defaults.
-        await ensureSpacesDefaults()
-        const initial = await loadSpaces()
-        let currentId: string | null = null
-        try {
-          currentId = await loadCurrentSpaceId()
-        } catch {
-          currentId = initial[0]?.id || null
-        }
-        if (currentId && !initial.some((s) => s.id === currentId)) {
-          currentId = initial[0]?.id || null
-        }
-        if (!mounted) return
+        const { spaces: initial, currentId } = await ensureSpacesDefaults()
         setSpaces(initial)
-        setSpaceId(currentId || initial[0]?.id || null)
-      } catch (e: any) {
-        if (!mounted) return
-        setInitError(e?.message || 'Payer preparation failed')
-        console.warn('[startup] payer init error', e)
-
-        // Keep app usable: fall back to an in-memory payer.
-        setSpaces([{ id: 'personal', name: 'Personal (Payer 1)', plan: 'free' } as any])
-        setSpaceId('personal')
+        setSpaceId(currentId)
       } finally {
-        clearTimeout(timeout)
-        if (!mounted) return
         setLoading(false)
-        console.log('[startup] payer init end', { ms: Date.now() - start, ok: true })
       }
     })()
-
-    return () => {
-      mounted = false
-      clearTimeout(timeout)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, demoMode, initNonce])
+  }, [])
 
   const setCurrent = useCallback(async (id: string) => {
     setSpaceId(id)
@@ -835,11 +753,9 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
           }
           await purgePayerData(id)
           await removeSpace(id)
-          await ensureSpacesDefaults()
-          const ensuredSpaces = await loadSpaces()
-          const ensuredCurrentId = await loadCurrentSpaceId().catch(() => ensuredSpaces[0]?.id || null)
-          setSpaces(ensuredSpaces)
-          setSpaceId(ensuredCurrentId || ensuredSpaces[0]?.id || null)
+          const ensured = await ensureSpacesDefaults()
+          setSpaces(ensured.spaces)
+          setSpaceId(ensured.currentId)
         },
       },
     ])
@@ -852,9 +768,6 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
     current,
     spaceId,
     loading,
-    initError,
-    initTimedOut,
-    retryInit,
     setCurrent,
     addSpace: addSpaceHandler,
     rename: renameHandler,
@@ -1180,7 +1093,7 @@ type AuthFeedback = {
 }
 
 type LoginScreenProps = {
-  onLoggedIn: (mode?: 'auth' | 'demo') => void
+  onLoggedIn: () => void
   lang: Lang
   setLang: (value: Lang) => void
 }
@@ -1245,7 +1158,7 @@ function LoginScreen({ onLoggedIn, lang, setLang }: LoginScreenProps) {
     try {
       if (!supabase) {
         await rememberEmail(trimmedEmail)
-        onLoggedIn('auth')
+        onLoggedIn()
         return
       }
       const { error } = await supabase.auth.signInWithPassword({ email: trimmedEmail, password })
@@ -1254,7 +1167,7 @@ function LoginScreen({ onLoggedIn, lang, setLang }: LoginScreenProps) {
         return
       }
       await rememberEmail(trimmedEmail)
-      onLoggedIn('auth')
+      onLoggedIn()
     } catch (e: any) {
       setFeedback({ tone: 'danger', message: e?.message || t(lang, 'error_generic') })
     } finally {
@@ -1568,7 +1481,7 @@ function LoginScreen({ onLoggedIn, lang, setLang }: LoginScreenProps) {
                 label={t(lang, 'continue_without_login')}
                 variant="outline"
                 iconName="play-outline"
-                onPress={() => onLoggedIn('demo')}
+                onPress={onLoggedIn}
               />
             )}
 
@@ -4929,7 +4842,6 @@ function SettingsScreen() {
       <View style={styles.pageStack}>
         <Image source={BRAND_WORDMARK} style={styles.wordmarkSettingsHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />
         <SectionHeader title={space?.name ? `Settings • ${space.name}` : 'Settings'} />
-        <Text style={[styles.mutedText, { marginTop: -8, marginBottom: themeSpacing.sm }]}>{t(lang, 'internal_test_build')}</Text>
 
         <Surface elevated>
           <SectionHeader title="Workspace" />
@@ -5181,18 +5093,15 @@ function SettingsScreen() {
 type AppNavigationProps = {
   loggedIn: boolean
   setLoggedIn: (value: boolean) => void
-  demoMode: boolean
-  setDemoMode: (value: boolean) => void
   lang: Lang
   setLang: (value: Lang) => void
   authLoading: boolean
 }
 
-function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, setLang, authLoading }: AppNavigationProps) {
+function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: AppNavigationProps) {
   const { space, spaceId, loading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
   const spacesCtx = useSpacesContext()
-  const { initError, initTimedOut, retryInit } = useSpacesContext()
   const navRef = React.useRef<NavigationContainerRef<any>>(null)
   const lastHandled = React.useRef<string | null>(null)
   const handleShareUrl = useCallback(async (incoming: string | null) => {
@@ -5274,69 +5183,33 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
         </View>
       </Screen>
     )
-  } else if (!loggedIn) {
-    content = (
-      <NavigationContainer ref={navRef}>
-        <Stack.Navigator>
-          <Stack.Screen name="Login" options={{ headerShown: coerceBool(false) }}>
-            {() => (
-              <LoginScreen
-                onLoggedIn={(mode) => {
-                  setDemoMode(mode === 'demo')
-                  setLoggedIn(true)
-                }}
-                lang={lang}
-                setLang={(l) => {
-                  setLang(l)
-                  saveLang(l)
-                }}
-              />
-            )}
-          </Stack.Screen>
-        </Stack.Navigator>
-      </NavigationContainer>
-    )
   } else if (loading || !space) {
-    // Only after auth/demo: show payer prep (with timeout/error handling).
-    if (initTimedOut || initError) {
-      content = (
-        <View style={styles.centered}>
-          <Text style={styles.mutedText}>{initTimedOut ? 'Payer preparation timed out.' : 'Payer preparation failed.'}</Text>
-          <View style={{ marginTop: themeSpacing.md, gap: themeSpacing.sm, alignSelf: 'stretch' }}>
-            <AppButton label="Retry" onPress={retryInit} />
-            <AppButton
-              label="Continue to Login"
-              variant="secondary"
-              onPress={() => {
-                setDemoMode(false)
-                setLoggedIn(false)
-              }}
-            />
-          </View>
-        </View>
-      )
-    } else {
     content = (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#2b6cb0" />
           <Text style={{ marginTop: 8 }}>Preparing payers…</Text>
       </View>
     )
-    }
   } else {
     content = (
       <NavigationContainer ref={navRef}>
         <Stack.Navigator>
-          <>
-            <Stack.Screen name="BillBox" component={MainTabs} options={{ headerShown: coerceBool(false) }} />
-            <Stack.Screen name="Inbox" component={InboxScreen} options={{ headerShown: coerceBool(false) }} />
-            <Stack.Screen name="Warranties" component={WarrantiesScreen} options={{ headerShown: coerceBool(false) }} />
-            <Stack.Screen name="Reports" component={ReportsScreen} options={{ headerShown: coerceBool(false) }} />
-            <Stack.Screen name="Exports" component={ExportsScreen} options={{ headerShown: coerceBool(false) }} />
-            <Stack.Screen name="Payments" component={PaymentsScreen} options={{ headerShown: coerceBool(false) }} />
-            <Stack.Screen name="Bill Details" component={BillDetailsScreen} options={{ headerShown: coerceBool(false) }} />
-            <Stack.Screen name="Warranty Details" component={WarrantyDetailsScreen} options={{ headerShown: coerceBool(false) }} />
-          </>
+          {!loggedIn ? (
+            <Stack.Screen name="Login" options={{ headerShown: coerceBool(false) }}>
+              {() => <LoginScreen onLoggedIn={()=>setLoggedIn(true)} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} />}
+            </Stack.Screen>
+          ) : (
+            <>
+              <Stack.Screen name="BillBox" component={MainTabs} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Inbox" component={InboxScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Warranties" component={WarrantiesScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Reports" component={ReportsScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Exports" component={ExportsScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Payments" component={PaymentsScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Bill Details" component={BillDetailsScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Warranty Details" component={WarrantyDetailsScreen} options={{ headerShown: coerceBool(false) }} />
+            </>
+          )}
         </Stack.Navigator>
       </NavigationContainer>
     )
@@ -5348,38 +5221,28 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
 export default function App() {
   const supabase = useMemo(() => getSupabase(), [])
   const [loggedIn, setLoggedIn] = useState(false)
-  const [demoMode, setDemoMode] = useState(false)
   const [authLoading, setAuthLoading] = useState(true)
   const [lang, setLang] = useState<Lang>('en')
   useEffect(()=>{ (async()=> setLang(await loadLang()))() }, [])
   useEffect(() => {
     let mounted = true
     if (!supabase) {
-      // Always show Login/Demo first.
-      setLoggedIn(false)
-      setDemoMode(false)
+      setLoggedIn(true)
       setAuthLoading(false)
       return
     }
     supabase.auth.getSession()
       .then(({ data }) => {
-        if (mounted) {
-          setLoggedIn(!!data?.session)
-          setDemoMode(false)
-        }
+        if (mounted) setLoggedIn(!!data?.session)
       })
       .catch(() => {
-        if (mounted) {
-          setLoggedIn(false)
-          setDemoMode(false)
-        }
+        if (mounted) setLoggedIn(false)
       })
       .finally(() => {
         if (mounted) setAuthLoading(false)
       })
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setLoggedIn(!!session)
-      if (session) setDemoMode(false)
     })
     return () => {
       mounted = false
@@ -5432,10 +5295,10 @@ export default function App() {
   })() }, [])
   return (
     <EntitlementsProvider supabase={supabase}>
-      <SpaceProvider enabled={loggedIn} demoMode={demoMode}>
+      <SpaceProvider>
         <SafeAreaView style={{ flex: 1 }}>
           <StatusBar style="dark" />
-          <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} demoMode={demoMode} setDemoMode={setDemoMode} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} authLoading={authLoading} />
+          <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} authLoading={authLoading} />
         </SafeAreaView>
       </SpaceProvider>
     </EntitlementsProvider>
