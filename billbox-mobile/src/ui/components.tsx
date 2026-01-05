@@ -2,6 +2,7 @@ import React from 'react'
 import {
   ActivityIndicator,
   Pressable,
+  ScrollView,
   StyleProp,
   StyleSheet,
   Text,
@@ -15,16 +16,57 @@ import { Ionicons } from '@expo/vector-icons'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors, layout, spacing } from './theme'
 
-export function Screen({ children, style }: { children: React.ReactNode; style?: StyleProp<ViewStyle> }) {
+export function Screen({
+  children,
+  style,
+  scroll = true,
+  contentContainerStyle,
+}: {
+  children: React.ReactNode
+  style?: StyleProp<ViewStyle>
+  scroll?: boolean
+  contentContainerStyle?: StyleProp<ViewStyle>
+}) {
   return (
     <SafeAreaView style={[styles.screen, style]}>
-      {children}
+      {scroll ? (
+        <ScrollView
+          contentContainerStyle={[styles.scrollContent, contentContainerStyle]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {children}
+        </ScrollView>
+      ) : (
+        children
+      )}
     </SafeAreaView>
   )
 }
 
-export function Surface({ children, style }: { children: React.ReactNode; style?: StyleProp<ViewStyle> }) {
-  return <View style={[styles.surface, style]}>{children}</View>
+export function Surface({
+  children,
+  style,
+  padded = true,
+  elevated = false,
+}: {
+  children: React.ReactNode
+  style?: StyleProp<ViewStyle>
+  padded?: boolean
+  elevated?: boolean
+}) {
+  return (
+    <View
+      style={[
+        styles.surface,
+        padded ? styles.surfacePadded : null,
+        elevated ? styles.surfaceElevated : null,
+        style,
+      ]}
+    >
+      {children}
+    </View>
+  )
 }
 
 export function SectionHeader({ title, right }: { title: string; right?: React.ReactNode }) {
@@ -37,6 +79,7 @@ export function SectionHeader({ title, right }: { title: string; right?: React.R
 }
 
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
+type ButtonVariantCompat = ButtonVariant | 'outline'
 
 export function AppButton({
   label,
@@ -52,35 +95,36 @@ export function AppButton({
   iconName?: keyof typeof Ionicons.glyphMap
   loading?: boolean
   disabled?: boolean
-  variant?: ButtonVariant
+  variant?: ButtonVariantCompat
   style?: StyleProp<ViewStyle>
 }) {
   const isDisabled = disabled || loading
+  const resolvedVariant: ButtonVariant = variant === 'outline' ? 'ghost' : variant
   const buttonStyle = [
     styles.button,
-    variant === 'primary' ? styles.buttonPrimary : null,
-    variant === 'secondary' ? styles.buttonSecondary : null,
-    variant === 'ghost' ? styles.buttonGhost : null,
-    variant === 'danger' ? styles.buttonDanger : null,
+    resolvedVariant === 'primary' ? styles.buttonPrimary : null,
+    resolvedVariant === 'secondary' ? styles.buttonSecondary : null,
+    resolvedVariant === 'ghost' ? styles.buttonGhost : null,
+    resolvedVariant === 'danger' ? styles.buttonDanger : null,
     isDisabled ? styles.buttonDisabled : null,
     style,
   ]
 
   const labelStyle: StyleProp<TextStyle> = [
     styles.buttonLabel,
-    variant === 'ghost' ? styles.buttonLabelGhost : null,
-    variant === 'secondary' ? styles.buttonLabelSecondary : null,
-    variant === 'danger' ? styles.buttonLabelDanger : null,
+    resolvedVariant === 'ghost' ? styles.buttonLabelGhost : null,
+    resolvedVariant === 'secondary' ? styles.buttonLabelSecondary : null,
+    resolvedVariant === 'danger' ? styles.buttonLabelDanger : null,
   ]
 
   return (
     <Pressable accessibilityRole="button" style={buttonStyle} onPress={() => !isDisabled && onPress()}>
-      {loading ? <ActivityIndicator color={variant === 'ghost' ? colors.primary : '#fff'} /> : null}
+      {loading ? <ActivityIndicator color={resolvedVariant === 'ghost' ? colors.primary : '#fff'} /> : null}
       {!loading && iconName ? (
         <Ionicons
           name={iconName}
           size={18}
-          color={variant === 'ghost' ? colors.primary : '#fff'}
+          color={resolvedVariant === 'ghost' ? colors.primary : '#fff'}
           style={{ marginRight: 8 }}
         />
       ) : null}
@@ -154,9 +198,29 @@ export function SegmentedControl({
   )
 }
 
-export function Badge({ label, tone = 'neutral' }: { label: string; tone?: 'neutral' | 'success' | 'danger' }) {
-  const bg = tone === 'success' ? '#dcfce7' : tone === 'danger' ? '#fee2e2' : '#e2e8f0'
-  const fg = tone === 'success' ? colors.success : tone === 'danger' ? colors.danger : colors.mutedText
+export function Badge({
+  label,
+  tone = 'neutral',
+}: {
+  label: string
+  tone?: 'neutral' | 'success' | 'danger' | 'info'
+}) {
+  const bg =
+    tone === 'success'
+      ? '#dcfce7'
+      : tone === 'danger'
+        ? '#fee2e2'
+        : tone === 'info'
+          ? colors.primarySoft
+          : '#e2e8f0'
+  const fg =
+    tone === 'success'
+      ? colors.success
+      : tone === 'danger'
+        ? colors.danger
+        : tone === 'info'
+          ? colors.primary
+          : colors.mutedText
   return (
     <View style={[styles.badge, { backgroundColor: bg }]}> 
       <Text style={[styles.badgeText, { color: fg }]}>{label}</Text>
@@ -164,20 +228,68 @@ export function Badge({ label, tone = 'neutral' }: { label: string; tone?: 'neut
   )
 }
 
-export function EmptyState({ title, description }: { title: string; description?: string }) {
+export function EmptyState({
+  title,
+  description,
+  message,
+  iconName,
+  actionLabel,
+  onActionPress,
+}: {
+  title: string
+  description?: string
+  message?: string
+  iconName?: keyof typeof Ionicons.glyphMap
+  actionLabel?: string
+  onActionPress?: () => void
+}) {
   return (
     <View style={styles.empty}>
+      {iconName ? (
+        <View style={styles.emptyIcon}>
+          <Ionicons name={iconName} size={22} color={colors.primary} />
+        </View>
+      ) : null}
       <Text style={styles.emptyTitle}>{title}</Text>
-      {description ? <Text style={styles.emptyDescription}>{description}</Text> : null}
+      {description || message ? (
+        <Text style={styles.emptyDescription}>{description || message}</Text>
+      ) : null}
+      {actionLabel && onActionPress ? (
+        <View style={{ marginTop: spacing.sm }}>
+          <AppButton label={actionLabel} iconName="add-outline" onPress={onActionPress} />
+        </View>
+      ) : null}
     </View>
   )
 }
 
-export function InlineInfo({ text }: { text: string }) {
+export function InlineInfo({
+  text,
+  message,
+  tone = 'info',
+  iconName = 'information-circle-outline',
+  style,
+}: {
+  text?: string
+  message?: string
+  tone?: 'info' | 'warning' | 'danger' | 'success' | 'neutral'
+  iconName?: keyof typeof Ionicons.glyphMap
+  style?: StyleProp<ViewStyle>
+}) {
+  const body = message ?? text ?? ''
+  const fg =
+    tone === 'danger'
+      ? colors.danger
+      : tone === 'success'
+        ? colors.success
+        : tone === 'warning'
+          ? colors.primary
+          : colors.mutedText
+  const bg = tone === 'info' ? colors.primarySoft : 'transparent'
   return (
-    <View style={styles.inlineInfo}>
-      <Ionicons name="information-circle-outline" size={16} color={colors.mutedText} style={{ marginRight: 8 }} />
-      <Text style={styles.inlineInfoText}>{text}</Text>
+    <View style={[styles.inlineInfo, { backgroundColor: bg }, style]}>
+      <Ionicons name={iconName} size={16} color={fg} style={{ marginRight: 8 }} />
+      <Text style={styles.inlineInfoText}>{body}</Text>
     </View>
   )
 }
@@ -202,8 +314,8 @@ export function Disclosure({
   )
 }
 
-export function Divider() {
-  return <View style={styles.divider} />
+export function Divider({ style }: { style?: StyleProp<ViewStyle> }) {
+  return <View style={[styles.divider, style]} />
 }
 
 const styles = StyleSheet.create({
@@ -211,12 +323,20 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  scrollContent: {
+    flexGrow: 1,
+  },
   surface: {
     backgroundColor: colors.surface,
     borderRadius: layout.radius,
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  surfacePadded: {
     padding: spacing.md,
+  },
+  surfaceElevated: {
+    // Intentionally minimal: avoid introducing new shadow tokens.
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -326,6 +446,15 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.lg,
     alignItems: 'center',
   },
+  emptyIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primarySoft,
+    marginBottom: spacing.sm,
+  },
   emptyTitle: {
     fontSize: 16,
     fontWeight: '700',
@@ -340,7 +469,6 @@ const styles = StyleSheet.create({
   inlineInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#e0f2fe',
     borderRadius: 12,
     paddingHorizontal: 10,
     paddingVertical: 8,

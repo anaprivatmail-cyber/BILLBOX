@@ -2343,7 +2343,7 @@ function InboxScreen() {
   }
 
   return (
-    <Screen>
+    <Screen scroll={false}>
       <View style={styles.pageStack}>
         <SectionHeader title="Inbox" />
         <View style={styles.inboxControlsRow}>
@@ -3466,7 +3466,7 @@ function WarrantiesScreen() {
   }
 
   return (
-    <Screen>
+    <Screen scroll={false}>
       <View style={styles.pageStack}>
         <SectionHeader title="Warranties" />
 
@@ -4577,7 +4577,7 @@ function PayScreen() {
   }
 
   return (
-    <Screen>
+    <Screen scroll={false}>
       <View style={styles.pageStack}>
         <SectionHeader title="Pay" />
 
