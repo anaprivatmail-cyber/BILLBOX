@@ -186,12 +186,15 @@ function coerceBool(val: unknown): boolean {
 }
 
 // --- Supabase helpers (mobile) ---
+function readEnv(key: string): string | undefined {
+  const env = (globalThis as any)?.process?.env
+  const v = env?.[key]
+  return typeof v === 'string' ? v : undefined
+}
+
 function getSupabase(): SupabaseClient | null {
-  const env = (globalThis as any)?.process?.env ?? (process as any)?.env ?? {}
-  const urlRaw = env.EXPO_PUBLIC_SUPABASE_URL
-  const anonRaw = env.EXPO_PUBLIC_SUPABASE_ANON_KEY
-  const url = typeof urlRaw === 'string' ? urlRaw.trim() : ''
-  const anon = typeof anonRaw === 'string' ? anonRaw.trim() : ''
+  const url = (readEnv('EXPO_PUBLIC_SUPABASE_URL') || '').trim()
+  const anon = (readEnv('EXPO_PUBLIC_SUPABASE_ANON_KEY') || '').trim()
   if (!url || !anon) return null
   try {
     return createClient(url, anon, {
@@ -208,7 +211,7 @@ function getSupabase(): SupabaseClient | null {
 }
 
 function getFunctionsBase(): string | null {
-  const base = process.env.EXPO_PUBLIC_FUNCTIONS_BASE
+  const base = readEnv('EXPO_PUBLIC_FUNCTIONS_BASE')
   return base && typeof base === 'string' && base.trim() ? base.trim().replace(/\/$/, '') : null
 }
 
@@ -217,8 +220,7 @@ type Interval = 'monthly' | 'yearly'
 function resolveProductId(plan: PlanId, interval: Interval): string | null {
   const prefix = Platform.OS === 'ios' ? 'EXPO_PUBLIC_IAP_APPLE_' : 'EXPO_PUBLIC_IAP_GOOGLE_'
   const keyBase = `${prefix}${String(plan).toUpperCase()}_${String(interval).toUpperCase()}`
-  const envKey = process.env[keyBase as keyof NodeJS.ProcessEnv] as string | undefined
-  const val = envKey && typeof envKey === 'string' ? envKey.trim() : ''
+  const val = (readEnv(keyBase) || '').trim()
   return val || null
 }
 
@@ -1246,7 +1248,7 @@ function LoginScreen({ onLoggedIn, lang, setLang }: LoginScreenProps) {
   const [socialBusy, setSocialBusy] = useState<'none' | 'google' | 'apple'>('none')
   const [feedback, setFeedback] = useState<AuthFeedback | null>(null)
   const [lastEmail, setLastEmail] = useState<string | null>(null)
-  const supabaseRedirect = process.env.EXPO_PUBLIC_SUPABASE_REDIRECT_URL
+  const supabaseRedirect = readEnv('EXPO_PUBLIC_SUPABASE_REDIRECT_URL')
   const googleEnabled = Boolean(supabase)
   const appleEnabled = Platform.OS === 'ios' && Boolean(supabase)
 
