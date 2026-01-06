@@ -187,17 +187,24 @@ function coerceBool(val: unknown): boolean {
 
 // --- Supabase helpers (mobile) ---
 function getSupabase(): SupabaseClient | null {
-  const url = process.env.EXPO_PUBLIC_SUPABASE_URL
-  const anon = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY
+  const env = (globalThis as any)?.process?.env ?? (process as any)?.env ?? {}
+  const urlRaw = env.EXPO_PUBLIC_SUPABASE_URL
+  const anonRaw = env.EXPO_PUBLIC_SUPABASE_ANON_KEY
+  const url = typeof urlRaw === 'string' ? urlRaw.trim() : ''
+  const anon = typeof anonRaw === 'string' ? anonRaw.trim() : ''
   if (!url || !anon) return null
-  return createClient(url, anon, {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      storage: AsyncStorage,
-      storageKey: AUTH_STORAGE_KEY,
-    },
-  })
+  try {
+    return createClient(url, anon, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        storage: AsyncStorage,
+        storageKey: AUTH_STORAGE_KEY,
+      },
+    })
+  } catch {
+    return null
+  }
 }
 
 function getFunctionsBase(): string | null {
@@ -5551,8 +5558,10 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
     if (loading || !space) return
     let mounted = true
     ;(async () => {
-      const initial = await Linking.getInitialURL()
-      if (mounted) await handleShareUrl(initial)
+      try {
+        const initial = await Linking.getInitialURL()
+        if (mounted) await handleShareUrl(initial)
+      } catch {}
     })()
     const sub = Linking.addEventListener('url', ({ url }) => { handleShareUrl(url) })
     return () => {
@@ -5699,48 +5708,50 @@ export default function App() {
     }
   }, [supabase])
   useEffect(() => { (async ()=>{ 
-    await ensureNotificationConfig()
-    // iOS action buttons
     try {
-      await (Notifications as any).setNotificationCategoryAsync?.('bill', [
-        { identifier: 'SNOOZE_1', buttonTitle: 'Snooze 1 day', options: { isDestructive: false, isAuthenticationRequired: false } },
-        { identifier: 'SNOOZE_3', buttonTitle: 'Snooze 3 days', options: { isDestructive: false, isAuthenticationRequired: false } },
-        { identifier: 'SNOOZE_7', buttonTitle: 'Snooze 7 days', options: { isDestructive: false, isAuthenticationRequired: false } },
-      ])
-    } catch {}
-    const sub = Notifications.addNotificationResponseReceivedListener(async (resp)=>{
+      await ensureNotificationConfig()
+      // iOS action buttons
       try {
-        const payload = resp?.notification?.request?.content?.data as any
-        const billId = payload?.bill_id
-        const targetSpace = payload?.space_id || null
-        const action = resp?.actionIdentifier
-        if (!billId || !action) return
-        const days = action==='SNOOZE_1' ? 1 : action==='SNOOZE_3' ? 3 : action==='SNOOZE_7' ? 7 : 0
-        if (days>0) {
-          // Construct lightweight bill for snooze
-          const fake: any = { id: billId, supplier: 'Bill', amount: 0, currency: 'EUR', due_date: new Date().toISOString().slice(0,10), status: 'unpaid', space_id: targetSpace }
-          await snoozeBillReminder(fake, days, targetSpace)
-        }
+        await (Notifications as any).setNotificationCategoryAsync?.('bill', [
+          { identifier: 'SNOOZE_1', buttonTitle: 'Snooze 1 day', options: { isDestructive: false, isAuthenticationRequired: false } },
+          { identifier: 'SNOOZE_3', buttonTitle: 'Snooze 3 days', options: { isDestructive: false, isAuthenticationRequired: false } },
+          { identifier: 'SNOOZE_7', buttonTitle: 'Snooze 7 days', options: { isDestructive: false, isAuthenticationRequired: false } },
+        ])
       } catch {}
-    })
-    const isExpoGo = (Constants as any)?.appOwnership === 'expo' || (Constants as any)?.executionEnvironment === 'storeClient'
-    if (ENABLE_PUSH_NOTIFICATIONS && !isExpoGo) {
-      try {
-        const granted = await requestPermissionIfNeeded()
-        if (granted) {
-          try {
-            const token = await Notifications.getExpoPushTokenAsync()
-            // For now we just log the token; server-side registration will be added in V2.
-            console.log('Expo push token', (token as any)?.data || token)
-          } catch (e) {
-            console.warn('Push token fetch failed', e)
+      const sub = Notifications.addNotificationResponseReceivedListener(async (resp)=>{
+        try {
+          const payload = resp?.notification?.request?.content?.data as any
+          const billId = payload?.bill_id
+          const targetSpace = payload?.space_id || null
+          const action = resp?.actionIdentifier
+          if (!billId || !action) return
+          const days = action==='SNOOZE_1' ? 1 : action==='SNOOZE_3' ? 3 : action==='SNOOZE_7' ? 7 : 0
+          if (days>0) {
+            // Construct lightweight bill for snooze
+            const fake: any = { id: billId, supplier: 'Bill', amount: 0, currency: 'EUR', due_date: new Date().toISOString().slice(0,10), status: 'unpaid', space_id: targetSpace }
+            await snoozeBillReminder(fake, days, targetSpace)
           }
+        } catch {}
+      })
+      const isExpoGo = (Constants as any)?.appOwnership === 'expo' || (Constants as any)?.executionEnvironment === 'storeClient'
+      if (ENABLE_PUSH_NOTIFICATIONS && !isExpoGo) {
+        try {
+          const granted = await requestPermissionIfNeeded()
+          if (granted) {
+            try {
+              const token = await Notifications.getExpoPushTokenAsync()
+              // For now we just log the token; server-side registration will be added in V2.
+              console.log('Expo push token', (token as any)?.data || token)
+            } catch (e) {
+              console.warn('Push token fetch failed', e)
+            }
+          }
+        } catch (e) {
+          console.warn('Push registration failed', e)
         }
-      } catch (e) {
-        console.warn('Push registration failed', e)
       }
-    }
-    return () => { sub && Notifications.removeNotificationSubscription(sub) }
+      return () => { sub && Notifications.removeNotificationSubscription(sub) }
+    } catch {}
   })() }, [])
 
   const setLangAndSave = useCallback((value: Lang) => {
