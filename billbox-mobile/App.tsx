@@ -31,12 +31,31 @@ import { ensureNotificationConfig, requestPermissionIfNeeded, scheduleBillRemind
 import { ENABLE_PUSH_NOTIFICATIONS, PUBLIC_SITE_URL, ENABLE_IAP } from './src/env'
 import type { Space, SpacePlan } from './src/spaces'
 import { ensureDefaults as ensureSpacesDefaults, upsertSpace, removeSpace, loadCurrentSpaceId, saveCurrentSpaceId, loadSpaces } from './src/spaces'
-import { showUpgradeAlert, type EntitlementsSnapshot, type PlanId, useEntitlements, EntitlementsProvider } from './src/entitlements'
+import { setUpgradeHandler, showUpgradeAlert, type EntitlementsSnapshot, type PlanId, useEntitlements, EntitlementsProvider } from './src/entitlements'
 
 const BRAND_WORDMARK = require('./assets/logo/logo-wordmark.png')
+const BRAND_ICON = require('./assets/logo/logo-icon.png')
+
+type LangContextValue = { lang: Lang; setLang: (value: Lang) => void }
+const LangContext = React.createContext<LangContextValue>({ lang: 'en', setLang: () => {} })
+function useLang() {
+  return useContext(LangContext)
+}
+
+function formatTemplate(template: string, vars: Record<string, any>): string {
+  return String(template).replace(/\{([a-zA-Z0-9_]+)\}/g, (_m, key) => {
+    const v = vars?.[key]
+    return v == null ? '' : String(v)
+  })
+}
+
+function tf(lang: Lang, key: string, vars: Record<string, any>): string {
+  return formatTemplate(t(lang, key), vars)
+}
 
 function payerLabelFromSpaceId(spaceId: string | null | undefined): 'Payer 1' | 'Payer 2' {
-  return spaceId === 'personal2' ? 'Payer 2' : 'Payer 1'
+  // Uses currentLang inside i18n.ts via t(key) overload.
+  return (spaceId === 'personal2' ? t('payer_2_label') : t('payer_1_label')) as any
 }
 
 function isPayerSpaceId(spaceId: string | null | undefined): boolean {
@@ -660,6 +679,7 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
   const [initTimedOut, setInitTimedOut] = useState(false)
   const [initNonce, setInitNonce] = useState(0)
   const { snapshot: entitlements } = useEntitlements()
+  const { lang } = useLang()
 
   const retryInit = useCallback(() => {
     setInitError(null)
@@ -695,7 +715,7 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
       setLoading(false)
       // Fallback to an in-memory payer list so the app stays usable.
       if (!spaces.length) {
-        setSpaces([{ id: 'personal', name: 'Personal (Payer 1)', plan: 'free' } as any])
+        setSpaces([{ id: 'personal', name: t(lang, 'payer_1_label'), plan: 'free' } as any])
         setSpaceId('personal')
       }
       console.warn('[startup] payer init timeout')
@@ -706,7 +726,7 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
         if (demoMode) {
           // Demo must work without network/auth; keep payers in-memory.
           if (!mounted) return
-          setSpaces([{ id: 'personal', name: 'Personal (Payer 1)', plan: 'free' } as any])
+          setSpaces([{ id: 'personal', name: t(lang, 'payer_1_label'), plan: 'free' } as any])
           setSpaceId('personal')
           return
         }
@@ -732,7 +752,7 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
         console.warn('[startup] payer init error', e)
 
         // Keep app usable: fall back to an in-memory payer.
-        setSpaces([{ id: 'personal', name: 'Personal (Payer 1)', plan: 'free' } as any])
+        setSpaces([{ id: 'personal', name: t(lang, 'payer_1_label'), plan: 'free' } as any])
         setSpaceId('personal')
       } finally {
         clearTimeout(timeout)
@@ -821,13 +841,13 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
     const displayName = sp?.name ? `"${sp.name}"` : slotLabel
     const isPayer1 = id === 'personal'
     const message = isPayer1
-      ? `This will delete all bills, warranties, reminders, and attachments for ${displayName}.\n\nAfter removal, ${slotLabel} will be re-created and you will be asked to name it again.`
-      : `This will delete all bills, warranties, reminders, and attachments for ${displayName}.\n\nThis cannot be undone.`
+      ? tf(lang, 'spaces_remove_payer1_message', { displayName, slotLabel })
+      : tf(lang, 'spaces_remove_payer2_message', { displayName, slotLabel })
 
-    Alert.alert(`Remove ${slotLabel}?`, message, [
-      { text: 'Cancel', style: 'cancel' },
+    Alert.alert(tf(lang, 'spaces_remove_title', { slotLabel }), message, [
+      { text: t(lang, 'common_cancel'), style: 'cancel' },
       {
-        text: 'Remove',
+        text: t(lang, 'remove_action'),
         style: 'destructive',
         onPress: async () => {
           if (isPayer1) {
@@ -843,7 +863,7 @@ function SpaceProvider({ children, enabled, demoMode }: { children: React.ReactN
         },
       },
     ])
-  }, [spaces])
+  }, [lang, spaces])
 
   const current = spaces.find((s) => s.id === spaceId) || null
 
@@ -868,6 +888,7 @@ function BillDetailsScreen() {
   const route = useRoute<any>()
   const navigation = useNavigation<any>()
   const supabase = useMemo(() => getSupabase(), [])
+  const { lang } = useLang()
   const bill = (route.params?.bill || null) as Bill | null
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
@@ -907,8 +928,8 @@ function BillDetailsScreen() {
     const name = asset.fileName || 'photo.jpg'
     const type = asset.type || 'image/jpeg'
     const up = await uploadAttachmentFromUri(spaceId, 'bills', bill!.id, asset.uri, name, type)
-    if (up.error) Alert.alert('Upload failed', up.error)
-    else Alert.alert('Attachment uploaded', 'Image attached to bill')
+    if (up.error) Alert.alert(t(lang, 'upload_failed_title'), up.error || t(lang, 'upload_failed_message_generic'))
+    else Alert.alert(t(lang, 'attachment_uploaded_title'), t(lang, 'image_attached_to_bill_message'))
   }
 
   async function addPdf() {
@@ -918,8 +939,8 @@ function BillDetailsScreen() {
     if (!file?.uri) return
     const name = file.name || 'document.pdf'
     const up = await uploadAttachmentFromUri(spaceId, 'bills', bill!.id, file.uri, name, 'application/pdf')
-    if (up.error) Alert.alert('Upload failed', up.error)
-    else Alert.alert('Attachment uploaded', 'PDF attached to bill')
+    if (up.error) Alert.alert(t(lang, 'upload_failed_title'), up.error || t(lang, 'upload_failed_message_generic'))
+    else Alert.alert(t(lang, 'attachment_uploaded_title'), t(lang, 'pdf_attached_to_bill_message'))
     await refresh()
   }
 
@@ -927,58 +948,66 @@ function BillDetailsScreen() {
     if (supabase) {
       const url = await getSignedUrl(supabase!, path)
       if (url) Linking.openURL(url)
-      else Alert.alert('Open failed', 'Could not get URL')
+      else Alert.alert(t(lang, 'open_failed_title'), t(lang, 'could_not_get_url_message'))
     } else {
       if (uri) Linking.openURL(uri)
-      else Alert.alert('Offline', 'Attachment stored locally. Preview is unavailable.')
+      else Alert.alert(t(lang, 'offline_title'), t(lang, 'attachment_stored_locally_message'))
     }
   }
 
   async function remove(path: string) {
-    Alert.alert('Delete attachment?', 'This file will be removed.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: async () => { const { error } = await deleteAttachment(spaceId, 'bills', bill!.id, path); if (error) Alert.alert('Delete failed', error); else await refresh() } }
+    Alert.alert(t(lang, 'delete_attachment_title'), t(lang, 'delete_attachment_message'), [
+      { text: t(lang, 'cancel_action'), style: 'cancel' },
+      {
+        text: t(lang, 'delete_action'),
+        style: 'destructive',
+        onPress: async () => {
+          const { error } = await deleteAttachment(spaceId, 'bills', bill!.id, path)
+          if (error) Alert.alert(t(lang, 'delete_failed_title'), String(error))
+          else await refresh()
+        },
+      },
     ])
   }
 
   if (!bill || spaceLoading || !space) {
     return (
-      <Screen scroll={false}>
+      <Screen title={t(lang, 'bill_details_fallback_title')} scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
-          <Text style={styles.mutedText}>Loading bill…</Text>
+          <Text style={styles.mutedText}>{t(lang, 'loading_bill')}</Text>
         </View>
       </Screen>
     )
   }
 
   return (
-    <Screen>
+    <Screen title={bill.supplier || t(lang, 'bill_details_fallback_title')}>
       <View style={styles.pageStack}>
-        <SectionHeader title={bill.supplier || 'Bill details'} />
-
         <Surface elevated>
-          <SectionHeader title="Bill summary" />
-          <Text style={styles.bodyText}>{bill.currency} {bill.amount.toFixed(2)} • due {bill.due_date}</Text>
-          {!!bill.reference && <Text style={styles.bodyText}>Ref: {bill.reference}</Text>}
-          {!!bill.iban && <Text style={styles.bodyText}>IBAN: {bill.iban}</Text>}
+          <SectionHeader title={t(lang, 'bill_summary_title')} />
+          <Text style={styles.bodyText}>
+            {bill.currency} {bill.amount.toFixed(2)} • {t(lang, 'due_label')} {bill.due_date}
+          </Text>
+          {!!bill.reference && <Text style={styles.bodyText}>{t(lang, 'ref_prefix')} {bill.reference}</Text>}
+          {!!bill.iban && <Text style={styles.bodyText}>{t(lang, 'iban_prefix')} {bill.iban}</Text>}
           {!bill.due_date && (
             <InlineInfo
               tone="warning"
               iconName="alert-circle-outline"
-              message="No due date — reminders cannot be scheduled."
+              message={t(lang, 'no_due_date_reminders_message')}
             />
           )}
           {linkedWarranty ? (
             <AppButton
-              label="View linked warranty"
+              label={t(lang, 'view_linked_warranty')}
               variant="secondary"
               iconName="shield-checkmark-outline"
               onPress={() => navigation.navigate('Warranty Details', { warrantyId: linkedWarranty.id })}
             />
           ) : (
             <AppButton
-              label="Create warranty from this bill"
+              label={t(lang, 'create_warranty_from_bill')}
               variant="secondary"
               iconName="shield-checkmark-outline"
               onPress={async () => {
@@ -990,7 +1019,7 @@ function BillDetailsScreen() {
                       const { data } = await listWarranties(s0, spaceId)
                       const existing = (data || []).find((w: any) => w.bill_id === bill.id) || null
                       if (existing?.id) {
-                        Alert.alert('Warranty already exists', 'Opening the existing warranty for this bill.')
+                        Alert.alert(t(lang, 'warranty_already_exists_title'), t(lang, 'opening_existing_warranty_for_bill_message'))
                         navigation.navigate('Warranty Details', { warrantyId: existing.id })
                         return
                       }
@@ -998,7 +1027,7 @@ function BillDetailsScreen() {
                       const locals = await loadLocalWarranties(spaceId)
                       const existing = (locals || []).find((w: any) => w.bill_id === bill.id) || null
                       if ((existing as any)?.id) {
-                        Alert.alert('Warranty already exists', 'Opening the existing warranty for this bill.')
+                        Alert.alert(t(lang, 'warranty_already_exists_title'), t(lang, 'opening_existing_warranty_for_bill_message'))
                         navigation.navigate('Warranty Details', { warrantyId: (existing as any).id })
                         return
                       }
@@ -1009,18 +1038,21 @@ function BillDetailsScreen() {
                   let createdId: string | null = null
                   if (s) {
                     const { data, error } = await createWarranty(s, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id, space_id: spaceId })
-                    if (error) { Alert.alert('Warranty error', error.message); return }
+                    if (error) {
+                      Alert.alert(t(lang, 'warranty_error_title'), error.message)
+                      return
+                    }
                     createdId = data?.id || null
                   } else {
                     const local = await addLocalWarranty(spaceId, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id })
                     createdId = local.id
                   }
                   if (createdId) {
-                    Alert.alert('Warranty created', 'Linked to this bill.')
+                    Alert.alert(t(lang, 'warranty_created_title'), t(lang, 'linked_to_this_bill_message'))
                     navigation.navigate('Warranty Details', { warrantyId: createdId })
                   }
                 } catch (e: any) {
-                  Alert.alert('Create warranty failed', e?.message || 'Unknown error')
+                  Alert.alert(t(lang, 'create_warranty_failed_title'), e?.message || t(lang, 'unknown_error'))
                 }
               }}
             />
@@ -1028,64 +1060,76 @@ function BillDetailsScreen() {
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title="Reminders" />
+          <SectionHeader title={t(lang, 'reminders_title')} />
           <View style={styles.billActionsRow}>
             <AppButton
-              label="Schedule defaults"
+              label={t(lang, 'schedule_defaults')}
               variant="secondary"
               iconName="alarm-outline"
               onPress={async ()=>{
-                if (!bill.due_date) { Alert.alert('Missing due date', 'Add a due date to schedule reminders.'); return }
+                if (!bill.due_date) {
+                  Alert.alert(t(lang, 'missing_due_date_title'), t(lang, 'add_due_date_to_schedule_reminders_message'))
+                  return
+                }
                 await ensureNotificationConfig()
                 const ok = await requestPermissionIfNeeded()
                 if (!ok) {
-                  Alert.alert('Enable reminders', 'Please enable notifications in system settings.')
+                  Alert.alert(t(lang, 'enable_reminders_title'), t(lang, 'enable_notifications_in_settings_message'))
                   return
                 }
                 await scheduleBillReminders({ ...bill, space_id: spaceId } as any, undefined, spaceId)
-                Alert.alert('Reminders', 'Scheduled default reminders for this bill.')
+                Alert.alert(t(lang, 'reminders_scheduled_title'), t(lang, 'scheduled_default_bill_reminders_message'))
               }}
             />
             <AppButton
-              label="Cancel reminders"
+              label={t(lang, 'cancel_reminders')}
               variant="ghost"
               iconName="notifications-off-outline"
               onPress={async ()=>{
                 await cancelBillReminders(bill.id, spaceId)
-                Alert.alert('Reminders', 'Canceled for this bill.')
+                Alert.alert(t(lang, 'reminders_title'), t(lang, 'canceled_for_this_bill_message'))
               }}
             />
           </View>
           <View style={styles.billActionsRow}>
             <AppButton
-              label="Snooze 1 day"
+              label={t(lang, 'snooze_1_day')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 1, spaceId); Alert.alert('Snoozed', 'Next reminder in 1 day.') }}
+              onPress={async ()=>{
+                await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 1, spaceId)
+                Alert.alert(t(lang, 'snoozed_title'), t(lang, 'next_reminder_in_1_day_message'))
+              }}
             />
             <AppButton
-              label="Snooze 3 days"
+              label={t(lang, 'snooze_3_days')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 3, spaceId); Alert.alert('Snoozed', 'Next reminder in 3 days.') }}
+              onPress={async ()=>{
+                await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 3, spaceId)
+                Alert.alert(t(lang, 'snoozed_title'), t(lang, 'next_reminder_in_3_days_message'))
+              }}
             />
             <AppButton
-              label="Snooze 7 days"
+              label={t(lang, 'snooze_7_days')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 7, spaceId); Alert.alert('Snoozed', 'Next reminder in 7 days.') }}
+              onPress={async ()=>{
+                await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 7, spaceId)
+                Alert.alert(t(lang, 'snoozed_title'), t(lang, 'next_reminder_in_7_days_message'))
+              }}
             />
           </View>
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title="Attachments" />
+          <SectionHeader title={t(lang, 'attachments_title')} />
           <View style={styles.attachmentRow}>
             <AppButton
-              label="Add image"
+              label={t(lang, 'add_image')}
               variant="secondary"
               iconName="image-outline"
               onPress={addImage}
             />
             <AppButton
-              label="Add PDF"
+              label={t(lang, 'add_pdf')}
               variant="secondary"
               iconName="document-attach-outline"
               onPress={addPdf}
@@ -1093,9 +1137,9 @@ function BillDetailsScreen() {
           </View>
           {attachments.length === 0 ? (
             <EmptyState
-              title="No attachments yet"
-              message="Attach the original bill or receipt for easier approvals and audits."
-              actionLabel="Attach image or PDF"
+              title={t(lang, 'no_attachments_yet_title')}
+              message={t(lang, 'attachments_help_message')}
+              actionLabel={t(lang, 'attach_image_or_pdf_action')}
               onActionPress={addImage}
               iconName="document-text-outline"
             />
@@ -1109,13 +1153,13 @@ function BillDetailsScreen() {
                   <Text style={styles.cardTitle}>{item.name}</Text>
                   <View style={styles.billActionsRow}>
                     <AppButton
-                      label="Open"
+                      label={t(lang, 'open_action')}
                       variant="secondary"
                       iconName="open-outline"
                       onPress={()=>openAttachment(item.path, item.uri)}
                     />
                     <AppButton
-                      label="Delete"
+                      label={t(lang, 'delete_action')}
                       variant="ghost"
                       iconName="trash-outline"
                       onPress={()=>remove(item.path)}
@@ -1128,16 +1172,16 @@ function BillDetailsScreen() {
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title="Danger zone" />
+          <SectionHeader title={t(lang, 'danger_zone_title')} />
           <AppButton
-            label="Delete bill"
+            label={t(lang, 'delete_bill')}
             variant="ghost"
             iconName="trash-outline"
             onPress={() => {
-              Alert.alert('Delete bill?', 'Are you sure? This cannot be undone. Attachments will be deleted too.', [
-                { text: 'Cancel', style: 'cancel' },
+              Alert.alert(t(lang, 'delete_bill_confirm_title'), t(lang, 'delete_bill_confirm_message'), [
+                { text: t(lang, 'cancel_action'), style: 'cancel' },
                 {
-                  text: 'Delete',
+                  text: t(lang, 'delete_action'),
                   style: 'destructive',
                   onPress: async () => {
                     try {
@@ -1148,10 +1192,10 @@ function BillDetailsScreen() {
                       } else {
                         await deleteLocalBill(spaceId, bill.id)
                       }
-                      Alert.alert('Deleted', 'Bill removed.')
+                      Alert.alert(t(lang, 'deleted_title'), t(lang, 'bill_removed_message'))
                       navigation.goBack()
                     } catch (e: any) {
-                      Alert.alert('Delete failed', e?.message || 'Unable to delete bill')
+                      Alert.alert(t(lang, 'delete_failed_title'), e?.message || t(lang, 'unable_to_delete_bill'))
                     }
                   },
                 },
@@ -1449,7 +1493,7 @@ function LoginScreen({ onLoggedIn, lang, setLang }: LoginScreenProps) {
           <View style={styles.loginWrapper}>
             <View style={styles.loginHeader}>
               <View style={styles.loginLogo}>
-                <Ionicons name="cube-outline" size={28} color={themeColors.primary} />
+                <Image source={BRAND_ICON} style={styles.loginLogoImage} resizeMode="contain" accessibilityLabel="BillBox" />
               </View>
               <Text style={styles.loginTitle}>{t(lang, 'app_title')}</Text>
               <Text style={styles.loginSubtitle}>{t(lang, 'login_tagline')}</Text>
@@ -1601,6 +1645,7 @@ function ScanBillScreen() {
   const navigation = useNavigation<any>()
   const route = useRoute<any>()
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const { lang } = useLang()
   const spacesCtx = useSpacesContext()
   const { snapshot: entitlements } = useEntitlements()
   const effectiveSpaceId = spaceId || space?.id || 'default'
@@ -1741,11 +1786,11 @@ function ScanBillScreen() {
   function handleDecodedText(text: string) {
     const t = (text ?? '').toString()
     setRawText(t || '')
-    if (!t) { setFormat('Unknown'); setParsed(null); Alert.alert('QR detected but no text decoded'); return }
+    if (!t) { setFormat('Unknown'); setParsed(null); Alert.alert(t(lang, 'qr_no_text_decoded_title')); return }
     const epc = parseEPC(t)
     const upn = !epc ? parseUPN(t) : null
     const p = epc || upn
-    if (!p) { setFormat('Unknown'); setParsed(null); Alert.alert('Unsupported QR format'); return }
+    if (!p) { setFormat('Unknown'); setParsed(null); Alert.alert(t(lang, 'qr_unsupported_format_title')); return }
     setFormat(epc ? 'EPC/SEPA SCT' : 'UPN')
     setParsed(p)
     setSupplier(p.creditor_name || supplier)
@@ -1780,7 +1825,7 @@ function ScanBillScreen() {
       setUseDataActive(true)
       setCameraVisible(false)
       setTorch('off')
-      Alert.alert('OCR extracted', `${summary}\n\nThe selected image will be attached on save.`)
+      Alert.alert(t(lang, 'ocr_extracted_title'), `${summary}\n\n${t(lang, 'ocr_selected_image_attached_on_save_message')}`)
     } catch (e: any) {
       const msg = e?.message || 'OCR failed'
       setOcrError(msg)
@@ -1793,7 +1838,7 @@ function ScanBillScreen() {
   }
   const handleManualExtract = () => {
     if (!manual.trim()) {
-      Alert.alert('Missing data', 'Paste QR text to extract payment fields.')
+      Alert.alert(t(lang, 'missing_data_title'), t(lang, 'missing_data_paste_qr_text_message'))
       return
     }
     handleDecodedText(manual)
@@ -1822,16 +1867,16 @@ function ScanBillScreen() {
 
   const handleSaveBill = async () => {
     if (!supplier.trim()) {
-      Alert.alert('Supplier required', 'Enter the supplier or issuer of the bill.')
+      Alert.alert(t(lang, 'supplier_required_title'), t(lang, 'supplier_required_message'))
       return
     }
     if (!currency.trim()) {
-      Alert.alert('Currency required', 'Enter a currency (for example EUR).')
+      Alert.alert(t(lang, 'currency_required_title'), t(lang, 'currency_required_message'))
       return
     }
     const amt = Number(String(amountStr).replace(',', '.'))
     if (Number.isNaN(amt) || amt <= 0) {
-      Alert.alert('Invalid amount', 'Provide a numeric amount greater than 0.')
+      Alert.alert(t(lang, 'invalid_amount_title'), t(lang, 'invalid_amount_message'))
       return
     }
 
@@ -1840,31 +1885,31 @@ function ScanBillScreen() {
 
     if (!archiveOnly) {
       if (!creditorName.trim()) {
-        Alert.alert('Creditor required', 'Enter the creditor/payee name (often the same as the supplier).')
+        Alert.alert(t(lang, 'creditor_required_title'), t(lang, 'creditor_required_message'))
         return
       }
       if (!iban.trim()) {
-        Alert.alert('IBAN required', 'Enter the IBAN for the payment.')
+        Alert.alert(t(lang, 'iban_required_title'), t(lang, 'iban_required_message'))
         return
       }
       if (iban.trim().length < 10) {
-        Alert.alert('Invalid IBAN', 'IBAN looks too short. Please double-check it.')
+        Alert.alert(t(lang, 'invalid_iban_title'), t(lang, 'invalid_iban_message'))
         return
       }
       if (!reference.trim()) {
-        Alert.alert('Reference required', 'Enter the payment reference.')
+        Alert.alert(t(lang, 'reference_required_title'), t(lang, 'reference_required_message'))
         return
       }
       if (!purpose.trim()) {
-        Alert.alert('Purpose required', 'Enter the payment purpose/description.')
+        Alert.alert(t(lang, 'purpose_required_title'), t(lang, 'purpose_required_message'))
         return
       }
       if (!trimmedDue) {
-        Alert.alert('Due date required', 'Add a due date so reminders can be scheduled.')
+        Alert.alert(t(lang, 'due_date_required_title'), t(lang, 'due_date_required_message'))
         return
       }
       if (!pendingAttachment?.uri) {
-        Alert.alert('Attachment required', 'Attach a PDF or image of the original bill.')
+        Alert.alert(t(lang, 'attachment_required_title'), t(lang, 'attachment_required_message'))
         return
       }
     }
@@ -1903,7 +1948,7 @@ function ScanBillScreen() {
           space_id: spaceId,
         })
         if (error) {
-          Alert.alert('Save failed', error.message)
+          Alert.alert(t(lang, 'save_failed_title'), error.message)
           setSaving(false)
           return
         }
@@ -1925,7 +1970,7 @@ function ScanBillScreen() {
 
       if (savedId && pendingAttachment?.uri) {
         const up = await uploadAttachmentFromUri(spaceId, 'bills', savedId, pendingAttachment.uri, pendingAttachment.name || 'attachment', pendingAttachment.type)
-        if (up.error) Alert.alert('Attachment upload failed', up.error)
+        if (up.error) Alert.alert(t(lang, 'attachment_upload_failed_title'), up.error)
       }
 
       if (inboxSourceId) {
@@ -1933,11 +1978,16 @@ function ScanBillScreen() {
         setInboxSourceId(null)
       }
 
-      Alert.alert('Bill saved', archiveOnly ? 'Saved as archived (already paid)' : (s ? 'Bill created successfully' : 'Saved locally (Not synced)'))
+      Alert.alert(
+        t(lang, 'bill_saved_title'),
+        archiveOnly
+          ? t(lang, 'bill_saved_archived_message')
+          : (s ? t(lang, 'bill_created_successfully_message') : t(lang, 'bill_saved_locally_not_synced_message')),
+      )
       clearExtraction()
       try { (navigation as any)?.navigate?.('Bills', { highlightBillId: savedId }) } catch {}
     } catch (e: any) {
-      Alert.alert('Save error', e?.message || 'Unable to save bill')
+      Alert.alert(t(lang, 'save_error_title'), e?.message || t(lang, 'unable_to_save_bill'))
     } finally {
       setSaving(false)
     }
@@ -1948,42 +1998,38 @@ function ScanBillScreen() {
       <Screen scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
-          <Text style={styles.mutedText}>Loading spaces…</Text>
+          <Text style={styles.mutedText}>{t(lang, 'loading_spaces')}</Text>
         </View>
       </Screen>
     )
   }
 
   return (
-    <Screen>
+    <Screen title={t(lang, 'scan_title')}>
       <View style={styles.pageStack}>
-        <SectionHeader title="Scan" />
-
         {spacesCtx.spaces.length > 1 ? (
           <Surface elevated>
-            <SectionHeader title="Payer" />
+            <SectionHeader title={t(lang, 'payer_title')} />
             <SegmentedControl
               value={spacesCtx.current?.id || spaceId || ''}
               onChange={(id) => { spacesCtx.setCurrent(id) }}
               options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
               style={{ marginTop: themeSpacing.xs }}
             />
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Bills you save are assigned to the active payer.</Text>
+            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>{t(lang, 'scan_active_payer_hint')}</Text>
           </Surface>
         ) : null}
 
-        <Text style={[styles.mutedText, { marginBottom: themeSpacing.xs }]}>
-          Scan or import a bill, review the draft below, then save.
-        </Text>
+        <Text style={[styles.mutedText, { marginBottom: themeSpacing.xs }]}>{t(lang, 'scan_intro_message')}</Text>
 
         {!permission?.granted ? (
           <Surface elevated>
-            <SectionHeader title="Capture bill" />
-            <Text style={styles.bodyText}>Scan a QR code or import a bill image/PDF to start a draft.</Text>
+            <SectionHeader title={t(lang, 'capture_bill_title')} />
+            <Text style={styles.bodyText}>{t(lang, 'capture_bill_help_message')}</Text>
             <View style={styles.actionRow}>
-              <AppButton label="Enable camera" iconName="camera-outline" onPress={requestPermission} />
-              <AppButton label={ocrBusy ? 'Extracting…' : 'Import photo'} variant="secondary" iconName="image-outline" onPress={pickImage} loading={ocrBusy} />
-              <AppButton label={ocrBusy ? 'Extracting…' : 'Import PDF'} variant="secondary" iconName="document-text-outline" onPress={pickPdfForOCR} loading={ocrBusy} />
+              <AppButton label={t(lang, 'enable_camera_action')} iconName="camera-outline" onPress={requestPermission} />
+              <AppButton label={ocrBusy ? t(lang, 'extracting_ellipsis') : t(lang, 'import_photo_action')} variant="secondary" iconName="image-outline" onPress={pickImage} loading={ocrBusy} />
+              <AppButton label={ocrBusy ? t(lang, 'extracting_ellipsis') : t(lang, 'import_pdf_action')} variant="secondary" iconName="document-text-outline" onPress={pickPdfForOCR} loading={ocrBusy} />
             </View>
           </Surface>
         ) : (
@@ -2009,7 +2055,7 @@ function ScanBillScreen() {
                 </View>
                 <View style={styles.cameraActions}>
                   <AppButton
-                    label={torch === 'on' ? 'Torch off' : 'Torch on'}
+                    label={torch === 'on' ? t(lang, 'torch_off_action') : t(lang, 'torch_on_action')}
                     variant="ghost"
                     iconName={torch === 'on' ? 'flash-off-outline' : 'flash-outline'}
                     onPress={() => setTorch((prev) => (prev === 'on' ? 'off' : 'on'))}
@@ -2029,15 +2075,15 @@ function ScanBillScreen() {
                     loading={ocrBusy}
                   />
                 </View>
-                <Text style={styles.helperText}>Align the QR code inside the frame. We will extract IBAN, reference, and amount automatically.</Text>
+                <Text style={styles.helperText}>{t(lang, 'camera_qr_helper_text')}</Text>
               </>
             ) : (
               <View style={styles.capturePlaceholder}>
                 <Ionicons name="scan-outline" size={36} color={themeColors.primary} />
-                <Text style={styles.captureMessage}>QR details captured. Review the draft below or scan again if anything looks off.</Text>
+                <Text style={styles.captureMessage}>{t(lang, 'qr_details_captured_message')}</Text>
                 <View style={styles.captureActions}>
                   <AppButton
-                    label="Scan again"
+                    label={t(lang, 'scan_again_action')}
                     variant="secondary"
                     iconName="scan-outline"
                     onPress={() => {
@@ -2047,14 +2093,14 @@ function ScanBillScreen() {
                     }}
                   />
                   <AppButton
-                    label={ocrBusy ? 'Extracting…' : 'Import photo'}
+                    label={ocrBusy ? t(lang, 'extracting_ellipsis') : t(lang, 'import_photo_action')}
                     variant="secondary"
                     iconName="image-outline"
                     onPress={pickImage}
                     loading={ocrBusy}
                   />
                   <AppButton
-                    label={ocrBusy ? 'Extracting…' : 'Import PDF'}
+                    label={ocrBusy ? t(lang, 'extracting_ellipsis') : t(lang, 'import_pdf_action')}
                     variant="secondary"
                     iconName="document-text-outline"
                     onPress={pickPdfForOCR}
@@ -2071,72 +2117,72 @@ function ScanBillScreen() {
         )}
 
         <Surface elevated>
-          <SectionHeader title="Bill data sources" actionLabel="Clear" onActionPress={clearExtraction} />
-          <Text style={styles.bodyText}>Use any source below to prefill the bill. All fields stay editable before you save.</Text>
-          <Disclosure title="Paste QR text (advanced)">
+          <SectionHeader title={t(lang, 'bill_data_sources_title')} actionLabel={t(lang, 'clear_action')} onActionPress={clearExtraction} />
+          <Text style={styles.bodyText}>{t(lang, 'bill_data_sources_help_message')}</Text>
+          <Disclosure title={t(lang, 'paste_qr_text_advanced_title')}>
             <AppInput
-              placeholder="Paste QR text"
+              placeholder={t(lang, 'paste_qr_text_placeholder')}
               value={manual}
               onChangeText={setManual}
               multiline
-              hint="Supports EPC/SEPA SCT and UPN formats."
+              hint={t(lang, 'qr_formats_hint')}
             />
             <View style={styles.actionRow}>
-              <AppButton label="Extract fields" iconName="sparkles-outline" onPress={handleManualExtract} />
-              <Badge label={format ? `Detected: ${format}` : 'Awaiting data'} tone={format ? 'info' : 'neutral'} />
+              <AppButton label={t(lang, 'extract_fields_action')} iconName="sparkles-outline" onPress={handleManualExtract} />
+              <Badge label={format ? tf(lang, 'detected_format_label', { format }) : t(lang, 'awaiting_data_label')} tone={format ? 'info' : 'neutral'} />
             </View>
           </Disclosure>
-          <Disclosure title="Show raw details">
-            <Text style={styles.codeBlock}>{rawText || 'No QR data captured yet.'}</Text>
+          <Disclosure title={t(lang, 'show_raw_details_title')}>
+            <Text style={styles.codeBlock}>{rawText || t(lang, 'no_qr_data_captured_yet')}</Text>
           </Disclosure>
         </Surface>
 
         <Surface elevated style={styles.formCard}>
-          <SectionHeader title="Bill draft" actionLabel="Clear" onActionPress={clearExtraction} />
-          <Text style={styles.formIntro}>Double-check every field before saving.</Text>
+          <SectionHeader title={t(lang, 'bill_draft_title')} actionLabel={t(lang, 'clear_action')} onActionPress={clearExtraction} />
+          <Text style={styles.formIntro}>{t(lang, 'bill_draft_intro')}</Text>
           {!hasBillData && (
             <InlineInfo
               tone="info"
               iconName="scan-outline"
-              message="Scan or import a bill, then review and edit before saving."
+              message={t(lang, 'bill_draft_empty_hint')}
               style={styles.formNotice}
             />
           )}
 
           <View style={styles.formSection}>
-            <Text style={styles.formSectionTitle}>Summary</Text>
+            <Text style={styles.formSectionTitle}>{t(lang, 'summary_section_title')}</Text>
             <View style={styles.formStack}>
-              <AppInput placeholder="Supplier" value={supplier} onChangeText={setSupplier} />
+              <AppInput placeholder={t(lang, 'supplier_placeholder')} value={supplier} onChangeText={setSupplier} />
               <View style={styles.formRow}>
-                <AppInput placeholder="Amount" value={amountStr} onChangeText={setAmountStr} keyboardType="numeric" style={styles.flex1} />
-                <AppInput placeholder="Currency" value={currency} onChangeText={setCurrency} style={styles.currencyInput} />
+                <AppInput placeholder={t(lang, 'amount_placeholder')} value={amountStr} onChangeText={setAmountStr} keyboardType="numeric" style={styles.flex1} />
+                <AppInput placeholder={t(lang, 'currency_placeholder')} value={currency} onChangeText={setCurrency} style={styles.currencyInput} />
               </View>
 
               <View style={styles.filterToggle}>
                 <Switch value={archiveOnly} onValueChange={setArchiveOnly} />
-                <Text style={styles.toggleLabel}>Archive / already paid (no payment)</Text>
+                <Text style={styles.toggleLabel}>{t(lang, 'archive_already_paid_label')}</Text>
               </View>
               {archiveOnly && (
                 <InlineInfo
                   tone="info"
                   iconName="archive-outline"
-                  message="Archived bills are excluded from Pay by default. Payment fields and attachments become optional."
+                  message={t(lang, 'archive_info_message')}
                   style={styles.formNotice}
                 />
               )}
 
               <View style={{ gap: themeSpacing.xs }}>
-                <Text style={styles.formSectionTitle}>Dates</Text>
+                <Text style={styles.formSectionTitle}>{t(lang, 'dates_section_title')}</Text>
                 <View style={styles.formRow}>
                   <AppInput
-                    placeholder="Due date (YYYY-MM-DD)"
+                    placeholder={t(lang, 'due_date_placeholder')}
                     value={dueDate}
                     onChangeText={setDueDate}
-                    hint="Due date (used for reminders and overdue status)."
+                    hint={t(lang, 'due_date_hint')}
                     style={styles.flex1}
                   />
                   <AppButton
-                    label={dueDate ? 'Change date' : 'Pick date'}
+                    label={dueDate ? t(lang, 'change_date_action') : t(lang, 'pick_date_action')}
                     variant="secondary"
                     iconName="calendar-outline"
                     onPress={() => setShowDuePicker(true)}
@@ -2152,7 +2198,7 @@ function ScanBillScreen() {
                     />
                     {isIOS && (
                       <View style={styles.datePickerActions}>
-                        <AppButton label="Done" variant="primary" onPress={() => setShowDuePicker(false)} />
+                        <AppButton label={t(lang, 'done_action')} variant="primary" onPress={() => setShowDuePicker(false)} />
                       </View>
                     )}
                   </View>
@@ -2164,25 +2210,25 @@ function ScanBillScreen() {
           <Divider style={styles.formDivider} />
 
           <View style={styles.formSection}>
-            <Text style={styles.formSectionTitle}>Payment details</Text>
+            <Text style={styles.formSectionTitle}>{t(lang, 'payment_details_section_title')}</Text>
             <View style={styles.formStack}>
-              <AppInput placeholder="Creditor" value={creditorName} onChangeText={setCreditorName} />
-              <AppInput placeholder="IBAN" value={iban} onChangeText={setIban} />
-              <AppInput placeholder="Reference" value={reference} onChangeText={setReference} />
-              <AppInput placeholder="Purpose" value={purpose} onChangeText={setPurpose} multiline />
+              <AppInput placeholder={t(lang, 'creditor_placeholder')} value={creditorName} onChangeText={setCreditorName} />
+              <AppInput placeholder={t(lang, 'iban_placeholder')} value={iban} onChangeText={setIban} />
+              <AppInput placeholder={t(lang, 'reference_placeholder')} value={reference} onChangeText={setReference} />
+              <AppInput placeholder={t(lang, 'purpose_placeholder')} value={purpose} onChangeText={setPurpose} multiline />
             </View>
           </View>
 
           <Divider style={styles.formDivider} />
 
           <View style={styles.formSection}>
-            <Text style={styles.formSectionTitle}>Attachments</Text>
+            <Text style={styles.formSectionTitle}>{t(lang, 'attachments_title')}</Text>
             {!pendingAttachment && (
-              <InlineInfo tone="warning" iconName="alert-circle-outline" message="Attach the original bill for a complete record." style={styles.formNotice} />
+              <InlineInfo tone="warning" iconName="alert-circle-outline" message={t(lang, 'attach_original_bill_warning')} style={styles.formNotice} />
             )}
             <View style={styles.attachmentButtons}>
               <AppButton
-                label={pendingAttachment?.type?.startsWith('image/') ? 'Replace image' : 'Attach image'}
+                label={pendingAttachment?.type?.startsWith('image/') ? t(lang, 'replace_image_action') : t(lang, 'attach_image_action')}
                 variant="secondary"
                 iconName="image-outline"
                 onPress={async () => {
@@ -2194,7 +2240,7 @@ function ScanBillScreen() {
                 }}
               />
               <AppButton
-                label={pendingAttachment?.type === 'application/pdf' ? 'Replace PDF' : 'Attach PDF'}
+                label={pendingAttachment?.type === 'application/pdf' ? t(lang, 'replace_pdf_action') : t(lang, 'attach_pdf_action')}
                 variant="secondary"
                 iconName="document-attach-outline"
                 onPress={async () => {
@@ -2208,17 +2254,17 @@ function ScanBillScreen() {
             </View>
             {pendingAttachment && (
               <View style={styles.attachmentPreview}>
-                <Text style={styles.bodyText}>Staged attachment: {pendingAttachment.name}</Text>
+                <Text style={styles.bodyText}>{tf(lang, 'staged_attachment_label', { name: pendingAttachment.name })}</Text>
                 {pendingAttachment.type?.startsWith('image/') && (
                   <Image source={{ uri: pendingAttachment.uri }} style={styles.attachmentImage} />
                 )}
-                <AppButton label="Remove attachment" variant="ghost" iconName="close-circle-outline" onPress={() => setPendingAttachment(null)} />
+                <AppButton label={t(lang, 'remove_attachment_action')} variant="ghost" iconName="close-circle-outline" onPress={() => setPendingAttachment(null)} />
               </View>
             )}
           </View>
 
           <AppButton
-            label={saving ? 'Saving bill…' : 'Save bill'}
+            label={saving ? t(lang, 'saving_bill_ellipsis') : t(lang, 'save_bill_action')}
             iconName="save-outline"
             onPress={handleSaveBill}
             loading={saving}
@@ -2234,6 +2280,7 @@ function InboxScreen() {
   const navigation = useNavigation<any>()
   const route = useRoute<any>()
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const { lang } = useLang()
   const { snapshot: entitlements } = useEntitlements()
   const [items, setItems] = useState<InboxItem[]>([])
   const [filter, setFilter] = useState<'pending' | 'archived' | 'all'>('pending')
@@ -2272,9 +2319,9 @@ function InboxScreen() {
       if (!file?.uri) return
       await addToInbox({ spaceId, uri: file.uri, name: file.name || 'document', mimeType: file.mimeType || undefined })
       await refresh()
-      Alert.alert('Inbox', 'Document added to Inbox')
+      Alert.alert(t(lang, 'inbox_title'), t(lang, 'inbox_document_added_message'))
     } catch (e: any) {
-      Alert.alert('Import failed', e?.message || 'Unable to import document')
+      Alert.alert(t(lang, 'import_failed_title'), e?.message || t(lang, 'unable_to_import_document'))
     } finally {
       setImporting(false)
     }
@@ -2290,9 +2337,9 @@ function InboxScreen() {
       const { fields, summary } = await performOCR(item.localPath)
       await updateInboxItem(spaceId, item.id, { extractedFields: fields, notes: summary, status: 'pending' })
       await refresh()
-      Alert.alert('OCR completed', summary)
+      Alert.alert(t(lang, 'ocr_completed_title'), summary)
     } catch (e: any) {
-      Alert.alert('OCR failed', e?.message || 'Unable to process document')
+      Alert.alert(t(lang, 'ocr_failed_title'), e?.message || t(lang, 'unable_to_process_document'))
     } finally {
       setBusy(null)
     }
@@ -2302,13 +2349,13 @@ function InboxScreen() {
     try {
       await Linking.openURL(item.localPath)
     } catch {
-      Alert.alert('Open failed', 'Unable to open this file. You can export it from the Inbox screen.')
+      Alert.alert(t(lang, 'open_failed_title'), t(lang, 'unable_to_open_file_export_hint'))
     }
   }
 
   async function attachToBill(item: InboxItem) {
     if (!item.extractedFields) {
-      Alert.alert('Run OCR first', 'Scan the document so we can prefill the bill.')
+      Alert.alert(t(lang, 'run_ocr_first_title'), t(lang, 'scan_document_to_prefill_bill_message'))
       return
     }
     navigation.navigate('Scan', {
@@ -2327,9 +2374,9 @@ function InboxScreen() {
   }
 
   async function removeItem(item: InboxItem) {
-    Alert.alert('Delete?', 'Remove this inbox item permanently?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: async () => { await removeInboxItem(spaceId, item.id); await refresh() } },
+    Alert.alert(t(lang, 'delete_inbox_item_title'), t(lang, 'delete_inbox_item_message'), [
+      { text: t(lang, 'common_cancel'), style: 'cancel' },
+      { text: t(lang, 'delete_action'), style: 'destructive', onPress: async () => { await removeInboxItem(spaceId, item.id); await refresh() } },
     ])
   }
 
@@ -2337,54 +2384,60 @@ function InboxScreen() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#2b6cb0" />
-        <Text style={{ marginTop: 8 }}>Loading space…</Text>
+        <Text style={{ marginTop: 8 }}>{t(lang, 'loading_space')}</Text>
       </View>
     )
   }
 
   return (
-    <Screen scroll={false}>
+    <Screen title={t(lang, 'inbox_title')} scroll={false}>
       <View style={styles.pageStack}>
-        <SectionHeader title="Inbox" />
-        <View style={styles.inboxControlsRow}>
-          <TouchableOpacity style={[styles.primaryBtn, importing && styles.primaryBtnDisabled]} onPress={importFromDevice} disabled={importing}>
-            <Text style={styles.primaryBtnText}>{importing ? 'Importing…' : 'Import from device'}</Text>
-          </TouchableOpacity>
-          <View style={styles.inboxFilterRow}>
-            <TouchableOpacity style={[styles.secondaryBtn, filter==='pending' ? styles.secondaryBtnActive : null]} onPress={()=>setFilter('pending')}>
-              <Text style={[styles.secondaryBtnText, filter==='pending' ? styles.secondaryBtnTextActive : null]}>Pending</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.secondaryBtn, filter==='archived' ? styles.secondaryBtnActive : null]} onPress={()=>setFilter('archived')}>
-              <Text style={[styles.secondaryBtnText, filter==='archived' ? styles.secondaryBtnTextActive : null]}>Archived</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.secondaryBtn, filter==='all' ? styles.secondaryBtnActive : null]} onPress={()=>setFilter('all')}>
-              <Text style={[styles.secondaryBtnText, filter==='all' ? styles.secondaryBtnTextActive : null]}>All</Text>
-            </TouchableOpacity>
+        <Surface elevated>
+          <SectionHeader title={t(lang, 'inbox_import_section_title')} />
+          <Text style={styles.bodyText}>{t(lang, 'inbox_import_help_message')}</Text>
+          <View style={styles.inboxControlsRow}>
+            <AppButton
+              label={importing ? t(lang, 'importing_ellipsis') : t(lang, 'import_from_device_action')}
+              iconName="add-outline"
+              onPress={importFromDevice}
+              loading={importing}
+              disabled={importing}
+            />
+            <SegmentedControl
+              value={filter}
+              onChange={(v) => setFilter(v as any)}
+              options={[
+                { value: 'pending', label: t(lang, 'filter_pending') },
+                { value: 'archived', label: t(lang, 'filter_archived') },
+                { value: 'all', label: t(lang, 'filter_all') },
+              ]}
+              style={{ flex: 1 }}
+            />
           </View>
-        </View>
+        </Surface>
 
         <View style={styles.listWrapper}>
           <FlatList
             data={filtered}
             keyExtractor={(item) => item.id}
-            ListEmptyComponent={<Text>No documents yet. Share a PDF, image, or email attachment to BillBox.</Text>}
+            ListEmptyComponent={<Text>{t(lang, 'inbox_empty_message')}</Text>}
             renderItem={({ item }) => (
               <Surface elevated style={[styles.card, highlightId === item.id ? styles.inboxItemHighlighted : null]}>
                 <Text style={styles.cardTitle}>{item.name}</Text>
                 <Text>{item.mimeType} • {new Date(item.created_at).toLocaleString()}</Text>
-                <Text>Status: {item.status}</Text>
+                <Text>{t(lang, 'status_label')} {item.status === 'archived' ? t(lang, 'status_archived') : t(lang, 'status_pending')}</Text>
                 {item.extractedFields && (
                   <View style={{ marginTop: 6 }}>
-                    <Text style={{ fontWeight: '600' }}>Extracted</Text>
+                    <Text style={{ fontWeight: '600' }}>{t(lang, 'extracted_label')}</Text>
                     {item.notes ? <Text>{item.notes}</Text> : null}
                   </View>
                 )}
                 <View style={styles.inboxActionsRow}>
-                  <Button title="Open" onPress={()=>openItem(item)} />
-                  <Button title={busy===item.id ? 'Processing…' : 'Run OCR'} onPress={()=>runOcr(item)} disabled={busy===item.id} />
-                  <Button title="Attach to bill" onPress={()=>attachToBill(item)} />
-                  <Button title="Archive" onPress={()=>archiveItem(item)} />
-                  <Button title="Delete" color="#c53030" onPress={()=>removeItem(item)} />
+                  <AppButton label={t(lang, 'open_action')} variant="secondary" iconName="open-outline" onPress={()=>openItem(item)} />
+                  <AppButton label={busy===item.id ? t(lang, 'processing_ellipsis') : t(lang, 'run_ocr_action')} variant="secondary" iconName="sparkles-outline" onPress={()=>runOcr(item)} loading={busy===item.id} disabled={busy===item.id} />
+                  <AppButton label={t(lang, 'attach_to_bill_action')} variant="secondary" iconName="link-outline" onPress={()=>attachToBill(item)} />
+                  <AppButton label={t(lang, 'archive_action')} variant="ghost" iconName="archive-outline" onPress={()=>archiveItem(item)} />
+                  <AppButton label={t(lang, 'delete_action')} variant="danger" iconName="trash-outline" onPress={()=>removeItem(item)} />
                 </View>
               </Surface>
             )}
@@ -2400,6 +2453,7 @@ function BillsListScreen() {
   const navigation = useNavigation<any>()
   const route = useRoute<any>()
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const { lang } = useLang()
   const insets = useSafeAreaInsets()
   const hasLoadedRef = useRef(false)
 
@@ -2427,9 +2481,9 @@ function BillsListScreen() {
   const [iosPickerValue, setIosPickerValue] = useState(new Date())
 
   const dateFieldLabels: Record<typeof dateMode, string> = {
-    due: 'Due date',
-    invoice: 'Invoice date',
-    created: 'Created date',
+    due: t(lang, 'date_field_due'),
+    invoice: t(lang, 'date_field_invoice'),
+    created: t(lang, 'date_field_created'),
   }
 
   const formatDateInput = useCallback((value: Date) => {
@@ -2482,12 +2536,12 @@ function BillsListScreen() {
         setBills((locals as any) || [])
       }
     } catch (e: any) {
-      Alert.alert('Bills', e?.message || 'Unable to load bills')
+      Alert.alert(t(lang, 'bills_title'), e?.message || t(lang, 'unable_to_load_bills'))
     } finally {
       hasLoadedRef.current = true
       silent ? setRefreshing(false) : setLoadingBills(false)
     }
-  }, [spaceLoading, space, supabase, spaceId])
+  }, [lang, spaceLoading, space, supabase, spaceId])
 
   useFocusEffect(
     useCallback(() => {
@@ -2653,8 +2707,10 @@ function BillsListScreen() {
 
   const totalCount = bills.length
   const resultsLabel = filteredBills.length === totalCount
-    ? `${totalCount || 0} ${totalCount === 1 ? 'bill' : 'bills'}`
-    : `${filteredBills.length} of ${totalCount} bills`
+    ? (totalCount === 1
+      ? tf(lang, 'bills_count_single', { count: totalCount })
+      : tf(lang, 'bills_count_plural', { count: totalCount || 0 }))
+    : tf(lang, 'bills_count_filtered', { filtered: filteredBills.length, total: totalCount })
 
   const renderEmpty = useCallback(() => {
     if (loadingBills) return null
@@ -2663,14 +2719,14 @@ function BillsListScreen() {
         <Image source={BRAND_WORDMARK} style={styles.wordmarkEmpty} resizeMode="contain" accessibilityLabel="BILLBOX" />
         <EmptyState
           iconName="document-text-outline"
-          title="No bills found"
-          description="Adjust your filters or add a new bill."
-          actionLabel="Add bill"
+          title={t(lang, 'no_bills_found_title')}
+          description={t(lang, 'no_bills_found_description')}
+          actionLabel={t(lang, 'add_bill_action')}
           onActionPress={() => navigation.navigate('Scan')}
         />
       </View>
     )
-  }, [loadingBills, navigation])
+  }, [lang, loadingBills, navigation])
 
   const formatAmount = useCallback((value: number, currency?: string | null) => {
     try {
@@ -2681,18 +2737,29 @@ function BillsListScreen() {
   }, [])
 
   const relativeDueText = useCallback((due: Date | null) => {
-    if (!due) return 'No due date'
+    if (!due) return t(lang, 'relative_due_none')
     const diffDays = Math.round((due.getTime() - today.getTime()) / (24 * 60 * 60 * 1000))
-    if (diffDays === 0) return 'Due today'
-    if (diffDays > 0) return `Due in ${diffDays} day${diffDays === 1 ? '' : 's'}`
-    return `Overdue by ${Math.abs(diffDays)} day${diffDays === -1 ? '' : 's'}`
-  }, [today])
+    if (diffDays === 0) return t(lang, 'relative_due_today')
+    if (diffDays > 0) return diffDays === 1
+      ? tf(lang, 'relative_due_in_day', { count: diffDays })
+      : tf(lang, 'relative_due_in_days', { count: diffDays })
+    const overdue = Math.abs(diffDays)
+    return overdue === 1
+      ? tf(lang, 'relative_due_overdue_by_day', { count: overdue })
+      : tf(lang, 'relative_due_overdue_by_days', { count: overdue })
+  }, [lang, today])
 
   const renderBillItem = useCallback(({ item }: { item: Bill }) => {
     const dueDate = parseDateValue(item.due_date)
     const trackedDate = getBillDate(item, dateMode)
     const isOverdue = dueDate ? item.status === 'unpaid' && dueDate.getTime() < today.getTime() : false
-    const statusLabel = item.status === 'archived' ? 'Archived' : isOverdue ? 'Overdue' : item.status === 'paid' ? 'Paid' : 'Unpaid'
+    const statusLabel = item.status === 'archived'
+      ? t(lang, 'status_archived')
+      : isOverdue
+        ? t(lang, 'status_overdue')
+        : item.status === 'paid'
+          ? t(lang, 'status_paid')
+          : t(lang, 'status_unpaid')
     const statusTone: 'danger' | 'success' | 'info' = item.status === 'archived' ? 'info' : isOverdue ? 'danger' : item.status === 'paid' ? 'success' : 'info'
     const attachments = attachmentCounts[item.id] || 0
 
@@ -2747,20 +2814,20 @@ function BillsListScreen() {
             <View style={styles.billMetaGroup}>
               <Ionicons name="calendar-clear-outline" size={16} color="#6B7280" />
               <Text style={styles.billMetaSecondary}>
-                {dateMode === 'invoice' ? 'Invoice date' : 'Created'}: {formatDisplayDate(trackedDate)}
+                {dateMode === 'invoice' ? t(lang, 'invoice_date_label') : t(lang, 'created_label')}: {formatDisplayDate(trackedDate)}
               </Text>
             </View>
           )}
         </Pressable>
       </Surface>
     )
-  }, [attachmentCounts, dateMode, formatAmount, formatDisplayDate, getBillDate, highlightId, navigation, parseDateValue, relativeDueText, space, today])
+  }, [attachmentCounts, dateMode, formatAmount, formatDisplayDate, getBillDate, highlightId, lang, navigation, parseDateValue, relativeDueText, space, today])
 
   if (spaceLoading || !space) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color={themeColors.primary} />
-        <Text style={styles.mutedText}>Loading space…</Text>
+        <Text style={styles.mutedText}>{t(lang, 'loading_space')}</Text>
       </View>
     )
   }
@@ -2768,23 +2835,21 @@ function BillsListScreen() {
   const listBottomPadding = Math.max(insets.bottom, 12) + themeSpacing.xl + 56
 
   return (
-    <Screen scroll={false}>
+    <Screen title={t(lang, 'bills_title')} scroll={false}>
       <View style={styles.pageStack}>
-        <SectionHeader title="Bills" />
-
         {!supabase && (
           <InlineInfo
             tone="warning"
             iconName="cloud-offline-outline"
-            message="Cloud sync is disabled. Bills are stored locally until you connect Supabase."
+            message={t(lang, 'cloud_sync_disabled_message')}
           />
         )}
 
         <Surface elevated padded={false} style={styles.filtersCard}>
           <Pressable style={styles.filtersHeader} onPress={() => setFiltersExpanded((prev) => !prev)} hitSlop={8}>
-            <Text style={styles.sectionTitle}>Filters</Text>
+            <Text style={styles.sectionTitle}>{t(lang, 'filters_title')}</Text>
             <View style={styles.filtersHeaderRight}>
-              <Text style={styles.filtersHeaderLabel}>Filtering by {dateFieldLabels[dateMode].toLowerCase()}</Text>
+              <Text style={styles.filtersHeaderLabel}>{tf(lang, 'filtering_by_label', { field: dateFieldLabels[dateMode] })}</Text>
               <Badge label={dateFieldLabels[dateMode]} tone="info" />
               <Ionicons name={filtersExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={themeColors.textMuted} />
             </View>
@@ -2796,28 +2861,28 @@ function BillsListScreen() {
                 value={dateMode}
                 onChange={(value) => setDateMode(value as typeof dateMode)}
                 options={[
-                  { value: 'due', label: 'Due' },
-                  { value: 'invoice', label: 'Invoice' },
-                  { value: 'created', label: 'Created' },
+                  { value: 'due', label: t(lang, 'date_mode_due_short') },
+                  { value: 'invoice', label: t(lang, 'date_mode_invoice_short') },
+                  { value: 'created', label: t(lang, 'date_mode_created_short') },
                 ]}
               />
 
               <AppInput
-                placeholder="Supplier"
+                placeholder={t(lang, 'supplier_placeholder')}
                 value={supplierQuery}
                 onChangeText={setSupplierQuery}
               />
 
               <View style={styles.filterRow}>
                 <AppInput
-                  placeholder="Min amount"
+                  placeholder={t(lang, 'min_amount_placeholder')}
                   keyboardType="numeric"
                   value={amountMin}
                   onChangeText={setAmountMin}
                   style={styles.flex1}
                 />
                 <AppInput
-                  placeholder="Max amount"
+                  placeholder={t(lang, 'max_amount_placeholder')}
                   keyboardType="numeric"
                   value={amountMax}
                   onChangeText={setAmountMax}
@@ -2826,27 +2891,27 @@ function BillsListScreen() {
               </View>
 
               <View style={styles.dateFilterSection}>
-                <Text style={styles.filterLabel}>Date range</Text>
+                <Text style={styles.filterLabel}>{t(lang, 'date_range_label')}</Text>
                 <View style={styles.dateRow}>
                   <Pressable style={styles.dateButton} onPress={() => openDatePicker('from')} hitSlop={8}>
                     <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-                    <Text style={styles.dateButtonText}>{dateFrom || 'Start date'}</Text>
+                    <Text style={styles.dateButtonText}>{dateFrom || t(lang, 'start_date_label')}</Text>
                   </Pressable>
                   <Pressable style={styles.dateButton} onPress={() => openDatePicker('to')} hitSlop={8}>
                     <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-                    <Text style={styles.dateButtonText}>{dateTo || 'End date'}</Text>
+                    <Text style={styles.dateButtonText}>{dateTo || t(lang, 'end_date_label')}</Text>
                   </Pressable>
                 </View>
                 <View style={styles.manualDateRow}>
                   <AppInput
-                    placeholder="YYYY-MM-DD"
+                    placeholder={t(lang, 'date_iso_placeholder')}
                     value={dateFrom}
                     onChangeText={setDateFrom}
                     style={styles.flex1}
-                    hint="Manual entry optional"
+                    hint={t(lang, 'manual_entry_optional_hint')}
                   />
                   <AppInput
-                    placeholder="YYYY-MM-DD"
+                    placeholder={t(lang, 'date_iso_placeholder')}
                     value={dateTo}
                     onChangeText={setDateTo}
                     style={styles.flex1}
@@ -2857,25 +2922,25 @@ function BillsListScreen() {
               <View style={styles.filterToggleRow}>
                 <View style={styles.filterToggle}>
                   <Switch value={unpaidOnly} onValueChange={handleUnpaidToggle} />
-                  <Text style={styles.toggleLabel}>Unpaid only</Text>
+                  <Text style={styles.toggleLabel}>{t(lang, 'unpaid_only_toggle')}</Text>
                 </View>
                 <View style={styles.filterToggle}>
                   <Switch value={overdueOnly} onValueChange={setOverdueOnly} />
-                  <Text style={styles.toggleLabel}>Overdue</Text>
+                  <Text style={styles.toggleLabel}>{t(lang, 'overdue_toggle')}</Text>
                 </View>
                 <View style={styles.filterToggle}>
                   <Switch value={hasAttachmentsOnly} onValueChange={setHasAttachmentsOnly} />
-                  <Text style={styles.toggleLabel}>Has attachment</Text>
+                  <Text style={styles.toggleLabel}>{t(lang, 'has_attachment_toggle')}</Text>
                 </View>
                 <View style={styles.filterToggle}>
                   <Switch value={includeArchived} onValueChange={setIncludeArchived} />
-                  <Text style={styles.toggleLabel}>Include archived</Text>
+                  <Text style={styles.toggleLabel}>{t(lang, 'include_archived_toggle')}</Text>
                 </View>
               </View>
 
               <View style={styles.filtersFooter}>
                 <AppButton
-                  label="Clear filters"
+                  label={t(lang, 'clear_filters_action')}
                   variant="ghost"
                   iconName="refresh-outline"
                   onPress={resetFilters}
@@ -2889,17 +2954,17 @@ function BillsListScreen() {
           value={statusFilter}
           onChange={handleStatusChange}
           options={[
-            { value: 'all', label: 'All' },
-            { value: 'unpaid', label: 'Unpaid' },
-            { value: 'paid', label: 'Paid' },
-            { value: 'archived', label: 'Archived' },
+            { value: 'all', label: t(lang, 'filter_all') },
+            { value: 'unpaid', label: t(lang, 'filter_unpaid') },
+            { value: 'paid', label: t(lang, 'filter_paid') },
+            { value: 'archived', label: t(lang, 'filter_archived') },
           ]}
         />
 
         <View style={styles.billsPrimaryActionsRow}>
           <View style={styles.flex1} />
           <AppButton
-            label="Add bill"
+            label={t(lang, 'add_bill_action')}
             iconName="add-outline"
             variant="secondary"
             onPress={() => navigation.navigate('Scan')}
@@ -2908,14 +2973,14 @@ function BillsListScreen() {
 
         <View style={styles.listMetaRow}>
           <Text style={styles.listMetaText}>{resultsLabel}</Text>
-          <Text style={styles.listMetaSecondary}>Tap "Filters" to adjust date, supplier, amount, status, and attachments.</Text>
+          <Text style={styles.listMetaSecondary}>{t(lang, 'filters_tip_bills_list')}</Text>
         </View>
 
         <View style={styles.listWrapper}>
           {loadingBills && bills.length === 0 ? (
             <View style={styles.centered}>
               <ActivityIndicator size="large" color={themeColors.primary} />
-              <Text style={styles.mutedText}>Loading bills…</Text>
+              <Text style={styles.mutedText}>{t(lang, 'loading_bills')}</Text>
             </View>
           ) : (
             <FlatList
@@ -2938,7 +3003,7 @@ function BillsListScreen() {
       {isIOS && iosPickerVisible && (
         <View style={styles.iosPickerOverlay}>
           <Surface elevated style={styles.iosPickerSheet}>
-            <Text style={styles.filterLabel}>Select date</Text>
+            <Text style={styles.filterLabel}>{t(lang, 'select_date_title')}</Text>
             <DateTimePicker
               mode="date"
               display="inline"
@@ -2948,8 +3013,8 @@ function BillsListScreen() {
               }}
             />
             <View style={styles.iosPickerActions}>
-              <AppButton label="Cancel" variant="ghost" onPress={cancelIosPicker} />
-              <AppButton label="Use date" onPress={confirmIosPicker} />
+              <AppButton label={t(lang, 'cancel_action')} variant="ghost" onPress={cancelIosPicker} />
+              <AppButton label={t(lang, 'use_date_action')} onPress={confirmIosPicker} />
             </View>
           </Surface>
         </View>
@@ -2961,6 +3026,7 @@ function BillsListScreen() {
 function HomeScreen() {
   const navigation = useNavigation<any>()
   const { space, spaceId, loading } = useActiveSpace()
+  const { lang } = useLang()
   const spacesCtx = useSpacesContext()
   const { snapshot: entitlements } = useEntitlements()
   const [summary, setSummary] = useState<{ totalUnpaid: number; overdueCount: number; nextDueDate: string | null } | null>(null)
@@ -2979,10 +3045,10 @@ function HomeScreen() {
       .map((s) => ({ value: s.id, label: payerLabelFromSpaceId(s.id) }))
     if (base.length >= 2) return base
     const second = entitlements.plan === 'pro'
-      ? { value: '__create_payer2__', label: 'Payer 2' }
-      : { value: '__locked_payer2__', label: 'Payer 2' }
+      ? { value: '__create_payer2__', label: t(lang, 'payer_2_label') }
+      : { value: '__locked_payer2__', label: t(lang, 'payer_2_label') }
     return base.concat([second])
-  }, [entitlements.plan, spacesCtx.spaces])
+  }, [entitlements.plan, lang, spacesCtx.spaces])
 
   useEffect(() => {
     ;(async () => {
@@ -3001,7 +3067,7 @@ function HomeScreen() {
   const savePayer1Name = useCallback(async () => {
     const trimmed = payerNameDraft.trim()
     if (!trimmed) {
-      Alert.alert('Name required', 'Please enter a name for Payer 1.')
+      Alert.alert(t(lang, 'name_required_title'), t(lang, 'please_enter_name_for_payer_1_message'))
       return
     }
     await spacesCtx.rename('personal', trimmed)
@@ -3009,14 +3075,14 @@ function HomeScreen() {
       await AsyncStorage.setItem('billbox.onboarding.payer1Named', '1')
     } catch {}
     setNeedsPayerName(false)
-  }, [payerNameDraft, spacesCtx])
+  }, [lang, payerNameDraft, spacesCtx])
 
   const saveRename = useCallback(async () => {
     const target = spacesCtx.current
     if (!target) return
     const trimmed = renameDraft.trim()
     if (!trimmed) {
-      Alert.alert('Name required', `Please enter a name for ${payerLabelFromSpaceId(target.id)}.`)
+      Alert.alert(t(lang, 'name_required_title'), tf(lang, 'please_enter_name_for_payer_message', { payer: payerLabelFromSpaceId(target.id) }))
       return
     }
     await spacesCtx.rename(target.id, trimmed)
@@ -3025,7 +3091,7 @@ function HomeScreen() {
       setNeedsPayerName(false)
     }
     setRenameVisible(false)
-  }, [renameDraft, spacesCtx])
+  }, [lang, renameDraft, spacesCtx])
 
   const handlePayerChange = useCallback(async (id: string) => {
     if (id === '__locked_payer2__') {
@@ -3034,16 +3100,16 @@ function HomeScreen() {
     }
     if (id === '__create_payer2__') {
       setCreatingPayer2(true)
-      setPayer2NameDraft('Payer 2')
+      setPayer2NameDraft(t(lang, 'payer_2_label'))
       return
     }
     await spacesCtx.setCurrent(id)
-  }, [spacesCtx])
+  }, [lang, spacesCtx])
 
   const savePayer2 = useCallback(async () => {
     const trimmed = payer2NameDraft.trim()
     if (!trimmed) {
-      Alert.alert('Name required', 'Please enter a name for Payer 2.')
+      Alert.alert(t(lang, 'name_required_title'), t(lang, 'please_enter_name_for_payer_2_message'))
       return
     }
     await spacesCtx.addSpace({
@@ -3052,7 +3118,7 @@ function HomeScreen() {
       plan: spacesCtx.current?.plan || 'free',
     })
     setCreatingPayer2(false)
-  }, [payer2NameDraft, spacesCtx])
+  }, [lang, payer2NameDraft, spacesCtx])
 
   const planSavings = useMemo(() => {
     const basicMonthly = 2.2
@@ -3110,23 +3176,23 @@ function HomeScreen() {
       <Screen scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
-          <Text style={styles.mutedText}>Preparing your workspace…</Text>
+          <Text style={styles.mutedText}>{t(lang, 'preparing_workspace')}</Text>
         </View>
       </Screen>
     )
   }
 
   const tiles = [
-    { label: 'Scan bill', icon: 'scan-outline', description: 'Capture QR codes or import documents.', target: 'Scan' },
-    { label: 'Bills', icon: 'receipt-outline', description: 'Review and manage all bills.', target: 'Bills' },
-    { label: 'Pay', icon: 'card-outline', description: 'Plan and schedule payments.', target: 'Pay' },
-    { label: 'Warranties', icon: 'shield-checkmark-outline', description: 'Track product warranties.', target: 'Warranties' },
-    { label: 'Reports', icon: 'bar-chart-outline', description: 'Analytics and totals.', target: 'Reports' },
-    { label: 'Exports', icon: 'download-outline', description: 'PDF, ZIP, CSV, JSON.', target: 'Exports' },
+    { label: t(lang, 'home_tile_scan_label'), icon: 'scan-outline', description: t(lang, 'home_tile_scan_description'), target: 'Scan' },
+    { label: t(lang, 'home_tile_bills_label'), icon: 'receipt-outline', description: t(lang, 'home_tile_bills_description'), target: 'Bills' },
+    { label: t(lang, 'home_tile_pay_label'), icon: 'card-outline', description: t(lang, 'home_tile_pay_description'), target: 'Pay' },
+    { label: t(lang, 'home_tile_warranties_label'), icon: 'shield-checkmark-outline', description: t(lang, 'home_tile_warranties_description'), target: 'Warranties' },
+    { label: t(lang, 'home_tile_reports_label'), icon: 'bar-chart-outline', description: t(lang, 'home_tile_reports_description'), target: 'Reports' },
+    { label: t(lang, 'home_tile_exports_label'), icon: 'download-outline', description: t(lang, 'home_tile_exports_description'), target: 'Exports' },
   ]
 
   return (
-    <Screen>
+    <Screen title="Home">
       <View style={[styles.pageStack, { gap: themeSpacing.xs }]}>
         <Surface elevated padded={false} style={[styles.card, styles.homeSummaryCard]}>
           <View style={styles.screenHeader}>
@@ -3146,14 +3212,14 @@ function HomeScreen() {
             {space?.plan === 'free' ? (
               <View style={styles.screenHeaderTrailing}>
                 <AppButton
-                  label="Upgrade"
+                  label={t(lang, 'upgrade_action')}
                   variant="secondary"
                   iconName="arrow-up-circle-outline"
                   onPress={() => {
                     if (IS_EXPO_GO) {
                       Alert.alert(
-                        'Upgrade',
-                        'Purchases are disabled in Expo Go preview. Use an EAS dev/prod build with EXPO_PUBLIC_ENABLE_IAP=true to enable real in-app purchases.'
+                        t(lang, 'upgrade_title'),
+                        t(lang, 'iap_disabled_expo_go_message')
                       )
                       return
                     }
@@ -3164,7 +3230,7 @@ function HomeScreen() {
             ) : spacesCtx.spaces.length > 1 ? (
               <View style={styles.screenHeaderTrailing}>
                 <AppButton
-                  label="Switch space"
+                  label={t(lang, 'switch_space_action')}
                   variant="secondary"
                   iconName="swap-horizontal-outline"
                   onPress={() => navigation.navigate('Settings')}
@@ -3203,16 +3269,16 @@ function HomeScreen() {
             {needsPayerName ? (
               <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
                 <Image source={BRAND_WORDMARK} style={styles.wordmarkOnboarding} resizeMode="contain" accessibilityLabel="BILLBOX" />
-                <Text style={styles.bodyText}>Name your Payer 1 to continue.</Text>
-                <AppInput placeholder="Payer 1 name" value={payerNameDraft} onChangeText={setPayerNameDraft} />
+                <Text style={styles.bodyText}>{t(lang, 'name_payer_1_to_continue_message')}</Text>
+                <AppInput placeholder={t(lang, 'payer_1_name_placeholder')} value={payerNameDraft} onChangeText={setPayerNameDraft} />
                 <AppButton label="Save" iconName="checkmark-outline" onPress={savePayer1Name} />
               </View>
             ) : null}
 
             {creatingPayer2 ? (
               <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-                <Text style={styles.bodyText}>Create Payer 2 (Pro only).</Text>
-                <AppInput placeholder="Payer 2 name" value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
+                <Text style={styles.bodyText}>{t(lang, 'create_payer_2_pro_only_message')}</Text>
+                <AppInput placeholder={t(lang, 'payer_2_name_placeholder')} value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
                 <View style={{ flexDirection: 'row', gap: themeLayout.gap }}>
                   <AppButton label="Cancel" variant="ghost" onPress={() => setCreatingPayer2(false)} />
                   <AppButton label="Create" iconName="add-outline" onPress={savePayer2} />
@@ -3220,7 +3286,7 @@ function HomeScreen() {
               </View>
             ) : null}
 
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Active payer scopes Bills, Scan, Pay, Exports, and Warranties.</Text>
+            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>{t(lang, 'active_payer_scopes_message')}</Text>
           </View>
         </Surface>
         <View style={styles.gridWrap}>
@@ -3229,7 +3295,7 @@ function HomeScreen() {
               key={tile.label}
               onPress={() => {
                 if (needsPayerName) {
-                  Alert.alert('Name required', 'Please name Payer 1 to continue.')
+                  Alert.alert(t(lang, 'name_required_title'), t(lang, 'please_name_payer_1_to_continue_message'))
                   return
                 }
                 navigation.navigate(tile.target)
@@ -3253,18 +3319,18 @@ function HomeScreen() {
       <Modal visible={upgradeModalVisible} transparent animationType="fade" onRequestClose={() => setUpgradeModalVisible(false)}>
         <View style={styles.iosPickerOverlay}>
           <Surface elevated style={styles.iosPickerSheet}>
-            <SectionHeader title="Add a second payer" />
-            <Text style={styles.bodyText}>Payer 2 is available on Pro.</Text>
+            <SectionHeader title={t(lang, 'add_second_payer_title')} />
+            <Text style={styles.bodyText}>{t(lang, 'payer_2_available_on_pro_message')}</Text>
             <View style={{ gap: themeSpacing.xs, marginTop: themeSpacing.sm }}>
-              <Text style={styles.bodyText}>• Keep personal and business bills separate</Text>
-              <Text style={styles.bodyText}>• Independent exports and reports</Text>
-              <Text style={styles.bodyText}>• Two payers on one subscription</Text>
-              <Text style={styles.mutedText}>Save with yearly billing: Basic saves €{planSavings.basic} • Pro saves €{planSavings.pro}</Text>
+              <Text style={styles.bodyText}>{t(lang, 'second_payer_benefit_1')}</Text>
+              <Text style={styles.bodyText}>{t(lang, 'second_payer_benefit_2')}</Text>
+              <Text style={styles.bodyText}>{t(lang, 'second_payer_benefit_3')}</Text>
+              <Text style={styles.mutedText}>{tf(lang, 'yearly_billing_savings_message', { basicSavings: planSavings.basic, proSavings: planSavings.pro })}</Text>
             </View>
             <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
-              <AppButton label="Not now" variant="ghost" onPress={() => setUpgradeModalVisible(false)} />
+              <AppButton label={t(lang, 'not_now_action')} variant="ghost" onPress={() => setUpgradeModalVisible(false)} />
               <AppButton
-                label="Upgrade to Pro"
+                label={t(lang, 'upgrade_to_pro_action')}
                 iconName="arrow-up-outline"
                 onPress={() => {
                   setUpgradeModalVisible(false)
@@ -3456,7 +3522,7 @@ function WarrantiesScreen() {
 
   if (spaceLoading || !space) {
     return (
-      <Screen scroll={false}>
+      <Screen title="Warranties" scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
           <Text style={styles.mutedText}>Loading warranties…</Text>
@@ -3466,10 +3532,8 @@ function WarrantiesScreen() {
   }
 
   return (
-    <Screen scroll={false}>
+    <Screen title="Warranties" scroll={false}>
       <View style={styles.pageStack}>
-        <SectionHeader title="Warranties" />
-
         <Surface elevated>
           <SectionHeader title="New warranty" />
           {spacesCtx.spaces.length > 1 ? (
@@ -3677,6 +3741,7 @@ function WarrantyDetailsScreen() {
   const route = useRoute<any>()
   const navigation = useNavigation<any>()
   const supabase = useMemo(() => getSupabase(), [])
+  const { lang } = useLang()
   const warrantyId: string | null = route.params?.warrantyId || null
   const [warranty, setWarranty] = useState<Warranty | null>(null)
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
@@ -3734,8 +3799,8 @@ function WarrantyDetailsScreen() {
     const asset = res.assets?.[0]
     if (!asset?.uri) return
     const up = await uploadAttachmentFromUri(spaceId, 'warranties', warrantyId!, asset.uri, asset.fileName || 'photo.jpg', asset.type || 'image/jpeg')
-    if (up.error) Alert.alert('Upload failed', up.error)
-    else Alert.alert('Attachment uploaded', 'Image attached to warranty')
+    if (up.error) Alert.alert(t(lang, 'upload_failed_title'), up.error || t(lang, 'upload_failed_message_generic'))
+    else Alert.alert(t(lang, 'attachment_uploaded_title'), t(lang, 'image_attached_to_warranty_message'))
     await refresh()
   }
   async function addPdf() {
@@ -3744,112 +3809,123 @@ function WarrantyDetailsScreen() {
     const file = res.assets?.[0]
     if (!file?.uri) return
     const up = await uploadAttachmentFromUri(spaceId, 'warranties', warrantyId!, file.uri, file.name || 'document.pdf', 'application/pdf')
-    if (up.error) Alert.alert('Upload failed', up.error)
-    else Alert.alert('Attachment uploaded', 'PDF attached to warranty')
+    if (up.error) Alert.alert(t(lang, 'upload_failed_title'), up.error || t(lang, 'upload_failed_message_generic'))
+    else Alert.alert(t(lang, 'attachment_uploaded_title'), t(lang, 'pdf_attached_to_warranty_message'))
     await refresh()
   }
   async function openAttachment(path: string, uri?: string) {
-    if (supabase) { const url = await getSignedUrl(supabase!, path); if (url) Linking.openURL(url); else Alert.alert('Open failed', 'Could not get URL') }
+    if (supabase) { const url = await getSignedUrl(supabase!, path); if (url) Linking.openURL(url); else Alert.alert(t(lang, 'open_failed_title'), t(lang, 'could_not_get_url_message')) }
     else if (uri) Linking.openURL(uri)
-    else Alert.alert('Offline', 'Attachment stored locally. Preview is unavailable.')
+    else Alert.alert(t(lang, 'offline_title'), t(lang, 'attachment_stored_locally_message'))
   }
   async function remove(path: string) {
-    Alert.alert('Delete attachment?', 'This file will be removed.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: async () => { const { error } = await deleteAttachment(spaceId, 'warranties', warrantyId!, path); if (error) Alert.alert('Delete failed', error); else await refresh() } }
+    Alert.alert(t(lang, 'delete_attachment_title'), t(lang, 'delete_attachment_message'), [
+      { text: t(lang, 'cancel_action'), style: 'cancel' },
+      {
+        text: t(lang, 'delete_action'),
+        style: 'destructive',
+        onPress: async () => {
+          const { error } = await deleteAttachment(spaceId, 'warranties', warrantyId!, path)
+          if (error) Alert.alert(t(lang, 'delete_failed_title'), String(error))
+          else await refresh()
+        },
+      },
     ])
   }
   if (!warranty || spaceLoading || !space) {
     return (
-      <Screen scroll={false}>
+      <Screen title={t(lang, 'warranty_fallback_title')} scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
-          <Text style={styles.mutedText}>Warranty not found.</Text>
+          <Text style={styles.mutedText}>{t(lang, 'warranty_not_found_message')}</Text>
         </View>
       </Screen>
     )
   }
 
   return (
-    <Screen>
+    <Screen title={warranty.item_name || t(lang, 'warranty_fallback_title')}>
       <View style={styles.pageStack}>
-        <Text style={styles.screenHeaderTitle}>{warranty.item_name || 'Warranty'}</Text>
-
         <Surface elevated>
-          <SectionHeader title="Warranty summary" />
+          <SectionHeader title={t(lang, 'warranty_summary_title')} />
           <Text style={styles.bodyText}>
-            {warranty.supplier || '—'} • purchased {warranty.purchase_date || '—'} • expires {warranty.expires_at || '—'}
+            {t(lang, 'supplier_label')}: {warranty.supplier || '—'} • {t(lang, 'purchase_date_label')}: {warranty.purchase_date || '—'} • {t(lang, 'expires_label')}: {warranty.expires_at || '—'}
           </Text>
         </Surface>
 
         {(linkedBill || (warranty as any)?.bill_id) ? (
           <Surface elevated>
-            <SectionHeader title="Linked bill" />
+            <SectionHeader title={t(lang, 'linked_bill_title')} />
             {linkedBill ? (
               <>
-                <Text style={styles.bodyText}>{linkedBill.supplier} • {linkedBill.currency} {linkedBill.amount.toFixed(2)} • due {linkedBill.due_date}</Text>
+                <Text style={styles.bodyText}>
+                  {linkedBill.supplier} • {linkedBill.currency} {linkedBill.amount.toFixed(2)} • {t(lang, 'due_label')} {linkedBill.due_date}
+                </Text>
                 <AppButton
-                  label="Open bill"
+                  label={t(lang, 'open_bill_action')}
                   variant="secondary"
                   iconName="open-outline"
                   onPress={() => navigation.navigate('Bill Details', { bill: linkedBill })}
                 />
               </>
             ) : (
-              <Text style={styles.mutedText}>This warranty is linked to a bill, but it was not found in the current payer.</Text>
+              <Text style={styles.mutedText}>{t(lang, 'warranty_linked_bill_not_found_message')}</Text>
             )}
           </Surface>
         ) : null}
 
         <Surface elevated>
-          <SectionHeader title="Reminders" />
+          <SectionHeader title={t(lang, 'reminders_title')} />
           {!warranty.expires_at ? (
             <InlineInfo
               tone="warning"
               iconName="alert-circle-outline"
-              message="No expiry date — warranty reminders cannot be scheduled."
+              message={t(lang, 'no_expiry_date_warranty_reminders_message')}
             />
           ) : null}
           <View style={styles.billActionsRow}>
             <AppButton
-              label="Schedule defaults"
+              label={t(lang, 'schedule_defaults')}
               variant="secondary"
               iconName="alarm-outline"
               onPress={async ()=>{
-                if (!warranty.expires_at) { Alert.alert('Missing expiry date', 'Add an expiry date to schedule reminders.'); return }
+                if (!warranty.expires_at) {
+                  Alert.alert(t(lang, 'missing_expiry_date_title'), t(lang, 'add_expiry_date_to_schedule_warranty_reminders_message'))
+                  return
+                }
                 await ensureNotificationConfig()
                 const ok = await requestPermissionIfNeeded()
                 if (!ok) {
-                  Alert.alert('Enable reminders', 'Please enable notifications in system settings.')
+                  Alert.alert(t(lang, 'enable_reminders_title'), t(lang, 'enable_notifications_in_settings_message'))
                   return
                 }
                 await scheduleWarrantyReminders({ id: warranty.id, item_name: warranty.item_name || 'Warranty', supplier: warranty.supplier || null, expires_at: warranty.expires_at, space_id: spaceId } as any, undefined, spaceId)
-                Alert.alert('Reminders', 'Scheduled default warranty reminders.')
+                Alert.alert(t(lang, 'reminders_scheduled_title'), t(lang, 'scheduled_default_warranty_reminders_message'))
               }}
             />
             <AppButton
-              label="Cancel reminders"
+              label={t(lang, 'cancel_reminders')}
               variant="ghost"
               iconName="notifications-off-outline"
               onPress={async ()=>{
                 await cancelWarrantyReminders(warranty.id, spaceId)
-                Alert.alert('Reminders', 'Canceled for this warranty.')
+                Alert.alert(t(lang, 'reminders_title'), t(lang, 'canceled_for_this_warranty_message'))
               }}
             />
           </View>
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title="Attachments" />
+          <SectionHeader title={t(lang, 'attachments_title')} />
           <View style={styles.attachmentRow}>
             <AppButton
-              label="Add image"
+              label={t(lang, 'add_image')}
               variant="secondary"
               iconName="image-outline"
               onPress={addImage}
             />
             <AppButton
-              label="Add PDF"
+              label={t(lang, 'add_pdf')}
               variant="secondary"
               iconName="document-attach-outline"
               onPress={addPdf}
@@ -3940,10 +4016,8 @@ function ReportsScreen() {
   }
 
   return (
-    <Screen>
+    <Screen title="Reports">
       <View style={styles.pageStack}>
-        <SectionHeader title="Reports" />
-
         <Surface elevated>
           <SectionHeader title="Filters" />
           <View style={styles.filtersBody}>
@@ -4038,6 +4112,7 @@ function ReportsScreen() {
 
 function ExportsScreen() {
   const route = useRoute<any>()
+  const navigation = useNavigation<any>()
   const supabase = useMemo(() => getSupabase(), [])
   const [bills, setBills] = useState<Bill[]>([])
   const [warranties, setWarranties] = useState<Warranty[]>([])
@@ -4164,9 +4239,7 @@ function ExportsScreen() {
   }
 
   async function exportJSONRange() {
-    if (entitlements.plan === 'basic' || entitlements.plan === 'pro' || entitlements.plan === 'free') {
-      // allowed
-    } else {
+    if (entitlements.plan !== 'pro') {
       showUpgradeAlert('export')
       return
     }
@@ -4216,7 +4289,7 @@ function ExportsScreen() {
   }
 
   async function exportCSV() {
-    if (entitlements.plan === 'free') {
+    if (entitlements.plan !== 'pro') {
       showUpgradeAlert('export')
       return
     }
@@ -4404,7 +4477,7 @@ function ExportsScreen() {
 
   if (spaceLoading || !space) {
     return (
-      <Screen scroll={false}>
+      <Screen title="Exports" scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
           <Text style={styles.mutedText}>Loading exports…</Text>
@@ -4414,9 +4487,31 @@ function ExportsScreen() {
   }
 
   return (
-    <Screen>
+    <Screen title="Exports">
       <View style={styles.pageStack}>
-        <SectionHeader title="Exports" />
+        {entitlements.plan !== 'pro' ? (
+          <Surface elevated>
+            <InlineInfo
+              tone="warning"
+              iconName="lock-closed-outline"
+              message="Exports are available on Pro. Upgrade to unlock CSV, PDF, ZIP and JSON exports."
+            />
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+              <AppButton
+                label="Upgrade to Pro"
+                variant="secondary"
+                iconName="arrow-up-circle-outline"
+                onPress={() => {
+                  if (IS_EXPO_GO) {
+                    Alert.alert('Upgrade', 'Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.')
+                    return
+                  }
+                  navigation.navigate('Payments', { plan: 'pro' })
+                }}
+              />
+            </View>
+          </Surface>
+        ) : null}
 
         <Surface elevated>
           <SectionHeader title="Filters" />
@@ -4577,9 +4672,8 @@ function PayScreen() {
   }
 
   return (
-    <Screen scroll={false}>
+    <Screen title="Pay" scroll={false}>
       <View style={styles.pageStack}>
-        <SectionHeader title="Pay" />
 
         <Surface elevated padded={false} style={styles.paySectionCard}>
           <SectionHeader title="Batch payment" />
@@ -4747,9 +4841,8 @@ function PaymentsScreen() {
   }
 
   return (
-    <Screen>
+    <Screen title="Payments">
       <View style={styles.pageStack}>
-        <SectionHeader title="Payments" />
 
         <Surface elevated>
           <SectionHeader title="Current plan" />
@@ -4824,50 +4917,178 @@ const Stack = createNativeStackNavigator()
 function MainTabs() {
   const insets = useSafeAreaInsets()
   const bottomPadding = Math.max(insets.bottom, 12)
+  const navigation = useNavigation<any>()
 
   return (
-    <Tab.Navigator
-      screenOptions={({ route }) => ({
-        headerShown: false,
-        tabBarActiveTintColor: themeColors.primary,
-        tabBarInactiveTintColor: '#94A3B8',
-        tabBarStyle: {
-          borderTopColor: '#E5E7EB',
-          borderTopWidth: StyleSheet.hairlineWidth,
-          backgroundColor: '#FFFFFF',
-          paddingTop: 4,
-          paddingBottom: bottomPadding,
-          height: 56 + bottomPadding,
-        },
-        tabBarIcon: ({ color, size }) => {
-          const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
-            Home: 'home-outline',
-            Scan: 'scan-outline',
-            Bills: 'document-text-outline',
-            Pay: 'card-outline',
-            Settings: 'settings-outline',
-          }
+    <View style={{ flex: 1 }} pointerEvents="box-none">
+      <Tab.Navigator
+        screenOptions={({ route }) => ({
+          headerShown: false,
+          tabBarActiveTintColor: themeColors.primary,
+          tabBarInactiveTintColor: '#94A3B8',
+          tabBarStyle: {
+            borderTopColor: '#E5E7EB',
+            borderTopWidth: StyleSheet.hairlineWidth,
+            backgroundColor: '#FFFFFF',
+            paddingTop: 4,
+            paddingBottom: bottomPadding,
+            height: 56 + bottomPadding,
+          },
+          tabBarIcon: ({ color, size }) => {
+            const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
+              Home: 'home-outline',
+              Scan: 'scan-outline',
+              Bills: 'document-text-outline',
+              Pay: 'card-outline',
+              Settings: 'settings-outline',
+            }
 
-          const iconName = icons[route.name] ?? 'ellipse-outline'
-          return <Ionicons name={iconName} size={size} color={color} />
-        },
-      })}
-    >
-      <Tab.Screen name="Home" component={HomeScreen} />
-      <Tab.Screen name="Scan" component={ScanBillScreen} />
-      <Tab.Screen name="Bills" component={BillsListScreen} />
-      <Tab.Screen name="Pay" component={PayScreen} />
-      <Tab.Screen name="Settings" component={SettingsScreen} />
-    </Tab.Navigator>
+            const iconName = icons[route.name] ?? 'ellipse-outline'
+            return <Ionicons name={iconName} size={size} color={color} />
+          },
+        })}
+      >
+        <Tab.Screen name="Home" component={HomeScreen} />
+        <Tab.Screen name="Scan" component={ScanBillScreen} />
+        <Tab.Screen name="Bills" component={BillsListScreen} />
+        <Tab.Screen name="Pay" component={PayScreen} />
+        <Tab.Screen name="Settings" component={SettingsScreen} />
+      </Tab.Navigator>
+
+      <Pressable
+        onPress={() => navigation.navigate('AI Assistant')}
+        style={({ pressed }) => [styles.aiFab, { bottom: 56 + bottomPadding + 16 }, pressed && { opacity: 0.92 }]}
+        hitSlop={10}
+      >
+        <Ionicons name="chatbubble-ellipses-outline" size={18} color="#FFFFFF" />
+        <Text style={styles.aiFabLabel}>Ask BillBox</Text>
+      </Pressable>
+    </View>
+  )
+}
+
+function AIAssistantScreen() {
+  const navigation = useNavigation<any>()
+  const { snapshot: entitlements } = useEntitlements()
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [messages, setMessages] = useState<
+    Array<{ id: string; role: 'user' | 'assistant'; text: string; actions?: Array<{ label: string; route: string; params?: any }> }>
+  >([
+    {
+      id: 'welcome',
+      role: 'assistant',
+      text: 'Tell me what you want to do (scan, pay, warranties, reports, exports).',
+      actions: [
+        { label: 'Scan a bill', route: 'Scan' },
+        { label: 'Open Inbox', route: 'Inbox' },
+      ],
+    },
+  ])
+
+  async function send() {
+    const text = draft.trim()
+    if (!text || busy) return
+
+    const now = Date.now()
+    setMessages((prev) => prev.concat({ id: String(now), role: 'user', text }))
+    setDraft('')
+    setBusy(true)
+    try {
+      const base = getFunctionsBase()
+      if (!base) {
+        setMessages((prev) =>
+          prev.concat({
+            id: String(now + 1),
+            role: 'assistant',
+            text: 'AI is not configured in this build (missing EXPO_PUBLIC_FUNCTIONS_BASE).',
+          })
+        )
+        return
+      }
+      const resp = await fetch(`${base}/.netlify/functions/ai-assistant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: text,
+          context: {
+            plan: entitlements.plan,
+            exportsEnabled: entitlements.exportsEnabled,
+            payerLimit: entitlements.payerLimit,
+          },
+        }),
+      })
+      const json = await resp.json().catch(() => null)
+      if (!resp.ok || !json) {
+        setMessages((prev) => prev.concat({ id: String(now + 2), role: 'assistant', text: 'AI request failed. Please try again.' }))
+        return
+      }
+      const assistantText = typeof json.message === 'string' ? json.message : 'Here are a few next steps.'
+      const actions = Array.isArray(json.suggestedActions) ? json.suggestedActions : []
+      setMessages((prev) => prev.concat({ id: String(now + 3), role: 'assistant', text: assistantText, actions }))
+    } catch {
+      setMessages((prev) => prev.concat({ id: String(Date.now()), role: 'assistant', text: 'AI request failed. Please try again.' }))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Screen title="AI Assistant">
+      <View style={styles.pageStack}>
+        <Surface elevated>
+          <Text style={styles.bodyText}>Ask BillBox for guidance. Suggested actions can open the right screen.</Text>
+        </Surface>
+
+        <Surface elevated padded={false}>
+          <ScrollView contentContainerStyle={{ padding: themeLayout.screenPadding, gap: themeSpacing.sm }}>
+            {messages.map((m) => (
+              <View key={m.id} style={[styles.aiMsg, m.role === 'user' ? styles.aiMsgUser : styles.aiMsgAssistant]}>
+                <Text style={[styles.bodyText, m.role === 'user' ? { color: '#FFFFFF' } : null]}>{m.text}</Text>
+                {m.role === 'assistant' && Array.isArray(m.actions) && m.actions.length ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+                    {m.actions.slice(0, 3).map((a, idx) => (
+                      <AppButton
+                        key={`${m.id}-${idx}`}
+                        label={String(a?.label || 'Open')}
+                        variant="secondary"
+                        iconName="arrow-forward-outline"
+                        onPress={() => {
+                          const route = String((a as any)?.route || '')
+                          if (!route) return
+                          navigation.navigate(route, (a as any)?.params || undefined)
+                        }}
+                      />
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            ))}
+            {busy ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <ActivityIndicator />
+                <Text style={styles.mutedText}>Thinking…</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+        </Surface>
+
+        <Surface elevated>
+          <View style={{ flexDirection: 'row', gap: themeLayout.gap, alignItems: 'center' }}>
+            <AppInput placeholder="Type your question…" value={draft} onChangeText={setDraft} style={{ flex: 1 }} />
+            <AppButton label="Send" iconName="send-outline" onPress={send} disabled={busy || !draft.trim()} />
+          </View>
+        </Surface>
+      </View>
+    </Screen>
   )
 }
 
 function SettingsScreen() {
   const supabase = useMemo(() => getSupabase(), [])
   const navigation = useNavigation<any>()
-  const [lang, setLang] = useState<Lang>('en')
-  useEffect(()=>{ (async()=> setLang(await loadLang()))() }, [])
-  async function changeLang(l: Lang) { setLang(l); await saveLang(l) }
+  const { lang, setLang } = useLang()
+  async function changeLang(l: Lang) { setLang(l) }
   const [notifStatus, setNotifStatus] = useState<string>('')
   useEffect(()=>{ (async()=>{ const p = await Notifications.getPermissionsAsync(); setNotifStatus(p.status) })() }, [])
   const spacesCtx = useSpacesContext()
@@ -4914,9 +5135,18 @@ function SettingsScreen() {
     await spacesCtx.addSpace({ name: trimmed, kind: 'personal', plan: spacesCtx.current?.plan || 'free' })
     setCreatingPayer2(false)
   }, [payer2NameDraft, spacesCtx])
+
+  function openLegal(path: '/privacy' | '/terms' | '/account-deletion') {
+    if (!PUBLIC_SITE_URL) {
+      Alert.alert('Not configured', 'Website URL is missing for this build. Configure PUBLIC_SITE_URL to open legal pages.')
+      return
+    }
+    Linking.openURL(`${PUBLIC_SITE_URL}${path}`)
+  }
+
   if (spacesCtx.loading || !space) {
     return (
-      <Screen scroll={false}>
+      <Screen title="Settings" scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
           <Text style={styles.mutedText}>Loading settings…</Text>
@@ -4925,11 +5155,12 @@ function SettingsScreen() {
     )
   }
   return (
-    <Screen>
+    <Screen title="Settings">
       <View style={styles.pageStack}>
-        <Image source={BRAND_WORDMARK} style={styles.wordmarkSettingsHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />
-        <SectionHeader title={space?.name ? `Settings • ${space.name}` : 'Settings'} />
-        <Text style={[styles.mutedText, { marginTop: -8, marginBottom: themeSpacing.sm }]}>{t(lang, 'internal_test_build')}</Text>
+        {space?.name ? (
+          <Text style={[styles.mutedText, { marginBottom: themeSpacing.xs }]}>{`Workspace: ${space.name}`}</Text>
+        ) : null}
+        <Text style={[styles.mutedText, { marginBottom: themeSpacing.sm }]}>{t(lang, 'internal_test_build')}</Text>
 
         <Surface elevated>
           <SectionHeader title="Workspace" />
@@ -5030,7 +5261,7 @@ function SettingsScreen() {
               </View>
               <Text style={styles.planRowItem}>• 1 payer</Text>
               <Text style={styles.planRowItem}>• Basic scan</Text>
-              <Text style={styles.planRowItem}>• Limited OCR</Text>
+              <Text style={styles.planRowItem}>• OCR up to 3 / month</Text>
               <Text style={styles.planRowItem}>• No exports</Text>
             </View>
 
@@ -5042,7 +5273,8 @@ function SettingsScreen() {
               <Text style={styles.planRowItem}>• 1 payer</Text>
               <Text style={styles.planRowItem}>• Unlimited bills + warranties</Text>
               <Text style={styles.planRowItem}>• Reminders</Text>
-              <Text style={styles.planRowItem}>• CSV + JSON export</Text>
+              <Text style={styles.planRowItem}>• OCR up to 100 / month</Text>
+              <Text style={styles.planRowItem}>• No exports</Text>
             </View>
 
             <View style={[styles.planRow, entitlements.plan === 'pro' && styles.planRowActive]}>
@@ -5052,22 +5284,65 @@ function SettingsScreen() {
               </View>
               <Text style={styles.planRowItem}>• 2 payers</Text>
               <Text style={styles.planRowItem}>• Separate data</Text>
+              <Text style={styles.planRowItem}>• OCR up to 300 / month</Text>
               <Text style={styles.planRowItem}>• CSV + PDF + ZIP + JSON export</Text>
             </View>
 
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, alignItems: 'center' }}>
-              <AppButton
-                label={entitlements.plan === 'free' ? 'Upgrade to Basic' : entitlements.plan === 'basic' ? 'Upgrade to Pro' : 'Manage subscription'}
-                variant="secondary"
-                iconName="arrow-up-circle-outline"
-                onPress={() => {
-                  if (IS_EXPO_GO) {
-                    Alert.alert('Subscription', 'Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.')
-                    return
-                  }
-                  navigation.navigate('Payments')
-                }}
-              />
+              {entitlements.plan === 'free' ? (
+                <>
+                  <AppButton
+                    label="Upgrade to Basic"
+                    variant="secondary"
+                    iconName="arrow-up-circle-outline"
+                    onPress={() => {
+                      if (IS_EXPO_GO) {
+                        Alert.alert('Subscription', 'Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.')
+                        return
+                      }
+                      navigation.navigate('Payments', { plan: 'basic' })
+                    }}
+                  />
+                  <AppButton
+                    label="Upgrade to Pro"
+                    variant="secondary"
+                    iconName="arrow-up-circle-outline"
+                    onPress={() => {
+                      if (IS_EXPO_GO) {
+                        Alert.alert('Subscription', 'Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.')
+                        return
+                      }
+                      navigation.navigate('Payments', { plan: 'pro' })
+                    }}
+                  />
+                </>
+              ) : entitlements.plan === 'basic' ? (
+                <AppButton
+                  label="Upgrade to Pro"
+                  variant="secondary"
+                  iconName="arrow-up-circle-outline"
+                  onPress={() => {
+                    if (IS_EXPO_GO) {
+                      Alert.alert('Subscription', 'Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.')
+                      return
+                    }
+                    navigation.navigate('Payments', { plan: 'pro' })
+                  }}
+                />
+              ) : (
+                <AppButton
+                  label="Manage subscription"
+                  variant="secondary"
+                  iconName="arrow-up-circle-outline"
+                  onPress={() => {
+                    if (IS_EXPO_GO) {
+                      Alert.alert('Subscription', 'Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.')
+                      return
+                    }
+                    navigation.navigate('Payments')
+                  }}
+                />
+              )}
               {entitlements.plan !== 'pro' ? (
                 <Text style={styles.mutedText}>
                   {entitlements.plan === 'free'
@@ -5081,12 +5356,21 @@ function SettingsScreen() {
 
         <Surface elevated style={{ marginTop: themeSpacing.md }}>
           <SectionHeader title="Language" />
-          <View style={{ flexDirection: 'row', gap: themeSpacing.sm, flexWrap: 'wrap', marginTop: themeSpacing.xs, paddingBottom: themeSpacing.xs }}>
-          {(['sl','en','hr','it','de'] as Lang[]).map(code => (
-            <TouchableOpacity key={code} style={[styles.secondaryBtn, { backgroundColor: lang===code? '#2b6cb0':'#00000088' }]} onPress={()=> changeLang(code)}>
-              <Text style={[styles.secondaryBtnText, lang===code ? styles.secondaryBtnTextActive : null]}>{t(lang, code==='sl'?'slovenian':code==='en'?'english':code==='hr'?'croatian':code==='it'?'italian':'german')}</Text>
-            </TouchableOpacity>
-          ))}
+          <View style={styles.languageGrid}>
+            {(['sl', 'en', 'hr', 'it', 'de'] as Lang[]).map((code) => {
+              const selected = lang === code
+              const labelKey =
+                code === 'sl' ? 'slovenian' : code === 'en' ? 'english' : code === 'hr' ? 'croatian' : code === 'it' ? 'italian' : 'german'
+              return (
+                <TouchableOpacity
+                  key={code}
+                  style={[styles.languageOption, selected && styles.languageOptionSelected]}
+                  onPress={() => changeLang(code)}
+                >
+                  <Text style={[styles.languageOptionLabel, selected && styles.languageOptionLabelSelected]}>{t(lang, labelKey)}</Text>
+                </TouchableOpacity>
+              )
+            })}
           </View>
         </Surface>
 
@@ -5122,19 +5406,19 @@ function SettingsScreen() {
               label="Privacy policy"
               variant="secondary"
               iconName="document-text-outline"
-              onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/privacy`)}
+              onPress={() => openLegal('/privacy')}
             />
             <AppButton
               label="Terms of use"
               variant="secondary"
               iconName="list-outline"
-              onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/terms`)}
+              onPress={() => openLegal('/terms')}
             />
             <AppButton
               label="Delete account & data"
               variant="secondary"
               iconName="trash-outline"
-              onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/account-deletion`)}
+              onPress={() => openLegal('/account-deletion')}
             />
           </View>
         </Surface>
@@ -5196,6 +5480,19 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
   const navRef = React.useRef<NavigationContainerRef<any>>(null)
   const lastHandled = React.useRef<string | null>(null)
   const shownInitAlert = React.useRef(false)
+
+  useEffect(() => {
+    setUpgradeHandler((plan) => {
+      if (IS_EXPO_GO) {
+        Alert.alert('Upgrade', 'Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.')
+        return
+      }
+      navRef.current?.navigate('Payments', { plan })
+    })
+    return () => {
+      setUpgradeHandler(null)
+    }
+  }, [])
   const handleShareUrl = useCallback(async (incoming: string | null) => {
     if (!incoming || loading || !space) return
     if (lastHandled.current === incoming) return
@@ -5348,6 +5645,7 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
             <Stack.Screen name="Reports" component={ReportsScreen} options={{ headerShown: coerceBool(false) }} />
             <Stack.Screen name="Exports" component={ExportsScreen} options={{ headerShown: coerceBool(false) }} />
             <Stack.Screen name="Payments" component={PaymentsScreen} options={{ headerShown: coerceBool(false) }} />
+            <Stack.Screen name="AI Assistant" component={AIAssistantScreen} options={{ headerShown: coerceBool(false) }} />
             <Stack.Screen name="Bill Details" component={BillDetailsScreen} options={{ headerShown: coerceBool(false) }} />
             <Stack.Screen name="Warranty Details" component={WarrantyDetailsScreen} options={{ headerShown: coerceBool(false) }} />
           </>
@@ -5444,15 +5742,23 @@ export default function App() {
     }
     return () => { sub && Notifications.removeNotificationSubscription(sub) }
   })() }, [])
+
+  const setLangAndSave = useCallback((value: Lang) => {
+    setLang(value)
+    saveLang(value)
+  }, [])
+
   return (
-    <EntitlementsProvider supabase={supabase}>
-      <SpaceProvider enabled={loggedIn} demoMode={demoMode}>
-        <SafeAreaView style={{ flex: 1 }}>
-          <StatusBar style="dark" />
-          <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} demoMode={demoMode} setDemoMode={setDemoMode} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} authLoading={authLoading} />
-        </SafeAreaView>
-      </SpaceProvider>
-    </EntitlementsProvider>
+    <LangContext.Provider value={{ lang, setLang: setLangAndSave }}>
+      <EntitlementsProvider supabase={supabase}>
+        <SpaceProvider enabled={loggedIn} demoMode={demoMode}>
+          <SafeAreaView style={{ flex: 1 }}>
+            <StatusBar style="dark" />
+            <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} demoMode={demoMode} setDemoMode={setDemoMode} lang={lang} setLang={setLangAndSave} authLoading={authLoading} />
+          </SafeAreaView>
+        </SpaceProvider>
+      </EntitlementsProvider>
+    </LangContext.Provider>
   )
 }
 
@@ -5463,6 +5769,7 @@ const styles = StyleSheet.create({
   loginWrapper: { flexGrow: 1, gap: themeSpacing.lg },
   loginHeader: { alignItems: 'center', gap: themeSpacing.sm },
   loginLogo: { width: 56, height: 56, borderRadius: 28, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  loginLogoImage: { width: 34, height: 34 },
   loginTitle: { fontSize: 24, fontWeight: '700', color: themeColors.text },
   loginSubtitle: { fontSize: 15, color: themeColors.textMuted, textAlign: 'center' },
   feedbackBanner: { alignSelf: 'stretch' },
@@ -5507,7 +5814,23 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 16, fontWeight: '600', color: '#111827' },
   bodyText: { fontSize: 14, color: '#374151' },
   mutedText: { fontSize: 12, color: '#9CA3AF' },
-  listContent: { paddingBottom: themeSpacing.xxl + themeSpacing.xl },
+  listContent: { paddingBottom: themeSpacing.xxl + themeSpacing.xxl + themeSpacing.xl },
+
+  aiFab: {
+    position: 'absolute',
+    right: themeLayout.screenPadding,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: themeColors.primary,
+  },
+  aiFabLabel: { color: '#FFFFFF', fontWeight: '700' },
+  aiMsg: { borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12 },
+  aiMsgUser: { alignSelf: 'flex-end', backgroundColor: themeColors.primary },
+  aiMsgAssistant: { alignSelf: 'flex-start', backgroundColor: themeColors.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
 
   brandEmptyWrap: { marginTop: themeSpacing.lg, alignItems: 'center', gap: themeSpacing.md },
   wordmarkEmpty: { height: 26, width: 180 },

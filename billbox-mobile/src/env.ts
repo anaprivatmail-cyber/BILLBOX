@@ -15,7 +15,7 @@ function readBool(key: string, fallback: boolean): boolean {
 
 export const ENABLE_PUSH_NOTIFICATIONS = readBool('ENABLE_PUSH_NOTIFICATIONS', false)
 export const ENABLE_IAP = readBool('ENABLE_IAP', false)
-export const PUBLIC_SITE_URL = readExtra('PUBLIC_SITE_URL')
+export const PUBLIC_SITE_URL: string | undefined =
+  readExtra('PUBLIC_SITE_URL')
   ?? (process.env as any)?.EXPO_PUBLIC_PUBLIC_SITE_URL
   ?? (process.env as any)?.EXPO_PUBLIC_SITE_URL
-  ?? 'https://example.com'

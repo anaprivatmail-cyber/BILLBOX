@@ -53,6 +53,8 @@
   "preparing_payers": "Zahler werden vorbereitet…",
 
   "inbox_title": "Posteingang",
+  "inbox_import_section_title": "Import",
+  "inbox_import_help_message": "Importiere PDFs/Bilder (inkl. E-Mail-Anhänge) in den Posteingang und hänge sie dann an Rechnungen an.",
   "inbox_item_added": "{name} zum Posteingang hinzugefügt",
 
   "import_choose_payer_title": "Zahler auswählen",
@@ -375,6 +377,7 @@
   "end_date_iso_placeholder": "Ende YYYY-MM-DD",
   "existing_warranties_title": "Bestehende Garantien",
   "expires_label": "Läuft ab",
+  "purchase_date_label": "Gekauft",
   "export_csv_action": "CSV exportieren",
   "export_json_backup_action": "JSON exportieren (Backup)",
   "export_pdf_action": "PDF exportieren",

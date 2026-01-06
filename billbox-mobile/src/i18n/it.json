@@ -53,6 +53,8 @@
   "preparing_payers": "Preparazione dei pagatori…",
 
   "inbox_title": "Posta in arrivo",
+  "inbox_import_section_title": "Importa",
+  "inbox_import_help_message": "Importa PDF/immagini (inclusi gli allegati email) nella posta in arrivo, poi allegali alle bollette.",
   "inbox_item_added": "{name} aggiunto alla posta in arrivo",
 
   "import_choose_payer_title": "Scegli pagatore",
@@ -375,6 +377,7 @@
   "end_date_iso_placeholder": "Fine YYYY-MM-DD",
   "existing_warranties_title": "Garanzie esistenti",
   "expires_label": "Scade",
+  "purchase_date_label": "Acquistato",
   "export_csv_action": "Esporta CSV",
   "export_json_backup_action": "Esporta JSON (backup)",
   "export_pdf_action": "Esporta PDF",

@@ -53,6 +53,8 @@
   "preparing_payers": "Pripravljamo plačnika …",
 
   "inbox_title": "Prejeto",
+  "inbox_import_section_title": "Uvoz",
+  "inbox_import_help_message": "Uvozi PDF-je/slike (vključno z e-poštnimi priponkami) v Prejeto, nato jih pripni računom.",
   "inbox_item_added": "{name} je dodan v Prejeto",
 
   "import_choose_payer_title": "Izberi plačnika",
@@ -375,6 +377,7 @@
   "end_date_iso_placeholder": "Konec YYYY-MM-DD",
   "existing_warranties_title": "Obstoječe garancije",
   "expires_label": "Poteče",
+  "purchase_date_label": "Kupljeno",
   "export_csv_action": "Izvozi CSV",
   "export_json_backup_action": "Izvozi JSON (varnostna kopija)",
   "export_pdf_action": "Izvozi PDF",

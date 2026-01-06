@@ -53,6 +53,8 @@
   "preparing_payers": "Preparing payers…",
 
   "inbox_title": "Inbox",
+  "inbox_import_section_title": "Import",
+  "inbox_import_help_message": "Import PDFs/images (including email attachments) into Inbox, then attach them to bills.",
   "inbox_item_added": "{name} added to Inbox",
 
   "import_choose_payer_title": "Choose payer",
@@ -375,6 +377,7 @@
   "end_date_iso_placeholder": "End YYYY-MM-DD",
   "existing_warranties_title": "Existing warranties",
   "expires_label": "Expires",
+  "purchase_date_label": "Purchased",
   "export_csv_action": "Export CSV",
   "export_json_backup_action": "Export JSON (backup)",
   "export_pdf_action": "Export PDF",

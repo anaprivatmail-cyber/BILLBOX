@@ -1,6 +1,7 @@
 import React from 'react'
 import {
   ActivityIndicator,
+  Image,
   Pressable,
   ScrollView,
   StyleProp,
@@ -13,32 +14,72 @@ import {
   ViewStyle,
 } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { colors, layout, spacing } from './theme'
+
+const BRAND_ICON = require('../../assets/logo/logo-icon.png')
 
 export function Screen({
   children,
   style,
   scroll = true,
   contentContainerStyle,
+  title,
+  right,
+  padded = true,
 }: {
   children: React.ReactNode
   style?: StyleProp<ViewStyle>
   scroll?: boolean
   contentContainerStyle?: StyleProp<ViewStyle>
+  title?: string
+  right?: React.ReactNode
+  padded?: boolean
 }) {
+  const insets = useSafeAreaInsets()
+  const padX = padded ? layout.screenPadding : 0
+  const padTop = padded ? spacing.lg : 0
+  // Extra room for tab bar + floating action button.
+  const padBottom = (padded ? spacing.lg : 0) + Math.max(insets.bottom, spacing.lg) + 84
+
   return (
     <SafeAreaView style={[styles.screen, style]}>
+      {title ? (
+        <View style={[styles.appHeader, { paddingHorizontal: padX }]}>
+          <View style={styles.appHeaderLeft}>
+            <Image source={BRAND_ICON} style={styles.appHeaderLogo} resizeMode="contain" accessibilityLabel="BillBox" />
+            <Text style={styles.appHeaderTitle} numberOfLines={1}>
+              {title}
+            </Text>
+          </View>
+          {right ? <View style={styles.appHeaderRight}>{right}</View> : null}
+        </View>
+      ) : null}
       {scroll ? (
         <ScrollView
-          contentContainerStyle={[styles.scrollContent, contentContainerStyle]}
+          contentContainerStyle={[
+            styles.scrollContent,
+            {
+              paddingHorizontal: padX,
+              paddingTop: title ? spacing.sm : padTop,
+              paddingBottom: padBottom,
+            },
+            contentContainerStyle,
+          ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
           {children}
         </ScrollView>
       ) : (
-        children
+        <View
+          style={[
+            { flex: 1, paddingHorizontal: padX, paddingTop: title ? spacing.sm : padTop, paddingBottom: padBottom },
+            contentContainerStyle as any,
+          ]}
+        >
+          {children}
+        </View>
       )}
     </SafeAreaView>
   )
@@ -364,7 +405,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
   },
   buttonSecondary: {
-    backgroundColor: '#334155',
+    backgroundColor: colors.primarySoft,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   buttonGhost: {
     backgroundColor: 'transparent',
@@ -385,7 +428,7 @@ const styles = StyleSheet.create({
     color: colors.primary,
   },
   buttonLabelSecondary: {
-    color: '#fff',
+    color: colors.primary,
   },
   buttonLabelDanger: {
     color: '#fff',
@@ -496,5 +539,32 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: colors.border,
+  },
+
+  appHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.sm,
+  },
+  appHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    flex: 1,
+    minWidth: 0,
+  },
+  appHeaderLogo: {
+    width: 26,
+    height: 26,
+  },
+  appHeaderTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: colors.text,
+  },
+  appHeaderRight: {
+    marginLeft: spacing.sm,
   },
 })
