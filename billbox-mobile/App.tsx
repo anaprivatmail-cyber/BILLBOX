@@ -3,6 +3,47 @@
 
 const BILLBOX_CRASHLOG_PREFIX = 'BILLBOX_CRASHLOG'
 
+type StartupErrorState = {
+  source: string
+  message: string
+  stack?: string
+  isFatal?: boolean
+}
+
+let __billboxStartupError: StartupErrorState | null = null
+const __billboxStartupErrorListeners = new Set<(err: StartupErrorState | null) => void>()
+
+function normalizeError(err: any): { message: string; stack?: string } {
+  if (!err) return { message: 'Unknown error' }
+  if (typeof err === 'string') return { message: err }
+  const message = err?.message ? String(err.message) : String(err)
+  const stack = err?.stack ? String(err.stack) : undefined
+  return { message, stack }
+}
+
+function reportStartupError(err: any, source: string, extras?: { isFatal?: boolean }) {
+  try {
+    const n = normalizeError(err)
+    __billboxStartupError = { source, message: n.message, stack: n.stack, isFatal: extras?.isFatal }
+    for (const l of Array.from(__billboxStartupErrorListeners)) {
+      try {
+        l(__billboxStartupError)
+      } catch {}
+    }
+  } catch {}
+}
+
+function subscribeStartupError(listener: (err: StartupErrorState | null) => void) {
+  __billboxStartupErrorListeners.add(listener)
+  return () => {
+    __billboxStartupErrorListeners.delete(listener)
+  }
+}
+
+function getStartupError(): StartupErrorState | null {
+  return __billboxStartupError
+}
+
 ;(function billboxSetupCrashLogger() {
   try {
     const g: any = globalThis as any
@@ -12,6 +53,9 @@ const BILLBOX_CRASHLOG_PREFIX = 'BILLBOX_CRASHLOG'
       ErrorUtils.setGlobalHandler((err: any, isFatal?: boolean) => {
         try {
           console.error(BILLBOX_CRASHLOG_PREFIX, 'GLOBAL_ERROR', { isFatal, message: err?.message, stack: err?.stack })
+        } catch {}
+        try {
+          reportStartupError(err, 'GLOBAL_ERROR', { isFatal })
         } catch {}
         try {
           if (typeof prev === 'function') prev(err, isFatal)
@@ -26,6 +70,9 @@ const BILLBOX_CRASHLOG_PREFIX = 'BILLBOX_CRASHLOG'
       p.on('unhandledRejection', (reason: any) => {
         try {
           console.error(BILLBOX_CRASHLOG_PREFIX, 'UNHANDLED_REJECTION', reason?.message || String(reason), reason?.stack)
+        } catch {}
+        try {
+          reportStartupError(reason, 'UNHANDLED_REJECTION')
         } catch {}
       })
     }
@@ -249,6 +296,86 @@ function getMissingBootEnvKeys(): string[] {
   return missing
 }
 
+function useStartupErrorState(): StartupErrorState | null {
+  const [err, setErr] = useState<StartupErrorState | null>(() => getStartupError())
+  useEffect(() => subscribeStartupError(setErr), [])
+  return err
+}
+
+function getRuntimeInfo() {
+  const expoConfig = (Constants as any)?.expoConfig
+  const manifest = (Constants as any)?.manifest
+  const versionCode = expoConfig?.android?.versionCode ?? manifest?.android?.versionCode ?? null
+  const version = expoConfig?.version ?? manifest?.version ?? null
+
+  const envPresence: Record<string, boolean> = {}
+  for (const key of REQUIRED_BOOT_ENV_KEYS) {
+    envPresence[key] = Boolean(getEnvTrimmed(key))
+  }
+
+  return {
+    platform: Platform.OS,
+    version,
+    versionCode,
+    envPresence,
+  }
+}
+
+function StartupDiagnosticsView({ title, error }: { title: string; error?: StartupErrorState | null }) {
+  const info = getRuntimeInfo()
+  const message = error?.message || null
+  const stack = error?.stack || null
+
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: themeColors.background }}>
+      <StatusBar style="dark" />
+      <View style={[styles.centered, { alignItems: 'stretch' }]}>
+        <Text style={styles.screenHeaderTitle}>{title}</Text>
+        <Text style={[styles.bodyText, { marginTop: themeSpacing.sm }]}>Platform: {String(info.platform)}</Text>
+        <Text style={styles.bodyText}>Version: {String(info.version ?? 'unknown')}</Text>
+        <Text style={styles.bodyText}>VersionCode: {String(info.versionCode ?? 'unknown')}</Text>
+
+        <View style={{ marginTop: themeSpacing.md }}>
+          <Text style={[styles.bodyText, { fontWeight: '700' }]}>Env present</Text>
+          {Object.entries(info.envPresence).map(([k, v]) => (
+            <Text key={k} style={styles.mutedText}>{k}: {v ? 'true' : 'false'}</Text>
+          ))}
+        </View>
+
+        {message ? (
+          <View style={{ marginTop: themeSpacing.md }}>
+            <Text style={[styles.bodyText, { fontWeight: '700' }]}>Error</Text>
+            <Text style={styles.bodyText}>{String(message)}</Text>
+          </View>
+        ) : null}
+
+        {stack ? (
+          <View style={{ marginTop: themeSpacing.sm }}>
+            <Text style={[styles.bodyText, { fontWeight: '700' }]}>Stack</Text>
+            <Text style={styles.mutedText}>{String(stack)}</Text>
+          </View>
+        ) : null}
+      </View>
+    </SafeAreaView>
+  )
+}
+
+class StartupErrorBoundary extends React.Component<{ children: React.ReactNode }, { err: StartupErrorState | null }> {
+  state = { err: null }
+  componentDidCatch(error: any) {
+    try {
+      reportStartupError(error, 'ERROR_BOUNDARY')
+    } catch {}
+    this.setState({ err: normalizeError(error) ? { source: 'ERROR_BOUNDARY', ...normalizeError(error) } as any : { source: 'ERROR_BOUNDARY', message: 'Unknown error' } })
+  }
+  render() {
+    if (this.state.err) {
+      return <StartupDiagnosticsView title="Startup error" error={this.state.err} />
+    }
+    return this.props.children as any
+  }
+}
+
 // --- Supabase helpers (mobile) ---
 function getSupabase(): SupabaseClient | null {
   const url = getEnvTrimmed('EXPO_PUBLIC_SUPABASE_URL')
@@ -266,6 +393,9 @@ function getSupabase(): SupabaseClient | null {
   } catch (e: any) {
     try {
       console.error(BILLBOX_CRASHLOG_PREFIX, 'SUPABASE_INIT_FAILED', e?.message || String(e), e?.stack)
+    } catch {}
+    try {
+      reportStartupError(e, 'SUPABASE_INIT_FAILED')
     } catch {}
     return null
   }
@@ -286,58 +416,7 @@ function resolveProductId(plan: PlanId, interval: Interval): string | null {
   return val || null
 }
 
-function DiagnosticsScreen() {
-  const { lang } = useLang()
-
-  const appVersion = (Constants as any)?.expoConfig?.version || (Constants as any)?.manifest2?.extra?.expoClient?.version || null
-  const androidVersionCode = (Constants as any)?.expoConfig?.android?.versionCode || null
-  const iosBuildNumber = (Constants as any)?.expoConfig?.ios?.buildNumber || null
-  const ownership = (Constants as any)?.appOwnership || (Constants as any)?.executionEnvironment || null
-
-  const envRows = REQUIRED_BOOT_ENV_KEYS.map((key) => {
-    const raw = getEnvValue(key)
-    const trimmed = raw ? raw.trim() : ''
-    const present = Boolean(trimmed)
-    let display = present ? `present (len ${trimmed.length})` : 'missing'
-    if (present && key === 'EXPO_PUBLIC_SUPABASE_ANON_KEY') {
-      const head = trimmed.slice(0, 4)
-      const tail = trimmed.slice(-4)
-      display = `present (${head}…${tail}, len ${trimmed.length})`
-    }
-    return { key, display }
-  })
-
-  return (
-    <Screen>
-      <View style={styles.pageStack}>
-        <Surface elevated>
-          <SectionHeader title="Diagnostics" />
-          <Text style={styles.bodyText}>Confirm build + config.</Text>
-        </Surface>
-
-        <Surface elevated>
-          <SectionHeader title="App" />
-          <Text style={styles.bodyText}>Platform: {Platform.OS}</Text>
-          <Text style={styles.bodyText}>Ownership: {String(ownership || 'unknown')}</Text>
-          <Text style={styles.bodyText}>Version: {String(appVersion || 'unknown')}</Text>
-          <Text style={styles.bodyText}>Android versionCode: {String(androidVersionCode || 'unknown')}</Text>
-          <Text style={styles.bodyText}>iOS buildNumber: {String(iosBuildNumber || 'unknown')}</Text>
-          <Text style={styles.bodyText}>Language: {String(lang)}</Text>
-        </Surface>
-
-        <Surface elevated>
-          <SectionHeader title="Required env" />
-          {envRows.map((r) => (
-            <View key={r.key} style={{ flexDirection: 'row', justifyContent: 'space-between', gap: themeLayout.gap }}>
-              <Text style={styles.bodyText}>{r.key}</Text>
-              <Text style={styles.mutedText}>{r.display}</Text>
-            </View>
-          ))}
-        </Surface>
-      </View>
-    </Screen>
-  )
-}
+// (No standalone Diagnostics screen; diagnostics is rendered only on startup error)
 
 async function verifyIapOnBackend(productId: string): Promise<boolean> {
   try {
@@ -1730,9 +1809,6 @@ function LoginScreen({ onLoggedIn, lang, setLang }: LoginScreenProps) {
                   </Pressable>
                 )}
 
-                <Pressable onPress={() => navigation.navigate('Diagnostics')} hitSlop={8}>
-                  <Text style={styles.authLink}>Diagnostics</Text>
-                </Pressable>
               </View>
             </Surface>
 
@@ -5671,6 +5747,9 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
         try {
           console.error(BILLBOX_CRASHLOG_PREFIX, 'GET_INITIAL_URL_FAILED', e?.message || String(e), e?.stack)
         } catch {}
+        try {
+          reportStartupError(e, 'GET_INITIAL_URL_FAILED')
+        } catch {}
       }
       if (mounted) await handleShareUrl(initial)
     })()
@@ -5743,7 +5822,6 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
               />
             )}
           </Stack.Screen>
-          <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} options={{ title: 'Diagnostics' }} />
         </Stack.Navigator>
       </NavigationContainer>
     )
@@ -5778,35 +5856,7 @@ function AppNavigation({ loggedIn, setLoggedIn, demoMode, setDemoMode, lang, set
   return content
 }
 
-export default function App() {
-  const missingEnv = useMemo(() => getMissingBootEnvKeys(), [])
-  useEffect(() => {
-    if (!missingEnv.length) return
-    try {
-      console.error(BILLBOX_CRASHLOG_PREFIX, 'SAFE_BOOT_MISSING_ENV', missingEnv)
-    } catch {}
-  }, [missingEnv])
-
-  if (missingEnv.length) {
-    return (
-      <SafeAreaView style={{ flex: 1 }}>
-        <StatusBar style="dark" />
-        <Screen scroll={false}>
-          <View style={styles.centered}>
-            <Text style={styles.screenHeaderTitle}>Configuration missing</Text>
-            <Text style={[styles.bodyText, { marginTop: themeSpacing.sm, textAlign: 'center' }]}>Missing required env vars:</Text>
-            <View style={{ marginTop: themeSpacing.sm, gap: 4 }}>
-              {missingEnv.map((k) => (
-                <Text key={k} style={styles.mutedText}>{k}</Text>
-              ))}
-            </View>
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.md, textAlign: 'center' }]}>Rebuild the app with these EXPO_PUBLIC_* values configured.</Text>
-          </View>
-        </Screen>
-      </SafeAreaView>
-    )
-  }
-
+function AppInner() {
   const supabase = useMemo(() => getSupabase(), [])
   const [loggedIn, setLoggedIn] = useState(false)
   const [demoMode, setDemoMode] = useState(false)
@@ -5848,47 +5898,68 @@ export default function App() {
     }
   }, [supabase])
   useEffect(() => { (async ()=>{ 
-    await ensureNotificationConfig()
-    // iOS action buttons
+    let sub: any = null
     try {
-      await (Notifications as any).setNotificationCategoryAsync?.('bill', [
-        { identifier: 'SNOOZE_1', buttonTitle: 'Snooze 1 day', options: { isDestructive: false, isAuthenticationRequired: false } },
-        { identifier: 'SNOOZE_3', buttonTitle: 'Snooze 3 days', options: { isDestructive: false, isAuthenticationRequired: false } },
-        { identifier: 'SNOOZE_7', buttonTitle: 'Snooze 7 days', options: { isDestructive: false, isAuthenticationRequired: false } },
-      ])
-    } catch {}
-    const sub = Notifications.addNotificationResponseReceivedListener(async (resp)=>{
+      await ensureNotificationConfig()
+      // iOS action buttons
       try {
-        const payload = resp?.notification?.request?.content?.data as any
-        const billId = payload?.bill_id
-        const targetSpace = payload?.space_id || null
-        const action = resp?.actionIdentifier
-        if (!billId || !action) return
-        const days = action==='SNOOZE_1' ? 1 : action==='SNOOZE_3' ? 3 : action==='SNOOZE_7' ? 7 : 0
-        if (days>0) {
-          // Construct lightweight bill for snooze
-          const fake: any = { id: billId, supplier: 'Bill', amount: 0, currency: 'EUR', due_date: new Date().toISOString().slice(0,10), status: 'unpaid', space_id: targetSpace }
-          await snoozeBillReminder(fake, days, targetSpace)
-        }
+        await (Notifications as any).setNotificationCategoryAsync?.('bill', [
+          { identifier: 'SNOOZE_1', buttonTitle: 'Snooze 1 day', options: { isDestructive: false, isAuthenticationRequired: false } },
+          { identifier: 'SNOOZE_3', buttonTitle: 'Snooze 3 days', options: { isDestructive: false, isAuthenticationRequired: false } },
+          { identifier: 'SNOOZE_7', buttonTitle: 'Snooze 7 days', options: { isDestructive: false, isAuthenticationRequired: false } },
+        ])
       } catch {}
-    })
-    const isExpoGo = (Constants as any)?.appOwnership === 'expo' || (Constants as any)?.executionEnvironment === 'storeClient'
-    if (ENABLE_PUSH_NOTIFICATIONS && !isExpoGo) {
       try {
-        const granted = await requestPermissionIfNeeded()
-        if (granted) {
+        sub = Notifications.addNotificationResponseReceivedListener(async (resp)=>{
           try {
-            const token = await Notifications.getExpoPushTokenAsync()
-            // For now we just log the token; server-side registration will be added in V2.
-            console.log('Expo push token', (token as any)?.data || token)
-          } catch (e) {
-            console.warn('Push token fetch failed', e)
-          }
-        }
-      } catch (e) {
-        console.warn('Push registration failed', e)
+            const payload = resp?.notification?.request?.content?.data as any
+            const billId = payload?.bill_id
+            const targetSpace = payload?.space_id || null
+            const action = resp?.actionIdentifier
+            if (!billId || !action) return
+            const days = action==='SNOOZE_1' ? 1 : action==='SNOOZE_3' ? 3 : action==='SNOOZE_7' ? 7 : 0
+            if (days>0) {
+              // Construct lightweight bill for snooze
+              const fake: any = { id: billId, supplier: 'Bill', amount: 0, currency: 'EUR', due_date: new Date().toISOString().slice(0,10), status: 'unpaid', space_id: targetSpace }
+              await snoozeBillReminder(fake, days, targetSpace)
+            }
+          } catch {}
+        })
+      } catch (e: any) {
+        try {
+          console.error(BILLBOX_CRASHLOG_PREFIX, 'NOTIFICATIONS_LISTENER_FAILED', e?.message || String(e), e?.stack)
+        } catch {}
+        try {
+          reportStartupError(e, 'NOTIFICATIONS_LISTENER_FAILED')
+        } catch {}
       }
+
+      const isExpoGo = (Constants as any)?.appOwnership === 'expo' || (Constants as any)?.executionEnvironment === 'storeClient'
+      if (ENABLE_PUSH_NOTIFICATIONS && !isExpoGo) {
+        try {
+          const granted = await requestPermissionIfNeeded()
+          if (granted) {
+            try {
+              const token = await Notifications.getExpoPushTokenAsync()
+              // For now we just log the token; server-side registration will be added in V2.
+              console.log('Expo push token', (token as any)?.data || token)
+            } catch (e) {
+              console.warn('Push token fetch failed', e)
+            }
+          }
+        } catch (e) {
+          console.warn('Push registration failed', e)
+        }
+      }
+    } catch (e: any) {
+      try {
+        console.error(BILLBOX_CRASHLOG_PREFIX, 'NOTIFICATIONS_INIT_FAILED', e?.message || String(e), e?.stack)
+      } catch {}
+      try {
+        reportStartupError(e, 'NOTIFICATIONS_INIT_FAILED')
+      } catch {}
     }
+
     return () => { sub && Notifications.removeNotificationSubscription(sub) }
   })() }, [])
 
@@ -5908,6 +5979,39 @@ export default function App() {
         </SpaceProvider>
       </EntitlementsProvider>
     </LangContext.Provider>
+  )
+}
+
+export default function App() {
+  const startupErr = useStartupErrorState()
+  const missingEnv = useMemo(() => getMissingBootEnvKeys(), [])
+
+  if (startupErr) {
+    return <StartupDiagnosticsView title="Startup error" error={startupErr} />
+  }
+
+  if (missingEnv.length) {
+    try {
+      console.error(BILLBOX_CRASHLOG_PREFIX, 'SAFE_BOOT_MISSING_ENV', missingEnv)
+    } catch {}
+    try {
+      reportStartupError(new Error('Missing required EXPO_PUBLIC_* env vars'), 'MISSING_ENV')
+    } catch {}
+    return <StartupDiagnosticsView title="Startup error" error={getStartupError()} />
+  }
+
+  const supabase = useMemo(() => getSupabase(), [])
+  if (!supabase) {
+    try {
+      reportStartupError(new Error('Supabase init failed or not configured'), 'SUPABASE_NOT_AVAILABLE')
+    } catch {}
+    return <StartupDiagnosticsView title="Startup error" error={getStartupError()} />
+  }
+
+  return (
+    <StartupErrorBoundary>
+      <AppInner />
+    </StartupErrorBoundary>
   )
 }
 
