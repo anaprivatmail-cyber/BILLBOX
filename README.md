@@ -43,6 +43,14 @@ export default defineConfig([
 
 ## BillBox Mobile (Expo) – Production Setup
 
+### Repo roots (important)
+
+- PLAY STORE MOBILE ROOT = `billbox-mobile/` (this is the only folder to use for EAS production builds)
+- WEB ROOT = repository root (`/`)
+- LEGACY (do not build/release) = `_OLD_billbox-mobile-old/`, `apps/mobile/`
+
+When building for Play Store, always run commands from `billbox-mobile/`, e.g. `cd billbox-mobile && eas build -p android --profile production --non-interactive`.
+
 - Requirements: Node 18+, Expo CLI, EAS account for secrets.
 - Mobile app path: `billbox-mobile/`
 
