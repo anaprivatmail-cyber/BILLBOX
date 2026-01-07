@@ -32,7 +32,7 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 14,
+      "versionCode": 15,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.READ_MEDIA_IMAGES",
