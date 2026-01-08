@@ -264,21 +264,29 @@ function coerceBool(val: unknown): boolean {
   return Boolean(val)
 }
 
-function getEnvValue(key: string): string | undefined {
-  try {
-    const env = (globalThis as any)?.process?.env as Record<string, any> | undefined
-    const val = env?.[key]
-    return typeof val === 'string' ? val : undefined
-  } catch {
-    return undefined
-  }
-}
+// NOTE: For Expo apps, EXPO_PUBLIC_* variables are intended to be inlined at bundle time.
+// We intentionally read them via direct `process.env.EXPO_PUBLIC_*` references (not via
+// runtime/global lookups like globalThis.process.env) so Metro can inline them.
+const BOOT_PUBLIC_ENV = {
+  EXPO_PUBLIC_SUPABASE_URL: process.env.EXPO_PUBLIC_SUPABASE_URL,
+  EXPO_PUBLIC_SUPABASE_ANON_KEY: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+  EXPO_PUBLIC_FUNCTIONS_BASE: process.env.EXPO_PUBLIC_FUNCTIONS_BASE,
+  EXPO_PUBLIC_SITE_URL: process.env.EXPO_PUBLIC_SITE_URL,
+  EXPO_PUBLIC_SUPABASE_REDIRECT_URL: process.env.EXPO_PUBLIC_SUPABASE_REDIRECT_URL,
+} as const
 
-function getEnvTrimmed(key: string): string | null {
-  const v = getEnvValue(key)
-  if (!v) return null
+type BootPublicEnvKey = keyof typeof BOOT_PUBLIC_ENV
+
+function getBootEnvTrimmed(key: BootPublicEnvKey): string | null {
+  const v = BOOT_PUBLIC_ENV[key]
+  if (typeof v !== 'string') return null
   const t = v.trim()
   return t ? t : null
+}
+
+function getEnvValue(key: string): string | undefined {
+  const val = (process.env as any)?.[key]
+  return typeof val === 'string' ? val : undefined
 }
 
 const REQUIRED_BOOT_ENV_KEYS = [
@@ -291,7 +299,7 @@ const REQUIRED_BOOT_ENV_KEYS = [
 function getMissingBootEnvKeys(): string[] {
   const missing: string[] = []
   for (const key of REQUIRED_BOOT_ENV_KEYS) {
-    if (!getEnvTrimmed(key)) missing.push(key)
+    if (!getBootEnvTrimmed(key)) missing.push(key)
   }
   return missing
 }
@@ -309,8 +317,11 @@ function getRuntimeInfo() {
   const version = expoConfig?.version ?? manifest?.version ?? null
 
   const envPresence: Record<string, boolean> = {}
+  const envMaskedTail: Record<string, string> = {}
   for (const key of REQUIRED_BOOT_ENV_KEYS) {
-    envPresence[key] = Boolean(getEnvTrimmed(key))
+    const v = getBootEnvTrimmed(key)
+    envPresence[key] = Boolean(v)
+    envMaskedTail[key] = v ? `…${v.slice(-6)}` : 'missing'
   }
 
   return {
@@ -318,6 +329,7 @@ function getRuntimeInfo() {
     version,
     versionCode,
     envPresence,
+    envMaskedTail,
   }
 }
 
@@ -338,7 +350,7 @@ function StartupDiagnosticsView({ title, error }: { title: string; error?: Start
         <View style={{ marginTop: themeSpacing.md }}>
           <Text style={[styles.bodyText, { fontWeight: '700' }]}>Env present</Text>
           {Object.entries(info.envPresence).map(([k, v]) => (
-            <Text key={k} style={styles.mutedText}>{k}: {v ? 'true' : 'false'}</Text>
+            <Text key={k} style={styles.mutedText}>{k}: {v ? 'true' : 'false'} ({info.envMaskedTail[k] || 'missing'})</Text>
           ))}
         </View>
 
@@ -378,8 +390,8 @@ class StartupErrorBoundary extends React.Component<{ children: React.ReactNode }
 
 // --- Supabase helpers (mobile) ---
 function getSupabase(): SupabaseClient | null {
-  const url = getEnvTrimmed('EXPO_PUBLIC_SUPABASE_URL')
-  const anon = getEnvTrimmed('EXPO_PUBLIC_SUPABASE_ANON_KEY')
+  const url = getBootEnvTrimmed('EXPO_PUBLIC_SUPABASE_URL')
+  const anon = getBootEnvTrimmed('EXPO_PUBLIC_SUPABASE_ANON_KEY')
   if (!url || !anon) return null
   try {
     return createClient(url, anon, {
@@ -402,7 +414,7 @@ function getSupabase(): SupabaseClient | null {
 }
 
 function getFunctionsBase(): string | null {
-  const base = getEnvTrimmed('EXPO_PUBLIC_FUNCTIONS_BASE')
+  const base = getBootEnvTrimmed('EXPO_PUBLIC_FUNCTIONS_BASE')
   return base ? base.replace(/\/$/, '') : null
 }
 
@@ -811,6 +823,7 @@ async function deleteAllAttachmentsForRecord(spaceId: string | null | undefined,
 async function performOCR(uri: string): Promise<{ fields: any; summary: string }>{
   const base = getFunctionsBase()
   if (!base) {
+    // This should never crash the app at startup. Errors are surfaced at callsites.
     throw new Error('OCR unavailable: missing EXPO_PUBLIC_FUNCTIONS_BASE')
   }
   const fileResp = await fetch(uri)
