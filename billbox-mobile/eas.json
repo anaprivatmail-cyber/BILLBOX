@@ -19,12 +19,6 @@
     },
     "production": {
       "node": "20.18.1",
-      "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "SET_IN_EAS_DASHBOARD",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "SET_IN_EAS_DASHBOARD",
-        "EXPO_PUBLIC_FUNCTIONS_BASE": "SET_IN_EAS_DASHBOARD",
-        "EXPO_PUBLIC_SITE_URL": "SET_IN_EAS_DASHBOARD"
-      },
       "android": {
         "image": "ubuntu-22.04-jdk-17-ndk-r25b"
       }
