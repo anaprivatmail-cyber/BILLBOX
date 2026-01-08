@@ -14,7 +14,7 @@ import {
   ViewStyle,
 } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
+import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context'
 import { colors, layout, spacing } from './theme'
 
 const BRAND_ICON = require('../../assets/logo/logo-icon.png')
@@ -36,7 +36,7 @@ export function Screen({
   right?: React.ReactNode
   padded?: boolean
 }) {
-  const insets = useSafeAreaInsets()
+  const insets = React.useContext(SafeAreaInsetsContext) ?? { top: 0, bottom: 0, left: 0, right: 0 }
   const padX = padded ? layout.screenPadding : 0
   const padTop = padded ? spacing.lg : 0
   // Extra room for tab bar + floating action button.
