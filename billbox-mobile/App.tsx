@@ -82,7 +82,7 @@ function getStartupError(): StartupErrorState | null {
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, FlatList, RefreshControl, StyleSheet, Text, Button, View, Platform, Linking, Image, Switch, ActivityIndicator, Pressable, KeyboardAvoidingView, TextInput, ScrollView, TouchableOpacity, Modal } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
+import { SafeAreaView, SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import { NavigationContainer, useFocusEffect, useNavigation, useRoute, NavigationContainerRef } from '@react-navigation/native'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
@@ -6022,9 +6022,11 @@ export default function App() {
   }
 
   return (
-    <StartupErrorBoundary>
-      <AppInner />
-    </StartupErrorBoundary>
+    <SafeAreaProvider>
+      <StartupErrorBoundary>
+        <AppInner />
+      </StartupErrorBoundary>
+    </SafeAreaProvider>
   )
 }
 
