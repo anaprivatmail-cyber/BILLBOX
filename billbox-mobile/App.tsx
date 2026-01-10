@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, FlatList, RefreshControl, StyleSheet, Text, Button, View, Platform, Linking, Image, Switch, ActivityIndicator, Pressable, KeyboardAvoidingView, TextInput, ScrollView, TouchableOpacity, Modal } from 'react-native'
+import { Alert, FlatList, RefreshControl, StyleSheet, Text as RNText, Button, View, Platform, Linking, Image, Switch, ActivityIndicator, Pressable, KeyboardAvoidingView, TextInput, ScrollView, TouchableOpacity, Modal, Animated, PanResponder } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
@@ -22,18 +22,293 @@ import * as Notifications from 'expo-notifications'
 import { createClient, SupabaseClient, PostgrestError } from '@supabase/supabase-js'
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker'
 import { Screen, Surface, SectionHeader, AppButton, AppInput, SegmentedControl, Badge, EmptyState, InlineInfo, Disclosure, Divider } from './src/ui/components'
-import { colors as themeColors, layout as themeLayout, spacing as themeSpacing } from './src/ui/theme'
+import { colors as themeColors, layout as themeLayout, spacing as themeSpacing, ThemeProvider, useTheme } from './src/ui/theme'
 import type { Lang } from './src/i18n'
-import { t, loadLang, saveLang } from './src/i18n'
+import { t, loadLang, saveLang, getCurrentLang } from './src/i18n'
 import type { InboxItem } from './src/inbox'
 import { listInbox, addToInbox, updateInboxItem, removeInboxItem, clearInbox } from './src/inbox'
 import { ensureNotificationConfig, requestPermissionIfNeeded, scheduleBillReminders, cancelBillReminders, snoozeBillReminder, scheduleGroupedPaymentReminder, scheduleWarrantyReminders, cancelWarrantyReminders } from './src/reminders'
 import { ENABLE_PUSH_NOTIFICATIONS, PUBLIC_SITE_URL, ENABLE_IAP } from './src/env'
 import type { Space, SpacePlan } from './src/spaces'
 import { ensureDefaults as ensureSpacesDefaults, upsertSpace, removeSpace, loadCurrentSpaceId, saveCurrentSpaceId, loadSpaces } from './src/spaces'
-import { showUpgradeAlert, type EntitlementsSnapshot, type PlanId, useEntitlements, EntitlementsProvider } from './src/entitlements'
+import { showUpgradeAlert, setUpgradeNavigation, type EntitlementsSnapshot, type PlanId, useEntitlements, EntitlementsProvider } from './src/entitlements'
 
 const BRAND_WORDMARK = require('./assets/logo/logo-wordmark.png')
+
+function tr(key: string, vars?: any): string {
+  return t(getCurrentLang(), key, vars)
+}
+
+function translateStringPreserveSpace(input: string): string {
+  if (!input) return input
+  if (!input.trim()) return input
+  const leading = input.match(/^\s*/)?.[0] || ''
+  const trailing = input.match(/\s*$/)?.[0] || ''
+  const core = input.trim()
+  return leading + tr(core) + trailing
+}
+
+function Text(props: any) {
+  const { children, accessibilityLabel, ...rest } = props || {}
+  const translatedChildren = Array.isArray(children)
+    ? children.map((c) => (typeof c === 'string' ? translateStringPreserveSpace(c) : c))
+    : typeof children === 'string'
+      ? translateStringPreserveSpace(children)
+      : children
+  const translatedAccessibilityLabel = typeof accessibilityLabel === 'string' ? tr(accessibilityLabel) : accessibilityLabel
+  return (
+    <RNText accessibilityLabel={translatedAccessibilityLabel} {...rest}>
+      {translatedChildren}
+    </RNText>
+  )
+}
+
+// Centralized translation for all alert dialogs.
+// This keeps the UI fully localized without touching every call site.
+const __originalAlert = Alert.alert.bind(Alert)
+;(Alert as any).alert = (
+  title: string,
+  message?: string,
+  buttons?: any,
+  options?: any
+) => {
+  const lang = getCurrentLang()
+  const mappedButtons = Array.isArray(buttons)
+    ? buttons.map((b) => (typeof b?.text === 'string' ? { ...b, text: t(lang, b.text) } : b))
+    : buttons
+  return __originalAlert(
+    typeof title === 'string' ? t(lang, title) : title,
+    typeof message === 'string' ? t(lang, message) : message,
+    mappedButtons,
+    options
+  )
+}
+
+type AiChatMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+}
+
+type AiSuggestedAction = {
+  label: string
+  route: string
+  params?: any | null
+}
+
+type LangContextValue = {
+  lang: Lang
+  setLang: (value: Lang) => void
+}
+
+const LangContext = React.createContext<LangContextValue | null>(null)
+
+function useLangContext(): LangContextValue {
+  const ctx = useContext(LangContext)
+  if (!ctx) throw new Error('LangContext is not available')
+  return ctx
+}
+
+function AiAssistant({ context }: { context: any }) {
+  const navigation = useNavigation<any>()
+  const { mode, setMode, colors } = useTheme()
+  const { lang } = useLangContext()
+  const [visible, setVisible] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [input, setInput] = useState('')
+  const [messages, setMessages] = useState<AiChatMessage[]>([])
+  const [suggestedActions, setSuggestedActions] = useState<AiSuggestedAction[]>([])
+
+  const pan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: (_evt, gesture) => Math.abs(gesture.dx) > 3 || Math.abs(gesture.dy) > 3,
+        onPanResponderGrant: () => {
+          pan.setOffset({ x: (pan as any).x._value, y: (pan as any).y._value })
+          pan.setValue({ x: 0, y: 0 })
+        },
+        onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
+        onPanResponderRelease: () => {
+          pan.flattenOffset()
+        },
+      }),
+    [pan]
+  )
+
+  const callAi = useCallback(
+    async (text: string) => {
+      const base = getFunctionsBase()
+      if (!base) {
+        Alert.alert(t(lang, 'AI unavailable'), t(lang, 'Missing EXPO_PUBLIC_FUNCTIONS_BASE'))
+        return
+      }
+
+      setBusy(true)
+      try {
+        const resp = await fetch(`${base}/.netlify/functions/ai-assistant`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, context: context || {} }),
+        })
+        const json = await resp.json().catch(() => null)
+        if (!resp.ok || !json) throw new Error(json?.error || `AI failed (${resp.status})`)
+
+        const assistantText = String(json.message || '').trim() || t(lang, 'Here are a few helpful next steps.')
+        const actions = Array.isArray(json.suggestedActions) ? json.suggestedActions : []
+
+        setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: assistantText }]))
+        setSuggestedActions(actions.slice(0, 3))
+      } catch (e: any) {
+        setMessages((prev) =>
+          prev.concat([
+            {
+              id: `a_${Date.now()}`,
+              role: 'assistant',
+              text: e?.message || t(lang, 'AI request failed.'),
+            },
+          ])
+        )
+      } finally {
+        setBusy(false)
+      }
+    },
+    [context, lang]
+  )
+
+  const open = useCallback(() => {
+    setVisible(true)
+    if (!messages.length) {
+      setMessages([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'How can I help? Ask anything, or pick a suggestion.') }])
+      void callAi('Help')
+    }
+  }, [callAi, lang, messages.length])
+
+  const send = useCallback(() => {
+    const text = input.trim()
+    if (!text || busy) return
+    setInput('')
+    setMessages((prev) => prev.concat([{ id: `u_${Date.now()}`, role: 'user', text }]))
+    void callAi(text)
+  }, [busy, callAi, input])
+
+  return (
+    <>
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={[
+          {
+            position: 'absolute',
+            right: themeSpacing.lg,
+            bottom: themeSpacing.lg,
+            transform: pan.getTranslateTransform(),
+            zIndex: 50,
+          },
+        ]}
+      >
+        <TouchableOpacity
+          onPress={open}
+          activeOpacity={0.88}
+          style={{
+            width: 46,
+            height: 46,
+            borderRadius: 23,
+            backgroundColor: colors.primary,
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderWidth: 1,
+            borderColor: colors.border,
+          }}
+        >
+          <Ionicons name="sparkles-outline" size={20} color="#FFFFFF" />
+        </TouchableOpacity>
+      </Animated.View>
+
+      <Modal visible={visible} transparent animationType="fade" onRequestClose={() => setVisible(false)}>
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}> 
+          <Surface elevated style={{ width: '100%', maxWidth: 520, alignSelf: 'center' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
+              <Text style={styles.screenHeaderTitle}>{t(lang, 'AI assistant')}</Text>
+              <AppButton label={t(lang, 'Close')} variant="ghost" iconName="close-outline" onPress={() => setVisible(false)} />
+            </View>
+
+            {suggestedActions.length ? (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+                {suggestedActions.map((a, idx) => (
+                  <AppButton
+                    key={`${a.label}_${idx}`}
+                    label={String(a.label || t(lang, 'Open'))}
+                    variant="secondary"
+                    iconName="navigate-outline"
+                    onPress={() => {
+                      setVisible(false)
+                      try {
+                        navigation.navigate(String(a.route), a.params || undefined)
+                      } catch {}
+                    }}
+                  />
+                ))}
+              </View>
+            ) : null}
+
+            <View style={{ marginTop: themeSpacing.sm, maxHeight: 360 }}>
+              <ScrollView contentContainerStyle={{ gap: themeSpacing.xs, paddingVertical: themeSpacing.xs }}>
+                {messages.map((m) => (
+                  <View
+                    key={m.id}
+                    style={{
+                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                      maxWidth: '92%',
+                      paddingVertical: 10,
+                      paddingHorizontal: 12,
+                      borderRadius: 14,
+                      backgroundColor: m.role === 'user' ? colors.primarySoft : 'rgba(148, 163, 184, 0.14)',
+                      borderWidth: StyleSheet.hairlineWidth,
+                      borderColor: colors.border,
+                    }}
+                  >
+                    <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>{m.text}</Text>
+                  </View>
+                ))}
+                {busy ? <Text style={styles.mutedText}>{t(lang, 'Thinking…')}</Text> : null}
+              </ScrollView>
+            </View>
+
+            <Divider style={{ marginTop: themeSpacing.sm }} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs, marginTop: themeSpacing.sm }}>
+              <AppInput
+                placeholder={t(lang, 'Ask a question…')}
+                value={input}
+                onChangeText={setInput}
+                style={{ flex: 1 }}
+              />
+              <AppButton label={t(lang, 'Send')} iconName="send-outline" onPress={send} disabled={busy} />
+            </View>
+
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: themeSpacing.sm }}>
+              <AppButton
+                label={mode === 'dark' ? t(lang, 'Light mode') : t(lang, 'Dark mode')}
+                variant="outline"
+                iconName={mode === 'dark' ? 'sunny-outline' : 'moon-outline'}
+                onPress={() => setMode(mode === 'dark' ? 'light' : 'dark')}
+              />
+              <AppButton
+                label={t(lang, 'Payments')}
+                variant="ghost"
+                iconName="card-outline"
+                onPress={() => {
+                  setVisible(false)
+                  navigation.navigate('Payments')
+                }}
+              />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
+    </>
+  )
+}
 
 function payerLabelFromSpaceId(spaceId: string | null | undefined): 'Payer 1' | 'Payer 2' {
   return spaceId === 'personal2' ? 'Payer 2' : 'Payer 1'
@@ -2621,7 +2896,7 @@ function BillsListScreen() {
         >
           <View style={styles.billHeader}>
             <Text style={styles.billSupplier} numberOfLines={1}>
-              {item.supplier || 'Untitled bill'}
+              {item.supplier || tr('Untitled bill')}
             </Text>
             <Text style={styles.billAmount}>{formatAmount(item.amount, item.currency)}</Text>
           </View>
@@ -2643,7 +2918,7 @@ function BillsListScreen() {
               <View style={styles.attachmentPill}>
                 <Ionicons name="document-attach-outline" size={14} color={themeColors.primary} />
                 <Text style={styles.attachmentText}>
-                  {attachments} {attachments === 1 ? 'attachment' : 'attachments'}
+                  {attachments} {tr(attachments === 1 ? 'attachment' : 'attachments')}
                 </Text>
               </View>
             )}
@@ -2652,7 +2927,7 @@ function BillsListScreen() {
           <View style={styles.billMetaRow}>
             <View style={styles.billMetaGroup}>
               <Ionicons name="person-circle-outline" size={16} color="#6B7280" />
-              <Text style={styles.billMetaSecondary}>{space?.name || 'Default space'}</Text>
+              <Text style={styles.billMetaSecondary}>{space?.name || tr('Default space')}</Text>
             </View>
           </View>
 
@@ -2660,7 +2935,7 @@ function BillsListScreen() {
             <View style={styles.billMetaGroup}>
               <Ionicons name="calendar-clear-outline" size={16} color="#6B7280" />
               <Text style={styles.billMetaSecondary}>
-                {dateMode === 'invoice' ? 'Invoice date' : 'Created'}: {formatDisplayDate(trackedDate)}
+                {tr(dateMode === 'invoice' ? 'Invoice date' : 'Created')}: {formatDisplayDate(trackedDate)}
               </Text>
             </View>
           )}
@@ -2673,7 +2948,7 @@ function BillsListScreen() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color={themeColors.primary} />
-        <Text style={styles.mutedText}>Loading space…</Text>
+        <Text style={styles.mutedText}>{tr('Loading space…')}</Text>
       </View>
     )
   }
@@ -2695,9 +2970,9 @@ function BillsListScreen() {
 
         <Surface elevated padded={false} style={styles.filtersCard}>
           <Pressable style={styles.filtersHeader} onPress={() => setFiltersExpanded((prev) => !prev)} hitSlop={8}>
-            <Text style={styles.sectionTitle}>Filters</Text>
+            <Text style={styles.sectionTitle}>{tr('Filters')}</Text>
             <View style={styles.filtersHeaderRight}>
-              <Text style={styles.filtersHeaderLabel}>Filtering by {dateFieldLabels[dateMode].toLowerCase()}</Text>
+              <Text style={styles.filtersHeaderLabel}>{tr('Filtering by {field}', { field: tr(dateFieldLabels[dateMode]).toLowerCase() })}</Text>
               <Badge label={dateFieldLabels[dateMode]} tone="info" />
               <Ionicons name={filtersExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={themeColors.textMuted} />
             </View>
@@ -2739,15 +3014,15 @@ function BillsListScreen() {
               </View>
 
               <View style={styles.dateFilterSection}>
-                <Text style={styles.filterLabel}>Date range</Text>
+                <Text style={styles.filterLabel}>{tr('Date range')}</Text>
                 <View style={styles.dateRow}>
                   <Pressable style={styles.dateButton} onPress={() => openDatePicker('from')} hitSlop={8}>
                     <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-                    <Text style={styles.dateButtonText}>{dateFrom || 'Start date'}</Text>
+                    <Text style={styles.dateButtonText}>{dateFrom || tr('Start date')}</Text>
                   </Pressable>
                   <Pressable style={styles.dateButton} onPress={() => openDatePicker('to')} hitSlop={8}>
                     <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-                    <Text style={styles.dateButtonText}>{dateTo || 'End date'}</Text>
+                    <Text style={styles.dateButtonText}>{dateTo || tr('End date')}</Text>
                   </Pressable>
                 </View>
                 <View style={styles.manualDateRow}>
@@ -2770,19 +3045,19 @@ function BillsListScreen() {
               <View style={styles.filterToggleRow}>
                 <View style={styles.filterToggle}>
                   <Switch value={unpaidOnly} onValueChange={handleUnpaidToggle} />
-                  <Text style={styles.toggleLabel}>Unpaid only</Text>
+                  <Text style={styles.toggleLabel}>{tr('Unpaid only')}</Text>
                 </View>
                 <View style={styles.filterToggle}>
                   <Switch value={overdueOnly} onValueChange={setOverdueOnly} />
-                  <Text style={styles.toggleLabel}>Overdue</Text>
+                  <Text style={styles.toggleLabel}>{tr('Overdue')}</Text>
                 </View>
                 <View style={styles.filterToggle}>
                   <Switch value={hasAttachmentsOnly} onValueChange={setHasAttachmentsOnly} />
-                  <Text style={styles.toggleLabel}>Has attachment</Text>
+                  <Text style={styles.toggleLabel}>{tr('Has attachment')}</Text>
                 </View>
                 <View style={styles.filterToggle}>
                   <Switch value={includeArchived} onValueChange={setIncludeArchived} />
-                  <Text style={styles.toggleLabel}>Include archived</Text>
+                  <Text style={styles.toggleLabel}>{tr('Include archived')}</Text>
                 </View>
               </View>
 
@@ -2821,14 +3096,14 @@ function BillsListScreen() {
 
         <View style={styles.listMetaRow}>
           <Text style={styles.listMetaText}>{resultsLabel}</Text>
-          <Text style={styles.listMetaSecondary}>Tap "Filters" to adjust date, supplier, amount, status, and attachments.</Text>
+          <Text style={styles.listMetaSecondary}>{tr('Tap "Filters" to adjust date, supplier, amount, status, and attachments.')}</Text>
         </View>
 
         <View style={styles.listWrapper}>
           {loadingBills && bills.length === 0 ? (
             <View style={styles.centered}>
               <ActivityIndicator size="large" color={themeColors.primary} />
-              <Text style={styles.mutedText}>Loading bills…</Text>
+              <Text style={styles.mutedText}>{tr('Loading bills…')}</Text>
             </View>
           ) : (
             <FlatList
@@ -2851,7 +3126,7 @@ function BillsListScreen() {
       {isIOS && iosPickerVisible && (
         <View style={styles.iosPickerOverlay}>
           <Surface elevated style={styles.iosPickerSheet}>
-            <Text style={styles.filterLabel}>Select date</Text>
+            <Text style={styles.filterLabel}>{tr('Select date')}</Text>
             <DateTimePicker
               mode="date"
               display="inline"
@@ -2876,6 +3151,8 @@ function HomeScreen() {
   const { space, spaceId, loading } = useActiveSpace()
   const spacesCtx = useSpacesContext()
   const { snapshot: entitlements } = useEntitlements()
+  const { mode, setMode, colors } = useTheme()
+  const { lang, setLang } = useLangContext()
   const [summary, setSummary] = useState<{ totalUnpaid: number; overdueCount: number; nextDueDate: string | null } | null>(null)
 
   const [payerNameDraft, setPayerNameDraft] = useState('')
@@ -3023,7 +3300,7 @@ function HomeScreen() {
       <Screen scroll={false}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={themeColors.primary} />
-          <Text style={styles.mutedText}>Preparing your workspace…</Text>
+          <Text style={styles.mutedText}>{t(lang, 'Preparing your workspace…')}</Text>
         </View>
       </Screen>
     )
@@ -3056,8 +3333,60 @@ function HomeScreen() {
                 {payerLabelFromSpaceId(space?.id)} • {planLabel(entitlements.plan)}
               </Text>
             </View>
-            {space?.plan === 'free' ? (
-              <View style={styles.screenHeaderTrailing}>
+            <View style={[styles.screenHeaderTrailing, { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs }]}>
+              <TouchableOpacity
+                onPress={() => setMode(mode === 'dark' ? 'light' : 'dark')}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 19,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderWidth: StyleSheet.hairlineWidth,
+                  borderColor: colors.border,
+                  backgroundColor: colors.surface,
+                }}
+                accessibilityLabel="Toggle dark mode"
+              >
+                <Ionicons name={mode === 'dark' ? 'sunny-outline' : 'moon-outline'} size={18} color={colors.text} />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => {
+                  const options: { code: Lang; label: string }[] = [
+                    { code: 'sl', label: 'Slovenščina' },
+                    { code: 'en', label: 'English' },
+                    { code: 'hr', label: 'Hrvatski' },
+                    { code: 'it', label: 'Italiano' },
+                    { code: 'de', label: 'Deutsch' },
+                  ]
+                  Alert.alert(
+                    'Language',
+                    'Choose language',
+                    options
+                      .map((o) => ({
+                        text: o.label + (lang === o.code ? ' ✓' : ''),
+                        onPress: () => setLang(o.code),
+                      }))
+                      .concat([{ text: 'Cancel', style: 'cancel' }] as any)
+                  )
+                }}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 19,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderWidth: StyleSheet.hairlineWidth,
+                  borderColor: colors.border,
+                  backgroundColor: colors.surface,
+                }}
+                accessibilityLabel="Change language"
+              >
+                <Ionicons name="language-outline" size={18} color={colors.text} />
+              </TouchableOpacity>
+
+              {space?.plan === 'free' ? (
                 <AppButton
                   label="Upgrade"
                   variant="secondary"
@@ -3073,17 +3402,15 @@ function HomeScreen() {
                     navigation.navigate('Payments')
                   }}
                 />
-              </View>
-            ) : spacesCtx.spaces.length > 1 ? (
-              <View style={styles.screenHeaderTrailing}>
+              ) : spacesCtx.spaces.length > 1 ? (
                 <AppButton
                   label="Switch space"
                   variant="secondary"
                   iconName="swap-horizontal-outline"
                   onPress={() => navigation.navigate('Settings')}
                 />
-              </View>
-            ) : null}
+              ) : null}
+            </View>
           </View>
 
           <View style={{ marginTop: themeSpacing.xs }}>
@@ -3205,6 +3532,15 @@ function HomeScreen() {
           </Surface>
         </View>
       </Modal>
+
+      <AiAssistant
+        context={{
+          screen: 'Home',
+          plan: entitlements.plan,
+          payerId: spacesCtx.current?.id || spaceId || null,
+          payerName: space?.name || null,
+        }}
+      />
     </Screen>
   )
 }
@@ -4572,16 +4908,16 @@ function PayScreen() {
           <SectionHeader title="Payment plan overview" />
           <View style={styles.payOverviewRow}>
             <Surface elevated padded={false} style={[styles.payOverviewCard, { flex: 1 }]}> 
-              <Text style={styles.cardTitle}>Today</Text>
-              <Text style={styles.bodyText}>{groups.today.length} bills</Text>
+              <Text style={styles.cardTitle}>{tr('Today')}</Text>
+              <Text style={styles.bodyText}>{tr('{count} bills', { count: groups.today.length })}</Text>
             </Surface>
             <Surface elevated padded={false} style={[styles.payOverviewCard, { flex: 1 }]}> 
-              <Text style={styles.cardTitle}>This week</Text>
-              <Text style={styles.bodyText}>{groups.thisWeek.length} bills</Text>
+              <Text style={styles.cardTitle}>{tr('This week')}</Text>
+              <Text style={styles.bodyText}>{tr('{count} bills', { count: groups.thisWeek.length })}</Text>
             </Surface>
             <Surface elevated padded={false} style={[styles.payOverviewCard, { flex: 1 }]}> 
-              <Text style={styles.cardTitle}>Later</Text>
-              <Text style={styles.bodyText}>{groups.later.length} bills</Text>
+              <Text style={styles.cardTitle}>{tr('Later')}</Text>
+              <Text style={styles.bodyText}>{tr('{count} bills', { count: groups.later.length })}</Text>
             </Surface>
           </View>
         </Surface>
@@ -4592,6 +4928,7 @@ function PayScreen() {
 
 function PaymentsScreen() {
   const { snapshot: entitlements, refresh: refreshEntitlements } = useEntitlements()
+  const { lang } = useLangContext()
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
 
@@ -4666,16 +5003,20 @@ function PaymentsScreen() {
 
         <Surface elevated>
           <SectionHeader title="Current plan" />
-          <Text style={styles.bodyText}>Your plan: {entitlements.plan.toUpperCase()}</Text>
           <Text style={styles.bodyText}>
-            Payers: {entitlements.payerLimit} • OCR: {entitlements.canUseOCR ? 'enabled' : 'disabled'} • Exports:{' '}
-            {entitlements.exportsEnabled ? 'enabled' : 'disabled'}
+            {tr('Your plan')}: {tr(planLabel(entitlements.plan)).toUpperCase()}
+          </Text>
+          <Text style={styles.bodyText}>
+            {tr('Payers')}: {entitlements.payerLimit} • OCR: {tr(entitlements.canUseOCR ? 'enabled' : 'disabled')} • {tr('Exports')}:{' '}
+            {tr(entitlements.exportsEnabled ? 'enabled' : 'disabled')}
           </Text>
         </Surface>
 
         <Surface elevated>
           <SectionHeader title="Subscription plans" />
-          <Text style={styles.bodyText}>Free: €0 • Basic: €2.20 / month or €20 / year • Pro: €4 / month or €38 / year.</Text>
+          <Text style={styles.bodyText}>
+            {tr('Free')}: €0 • {tr('Basic')}: {tr('€2.20 / month or €20 / year')} • {tr('Pro')}: {tr('€4 / month or €38 / year')}.
+          </Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
             <AppButton
               label="Basic monthly"
@@ -4717,7 +5058,7 @@ function PaymentsScreen() {
           {busy && (
             <View style={{ marginTop: themeSpacing.sm, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <ActivityIndicator />
-              <Text style={styles.mutedText}>Processing payment…</Text>
+              <Text style={styles.mutedText}>{t(lang, 'Processing payment…')}</Text>
             </View>
           )}
           {status ? (
@@ -4737,6 +5078,7 @@ const Stack = createNativeStackNavigator()
 function MainTabs() {
   const insets = useSafeAreaInsets()
   const bottomPadding = Math.max(insets.bottom, 12)
+  const { lang } = useLangContext()
 
   return (
     <Tab.Navigator
@@ -4744,6 +5086,18 @@ function MainTabs() {
         headerShown: false,
         tabBarActiveTintColor: themeColors.primary,
         tabBarInactiveTintColor: '#94A3B8',
+        tabBarLabel: t(
+          lang,
+          (
+            {
+              Home: 'home',
+              Scan: 'scan',
+              Bills: 'bills',
+              Pay: 'pay',
+              Settings: 'settings',
+            } as any
+          )[route.name] || route.name
+        ),
         tabBarStyle: {
           borderTopColor: '#E5E7EB',
           borderTopWidth: StyleSheet.hairlineWidth,
@@ -4778,9 +5132,8 @@ function MainTabs() {
 function SettingsScreen() {
   const supabase = useMemo(() => getSupabase(), [])
   const navigation = useNavigation<any>()
-  const [lang, setLang] = useState<Lang>('en')
-  useEffect(()=>{ (async()=> setLang(await loadLang()))() }, [])
-  async function changeLang(l: Lang) { setLang(l); await saveLang(l) }
+  const { lang, setLang } = useLangContext()
+  function changeLang(l: Lang) { setLang(l) }
   const [notifStatus, setNotifStatus] = useState<string>('')
   useEffect(()=>{ (async()=>{ const p = await Notifications.getPermissionsAsync(); setNotifStatus(p.status) })() }, [])
   const spacesCtx = useSpacesContext()
@@ -5086,6 +5439,15 @@ function SettingsScreen() {
           />
         )}
       </View>
+
+      <AiAssistant
+        context={{
+          screen: 'Settings',
+          plan: entitlements.plan,
+          payerId: spacesCtx.current?.id || null,
+          payerName: space?.name || null,
+        }}
+      />
     </Screen>
   )
 }
@@ -5187,16 +5549,20 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
     content = (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#2b6cb0" />
-          <Text style={{ marginTop: 8 }}>Preparing payers…</Text>
+          <Text style={{ marginTop: 8 }}>{t(lang, 'Preparing payers…')}</Text>
       </View>
     )
   } else {
     content = (
-      <NavigationContainer ref={navRef}>
+      <NavigationContainer
+        ref={navRef}
+        onReady={() => setUpgradeNavigation(navRef.current as any)}
+        onStateChange={() => setUpgradeNavigation(navRef.current as any)}
+      >
         <Stack.Navigator>
           {!loggedIn ? (
             <Stack.Screen name="Login" options={{ headerShown: coerceBool(false) }}>
-              {() => <LoginScreen onLoggedIn={()=>setLoggedIn(true)} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} />}
+              {() => <LoginScreen onLoggedIn={()=>setLoggedIn(true)} lang={lang} setLang={setLang} />}
             </Stack.Screen>
           ) : (
             <>
@@ -5215,7 +5581,17 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
     )
   }
 
-  return content
+  return <LangContext.Provider value={{ lang, setLang }}>{content}</LangContext.Provider>
+}
+
+function ThemedAppShell({ children }: { children: React.ReactNode }) {
+  const { mode } = useTheme()
+  return (
+    <SafeAreaView style={{ flex: 1 }}>
+      <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
+      {children}
+    </SafeAreaView>
+  )
 }
 
 export default function App() {
@@ -5224,6 +5600,10 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true)
   const [lang, setLang] = useState<Lang>('en')
   useEffect(()=>{ (async()=> setLang(await loadLang()))() }, [])
+  const setLangAndPersist = useCallback((l: Lang) => {
+    setLang(l)
+    void saveLang(l)
+  }, [])
   useEffect(() => {
     let mounted = true
     if (!supabase) {
@@ -5294,14 +5674,15 @@ export default function App() {
     return () => { sub && Notifications.removeNotificationSubscription(sub) }
   })() }, [])
   return (
-    <EntitlementsProvider supabase={supabase}>
-      <SpaceProvider>
-        <SafeAreaView style={{ flex: 1 }}>
-          <StatusBar style="dark" />
-          <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={(l)=>{ setLang(l); saveLang(l) }} authLoading={authLoading} />
-        </SafeAreaView>
-      </SpaceProvider>
-    </EntitlementsProvider>
+    <ThemeProvider>
+      <EntitlementsProvider supabase={supabase}>
+        <SpaceProvider>
+          <ThemedAppShell>
+            <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={setLangAndPersist} authLoading={authLoading} />
+          </ThemedAppShell>
+        </SpaceProvider>
+      </EntitlementsProvider>
+    </ThemeProvider>
   )
 }
 

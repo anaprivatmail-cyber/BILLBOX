@@ -18,6 +18,7 @@
     },
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.anaplus.billboxmobile",
       "infoPlist": {
         "NSCameraUsageDescription": "This app uses the camera to scan QR codes and capture invoice photos for OCR.",
         "NSPhotoLibraryUsageDescription": "This app needs access to your photo library to select invoice images for OCR.",
@@ -25,6 +26,8 @@
       }
     },
     "android": {
+      "package": "com.anaplus.billboxmobile",
+      "versionCode": 28,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"

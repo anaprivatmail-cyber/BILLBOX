@@ -12,7 +12,7 @@
     "build": "npm --workspace apps/web run build",
     "lint": "eslint .",
     "preview": "npm --workspace apps/web run preview",
-    "mobile:start": "npm --workspace apps/mobile run start",
+    "mobile:start": "npm --prefix billbox-mobile run start",
     "mobile:tunnel": "npm --prefix billbox-mobile run start -- --tunnel"
   },
   "workspaces": [

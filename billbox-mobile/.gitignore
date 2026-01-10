@@ -33,6 +33,11 @@ yarn-error.*
 # local env files
 .env*.local
 
+# i18n tooling outputs
+tools/i18n-phrases.json
+tools/i18n-coverage.json
+tools/missing-phrases.txt
+
 # typescript
 *.tsbuildinfo
 

@@ -5,6 +5,10 @@ billbox-mobile/.env
 apps/**/.env
 packages/**/.env
 
+# Local build artifacts / tools
+VERZIJA */
+tools/
+
 # Node & Expo
 node_modules/
 dist/
