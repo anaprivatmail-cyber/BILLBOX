@@ -3,7 +3,7 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, FlatList, RefreshControl, StyleSheet, Text as RNText, Button, View, Platform, Linking, Image, Switch, ActivityIndicator, Pressable, KeyboardAvoidingView, TextInput, ScrollView, TouchableOpacity, Modal, Animated, PanResponder } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import { NavigationContainer, useFocusEffect, useNavigation, useRoute, NavigationContainerRef } from '@react-navigation/native'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
@@ -5814,15 +5814,17 @@ export default function App() {
     return () => { sub && Notifications.removeNotificationSubscription(sub) }
   })() }, [])
   return (
-    <ThemeProvider>
-      <EntitlementsProvider supabase={supabase}>
-        <SpaceProvider>
-          <ThemedAppShell>
-            <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={setLangAndPersist} authLoading={authLoading} />
-          </ThemedAppShell>
-        </SpaceProvider>
-      </EntitlementsProvider>
-    </ThemeProvider>
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <EntitlementsProvider supabase={supabase}>
+          <SpaceProvider>
+            <ThemedAppShell>
+              <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={setLangAndPersist} authLoading={authLoading} />
+            </ThemedAppShell>
+          </SpaceProvider>
+        </EntitlementsProvider>
+      </ThemeProvider>
+    </SafeAreaProvider>
   )
 }
 
