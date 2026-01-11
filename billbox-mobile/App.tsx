@@ -2061,15 +2061,28 @@ function ScanBillScreen() {
       const s = getSupabase()
       if (entitlements.plan === 'free') {
         try {
+          const now = new Date()
+          const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+          const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1)
           let currentCount = 0
           if (s) {
-            const { data } = await s.from('bills').select('id')
+            let q = s
+              .from('bills')
+              .select('created_at')
+              .gte('created_at', monthStart.toISOString())
+              .lt('created_at', nextMonthStart.toISOString())
+            if (spaceId) q = q.eq('space_id', spaceId)
+            const { data } = await q
             currentCount = Array.isArray(data) ? data.length : 0
           } else {
             const locals = await loadLocalBills(spaceId)
-            currentCount = Array.isArray(locals) ? locals.length : 0
+            currentCount = (Array.isArray(locals) ? locals : []).filter((b) => {
+              const created = b?.created_at ? new Date(b.created_at) : null
+              if (!created || Number.isNaN(created.getTime())) return false
+              return created >= monthStart && created < nextMonthStart
+            }).length
           }
-          if (currentCount >= 15) {
+          if (currentCount >= 10) {
             showUpgradeAlert('bills_limit')
             setSaving(false)
             return
@@ -2957,171 +2970,169 @@ function BillsListScreen() {
 
   return (
     <Screen scroll={false}>
-      <View style={styles.pageStack}>
-        <SectionHeader title="Bills" />
+      <FlatList
+        style={{ flex: 1 }}
+        data={loadingBills && bills.length === 0 ? [] : filteredBills}
+        keyExtractor={(item) => item.id}
+        renderItem={renderBillItem}
+        contentContainerStyle={[styles.listContent, { paddingBottom: listBottomPadding }]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadBills(true)} />}
+        ListHeaderComponent={
+          <View style={[styles.pageStack, { paddingBottom: themeSpacing.sm }]}>
+            <SectionHeader title="Bills" />
 
-        {!supabase && (
-          <InlineInfo
-            tone="warning"
-            iconName="cloud-offline-outline"
-            message="Cloud sync is disabled. Bills are stored locally until you connect Supabase."
-          />
-        )}
-
-        <Surface elevated padded={false} style={styles.filtersCard}>
-          <Pressable style={styles.filtersHeader} onPress={() => setFiltersExpanded((prev) => !prev)} hitSlop={8}>
-            <Text style={styles.sectionTitle}>{tr('Filters')}</Text>
-            <View style={styles.filtersHeaderRight}>
-              <Text style={styles.filtersHeaderLabel}>{tr('Filtering by {field}', { field: tr(dateFieldLabels[dateMode]).toLowerCase() })}</Text>
-              <Badge label={dateFieldLabels[dateMode]} tone="info" />
-              <Ionicons name={filtersExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={themeColors.textMuted} />
-            </View>
-          </Pressable>
-
-          {filtersExpanded && (
-            <View style={styles.filtersBody}>
-              <SegmentedControl
-                value={dateMode}
-                onChange={(value) => setDateMode(value as typeof dateMode)}
-                options={[
-                  { value: 'due', label: 'Due' },
-                  { value: 'invoice', label: 'Invoice' },
-                  { value: 'created', label: 'Created' },
-                ]}
+            {!supabase && (
+              <InlineInfo
+                tone="warning"
+                iconName="cloud-offline-outline"
+                message="Cloud sync is disabled. Bills are stored locally until you connect Supabase."
               />
+            )}
 
-              <AppInput
-                placeholder="Supplier"
-                value={supplierQuery}
-                onChangeText={setSupplierQuery}
+            <Surface elevated padded={false} style={styles.filtersCard}>
+              <Pressable style={styles.filtersHeader} onPress={() => setFiltersExpanded((prev) => !prev)} hitSlop={8}>
+                <Text style={styles.sectionTitle}>{tr('Filters')}</Text>
+                <View style={styles.filtersHeaderRight}>
+                  <Text style={styles.filtersHeaderLabel}>{tr('Filtering by {field}', { field: tr(dateFieldLabels[dateMode]).toLowerCase() })}</Text>
+                  <Badge label={dateFieldLabels[dateMode]} tone="info" />
+                  <Ionicons name={filtersExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={themeColors.textMuted} />
+                </View>
+              </Pressable>
+
+              {filtersExpanded && (
+                <View style={styles.filtersBody}>
+                  <SegmentedControl
+                    value={dateMode}
+                    onChange={(value) => setDateMode(value as typeof dateMode)}
+                    options={[
+                      { value: 'due', label: 'Due' },
+                      { value: 'invoice', label: 'Invoice' },
+                      { value: 'created', label: 'Created' },
+                    ]}
+                  />
+
+                  <AppInput
+                    placeholder="Supplier"
+                    value={supplierQuery}
+                    onChangeText={setSupplierQuery}
+                  />
+
+                  <View style={styles.filterRow}>
+                    <AppInput
+                      placeholder="Min amount"
+                      keyboardType="numeric"
+                      value={amountMin}
+                      onChangeText={setAmountMin}
+                      style={styles.flex1}
+                    />
+                    <AppInput
+                      placeholder="Max amount"
+                      keyboardType="numeric"
+                      value={amountMax}
+                      onChangeText={setAmountMax}
+                      style={styles.flex1}
+                    />
+                  </View>
+
+                  <View style={styles.dateFilterSection}>
+                    <Text style={styles.filterLabel}>{tr('Date range')}</Text>
+                    <View style={styles.dateRow}>
+                      <Pressable style={styles.dateButton} onPress={() => openDatePicker('from')} hitSlop={8}>
+                        <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
+                        <Text style={styles.dateButtonText}>{dateFrom || tr('Start date')}</Text>
+                      </Pressable>
+                      <Pressable style={styles.dateButton} onPress={() => openDatePicker('to')} hitSlop={8}>
+                        <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
+                        <Text style={styles.dateButtonText}>{dateTo || tr('End date')}</Text>
+                      </Pressable>
+                    </View>
+                    <View style={styles.manualDateRow}>
+                      <AppInput
+                        placeholder="YYYY-MM-DD"
+                        value={dateFrom}
+                        onChangeText={setDateFrom}
+                        style={styles.flex1}
+                        hint="Manual entry optional"
+                      />
+                      <AppInput
+                        placeholder="YYYY-MM-DD"
+                        value={dateTo}
+                        onChangeText={setDateTo}
+                        style={styles.flex1}
+                      />
+                    </View>
+                  </View>
+
+                  <View style={styles.filterToggleRow}>
+                    <View style={styles.filterToggle}>
+                      <Switch value={unpaidOnly} onValueChange={handleUnpaidToggle} />
+                      <Text style={styles.toggleLabel}>{tr('Unpaid only')}</Text>
+                    </View>
+                    <View style={styles.filterToggle}>
+                      <Switch value={overdueOnly} onValueChange={setOverdueOnly} />
+                      <Text style={styles.toggleLabel}>{tr('Overdue')}</Text>
+                    </View>
+                    <View style={styles.filterToggle}>
+                      <Switch value={hasAttachmentsOnly} onValueChange={setHasAttachmentsOnly} />
+                      <Text style={styles.toggleLabel}>{tr('Has attachment')}</Text>
+                    </View>
+                    <View style={styles.filterToggle}>
+                      <Switch value={includeArchived} onValueChange={setIncludeArchived} />
+                      <Text style={styles.toggleLabel}>{tr('Include archived')}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.filtersFooter}>
+                    <AppButton
+                      label="Clear filters"
+                      variant="ghost"
+                      iconName="refresh-outline"
+                      onPress={resetFilters}
+                    />
+                  </View>
+                </View>
+              )}
+            </Surface>
+
+            <SegmentedControl
+              value={statusFilter}
+              onChange={handleStatusChange}
+              options={[
+                { value: 'all', label: 'All' },
+                { value: 'unpaid', label: 'Unpaid' },
+                { value: 'paid', label: 'Paid' },
+                { value: 'archived', label: 'Archived' },
+              ]}
+            />
+
+            <View style={styles.billsPrimaryActionsRow}>
+              <View style={styles.flex1} />
+              <AppButton
+                label="Add bill"
+                iconName="add-outline"
+                variant="secondary"
+                onPress={() => navigation.navigate('Scan')}
               />
-
-              <View style={styles.filterRow}>
-                <AppInput
-                  placeholder="Min amount"
-                  keyboardType="numeric"
-                  value={amountMin}
-                  onChangeText={setAmountMin}
-                  style={styles.flex1}
-                />
-                <AppInput
-                  placeholder="Max amount"
-                  keyboardType="numeric"
-                  value={amountMax}
-                  onChangeText={setAmountMax}
-                  style={styles.flex1}
-                />
-              </View>
-
-              <View style={styles.dateFilterSection}>
-                <Text style={styles.filterLabel}>{tr('Date range')}</Text>
-                <View style={styles.dateRow}>
-                  <Pressable style={styles.dateButton} onPress={() => openDatePicker('from')} hitSlop={8}>
-                    <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-                    <Text style={styles.dateButtonText}>{dateFrom || tr('Start date')}</Text>
-                  </Pressable>
-                  <Pressable style={styles.dateButton} onPress={() => openDatePicker('to')} hitSlop={8}>
-                    <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-                    <Text style={styles.dateButtonText}>{dateTo || tr('End date')}</Text>
-                  </Pressable>
-                </View>
-                <View style={styles.manualDateRow}>
-                  <AppInput
-                    placeholder="YYYY-MM-DD"
-                    value={dateFrom}
-                    onChangeText={setDateFrom}
-                    style={styles.flex1}
-                    hint="Manual entry optional"
-                  />
-                  <AppInput
-                    placeholder="YYYY-MM-DD"
-                    value={dateTo}
-                    onChangeText={setDateTo}
-                    style={styles.flex1}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.filterToggleRow}>
-                <View style={styles.filterToggle}>
-                  <Switch value={unpaidOnly} onValueChange={handleUnpaidToggle} />
-                  <Text style={styles.toggleLabel}>{tr('Unpaid only')}</Text>
-                </View>
-                <View style={styles.filterToggle}>
-                  <Switch value={overdueOnly} onValueChange={setOverdueOnly} />
-                  <Text style={styles.toggleLabel}>{tr('Overdue')}</Text>
-                </View>
-                <View style={styles.filterToggle}>
-                  <Switch value={hasAttachmentsOnly} onValueChange={setHasAttachmentsOnly} />
-                  <Text style={styles.toggleLabel}>{tr('Has attachment')}</Text>
-                </View>
-                <View style={styles.filterToggle}>
-                  <Switch value={includeArchived} onValueChange={setIncludeArchived} />
-                  <Text style={styles.toggleLabel}>{tr('Include archived')}</Text>
-                </View>
-              </View>
-
-              <View style={styles.filtersFooter}>
-                <AppButton
-                  label="Clear filters"
-                  variant="ghost"
-                  iconName="refresh-outline"
-                  onPress={resetFilters}
-                />
-              </View>
             </View>
-          )}
-        </Surface>
 
-        <SegmentedControl
-          value={statusFilter}
-          onChange={handleStatusChange}
-          options={[
-            { value: 'all', label: 'All' },
-            { value: 'unpaid', label: 'Unpaid' },
-            { value: 'paid', label: 'Paid' },
-            { value: 'archived', label: 'Archived' },
-          ]}
-        />
-
-        <View style={styles.billsPrimaryActionsRow}>
-          <View style={styles.flex1} />
-          <AppButton
-            label="Add bill"
-            iconName="add-outline"
-            variant="secondary"
-            onPress={() => navigation.navigate('Scan')}
-          />
-        </View>
-
-        <View style={styles.listMetaRow}>
-          <Text style={styles.listMetaText}>{resultsLabel}</Text>
-          <Text style={styles.listMetaSecondary}>{tr('Tap "Filters" to adjust date, supplier, amount, status, and attachments.')}</Text>
-        </View>
-
-        <View style={styles.listWrapper}>
-          {loadingBills && bills.length === 0 ? (
+            <View style={styles.listMetaRow}>
+              <Text style={styles.listMetaText}>{resultsLabel}</Text>
+              <Text style={styles.listMetaSecondary}>{tr('Tap "Filters" to adjust date, supplier, amount, status, and attachments.')}</Text>
+            </View>
+          </View>
+        }
+        ListEmptyComponent={
+          loadingBills && bills.length === 0 ? (
             <View style={styles.centered}>
               <ActivityIndicator size="large" color={themeColors.primary} />
               <Text style={styles.mutedText}>{tr('Loading bills…')}</Text>
             </View>
           ) : (
-            <FlatList
-              data={filteredBills}
-              keyExtractor={(item) => item.id}
-              renderItem={renderBillItem}
-              contentContainerStyle={[
-                styles.listContent,
-                { paddingBottom: listBottomPadding },
-                filteredBills.length === 0 && styles.emptyListContent,
-              ]}
-              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadBills(true)} />}
-              ListEmptyComponent={renderEmpty}
-              showsVerticalScrollIndicator={false}
-            />
-          )}
-        </View>
-      </View>
+            renderEmpty
+          )
+        }
+        showsVerticalScrollIndicator={false}
+      />
 
       {isIOS && iosPickerVisible && (
         <View style={styles.iosPickerOverlay}>
@@ -4149,6 +4160,8 @@ function ReportsScreen() {
   const navigation = useNavigation<any>()
   const [bills, setBills] = useState<Bill[]>([])
   const [range, setRange] = useState<{ start: string; end: string }>({ start: new Date(new Date().getFullYear(),0,1).toISOString().slice(0,10), end: new Date().toISOString().slice(0,10) })
+  const [exportBusy, setExportBusy] = useState(false)
+  const [exportBusyLabel, setExportBusyLabel] = useState<string>('')
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const effectiveSpaceId = spaceId || space?.id || 'default'
   const { snapshot: entitlements } = useEntitlements()
@@ -4412,6 +4425,82 @@ function ExportsScreen() {
     return value.replace(/[^a-z0-9._-]/gi, '_') || 'attachment'
   }
 
+  async function callExportFunction(
+    fnName: 'export-pdf' | 'export-zip',
+    payload: any,
+    busyLabel: string,
+  ): Promise<{ url: string; filename: string; contentType: string; sizeBytes: number } | null> {
+    const base = getFunctionsBase()
+    const s = getSupabase()
+    if (!base) {
+      Alert.alert('Export', 'Export is unavailable (missing server configuration).')
+      return null
+    }
+    if (!s) {
+      Alert.alert('Export', 'Exports require an online account.')
+      return null
+    }
+
+    setExportBusy(true)
+    setExportBusyLabel(busyLabel)
+    try {
+      const { data } = await s.auth.getSession()
+      const token = data?.session?.access_token
+      if (!token) {
+        Alert.alert('Export', 'Please sign in again.')
+        return null
+      }
+
+      const resp = await fetch(`${base}/.netlify/functions/${fnName}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload || {}),
+      })
+      const json = await resp.json().catch(() => null)
+
+      if (resp.status === 401) {
+        Alert.alert('Export', 'Please sign in again.')
+        return null
+      }
+      if (resp.status === 403) {
+        showUpgradeAlert('export')
+        return null
+      }
+      if (!resp.ok || !json?.ok || !json?.url) {
+        Alert.alert('Export', 'Pri izvozu je prišlo do napake. Poskusi znova.')
+        return null
+      }
+
+      return {
+        url: String(json.url),
+        filename: String(json.filename || 'billbox-export'),
+        contentType: String(json.contentType || 'application/octet-stream'),
+        sizeBytes: Number(json.sizeBytes || 0),
+      }
+    } catch {
+      Alert.alert('Export', 'Pri izvozu je prišlo do napake. Poskusi znova.')
+      return null
+    } finally {
+      setExportBusy(false)
+      setExportBusyLabel('')
+    }
+  }
+
+  async function downloadAndShare(url: string, filename: string, mimeType: string) {
+    try {
+      const safe = filename.replace(/[^a-z0-9._-]/gi, '_') || 'billbox-export'
+      const localPath = `${FileSystem.cacheDirectory}${safe}`
+      await FileSystem.downloadAsync(url, localPath)
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(localPath, { mimeType, dialogTitle: 'Share export' })
+      } else {
+        Alert.alert('Export ready', localPath)
+      }
+    } catch {
+      Alert.alert('Export', 'Pri izvozu je prišlo do napake. Poskusi znova.')
+    }
+  }
+
   async function exportJSONRange() {
     if (entitlements.plan === 'basic' || entitlements.plan === 'pro' || entitlements.plan === 'free') {
       // allowed
@@ -4543,13 +4632,26 @@ function ExportsScreen() {
       showUpgradeAlert('export')
       return
     }
-    const itemsHtml = filtered
-      .map((b) => `<tr><td>${b.supplier}</td><td>${b.currency} ${b.amount.toFixed(2)}</td><td>${b.due_date}</td><td>${b.status}</td></tr>`)
-      .join('')
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>BillBox Export</title><style>table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:6px}</style></head><body><h1>BillBox Export</h1><p>Range: ${range.start} → ${range.end}</p><p>Status: ${status}</p><table><thead><tr><th>Supplier</th><th>Amount</th><th>Due</th><th>Status</th></tr></thead><tbody>${itemsHtml}</tbody></table></body></html>`
-    const { uri } = await Print.printToFileAsync({ html })
-    if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri)
-    else Alert.alert('PDF saved', uri)
+    const res = await callExportFunction(
+      'export-pdf',
+      {
+        kind: 'range',
+        spaceId,
+        filters: {
+          start: range.start,
+          end: range.end,
+          dateMode,
+          supplierQuery,
+          amountMin,
+          amountMax,
+          hasAttachmentsOnly,
+          status,
+        },
+      },
+      'Preparing PDF…'
+    )
+    if (!res) return
+    await downloadAndShare(res.url, res.filename, res.contentType)
   }
 
   async function exportPDFSingle(bill: Bill) {
@@ -4557,11 +4659,17 @@ function ExportsScreen() {
       showUpgradeAlert('export')
       return
     }
-    const warranty = warrantyByBillId.get(bill.id) || null
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Bill</title><style>body{font-family:-apple-system,system-ui}h1{margin:0 0 8px 0}p{margin:4px 0}</style></head><body><h1>${bill.supplier}</h1><p>Amount: ${bill.currency} ${bill.amount.toFixed(2)}</p><p>Due: ${bill.due_date}</p><p>Status: ${bill.status}</p>${bill.iban ? `<p>IBAN: ${bill.iban}</p>` : ''}${bill.reference ? `<p>Reference: ${bill.reference}</p>` : ''}${bill.purpose ? `<p>Purpose: ${bill.purpose}</p>` : ''}${warranty ? `<hr/><h2>Linked warranty</h2><p>${warranty.item_name}</p><p>Expires: ${warranty.expires_at || '—'}</p>` : ''}</body></html>`
-    const { uri } = await Print.printToFileAsync({ html })
-    if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri)
-    else Alert.alert('PDF saved', uri)
+    const res = await callExportFunction(
+      'export-pdf',
+      {
+        kind: 'single',
+        spaceId,
+        billId: bill.id,
+      },
+      'Preparing PDF…'
+    )
+    if (!res) return
+    await downloadAndShare(res.url, res.filename, res.contentType)
   }
 
   async function exportAttachmentsZip() {
@@ -4573,82 +4681,25 @@ function ExportsScreen() {
       Alert.alert('No bills in range', 'Adjust the filters to include bills with attachments')
       return
     }
-    const zip = new JSZip()
-    const errors: string[] = []
-
-    for (const bill of filtered) {
-      const year = bill.due_date.slice(0, 4) || 'unknown'
-      const month = bill.due_date.slice(5, 7) || '00'
-      const baseFolder = zip.folder(`${year}/${month}/${sanitizePathSegment(bill.supplier)}`)
-      if (!baseFolder) continue
-
-      try {
-        const billAttachments = supabase
-          ? await listRemoteAttachments(supabase!, 'bills', bill.id, spaceId)
-          : await listLocalAttachments(effectiveSpaceId, 'bills', bill.id)
-        for (const attachment of billAttachments) {
-          try {
-            const name = sanitizePathSegment(attachment.name)
-            if (supabase) {
-              const signedUrl = await getSignedUrl(supabase!, attachment.path)
-              if (!signedUrl) throw new Error('No signed URL')
-              const resp = await fetch(signedUrl)
-              if (!resp.ok) throw new Error(`Download failed (${resp.status})`)
-              const arrayBuffer = await resp.arrayBuffer()
-              baseFolder.file(name, new Uint8Array(arrayBuffer))
-            } else {
-              const sourceUri = attachment.uri || attachment.path
-              if (!sourceUri) throw new Error('Missing file reference')
-              const normalized = sourceUri.startsWith('file://') ? sourceUri : `file://${sourceUri}`
-              const data = await FileSystem.readAsStringAsync(normalized, { encoding: FileSystem.EncodingType.Base64 })
-              baseFolder.file(name, data, { base64: true })
-            }
-          } catch (e: any) {
-            errors.push(`${attachment.name}: ${e?.message || 'failed'}`)
-          }
-        }
-
-        const linkedWarranty = warrantyByBillId.get(bill.id) || null
-        if (linkedWarranty?.id) {
-          const warrantyFolder = baseFolder.folder('warranty')
-          const warrantyAttachments = supabase
-            ? await listRemoteAttachments(supabase!, 'warranties', linkedWarranty.id, spaceId)
-            : await listLocalAttachments(effectiveSpaceId, 'warranties', linkedWarranty.id)
-          for (const attachment of warrantyAttachments) {
-            try {
-              const name = sanitizePathSegment(attachment.name)
-              if (supabase) {
-                const signedUrl = await getSignedUrl(supabase!, attachment.path)
-                if (!signedUrl) throw new Error('No signed URL')
-                const resp = await fetch(signedUrl)
-                if (!resp.ok) throw new Error(`Download failed (${resp.status})`)
-                const arrayBuffer = await resp.arrayBuffer()
-                warrantyFolder?.file(name, new Uint8Array(arrayBuffer))
-              } else {
-                const sourceUri = attachment.uri || attachment.path
-                if (!sourceUri) throw new Error('Missing file reference')
-                const normalized = sourceUri.startsWith('file://') ? sourceUri : `file://${sourceUri}`
-                const data = await FileSystem.readAsStringAsync(normalized, { encoding: FileSystem.EncodingType.Base64 })
-                warrantyFolder?.file(name, data, { base64: true })
-              }
-            } catch (e: any) {
-              errors.push(`${attachment.name}: ${e?.message || 'failed'}`)
-            }
-          }
-        }
-      } catch (e: any) {
-        errors.push(`${bill.supplier}: ${e?.message || 'failed'}`)
-      }
-    }
-
-    const zipContent = await zip.generateAsync({ type: 'base64' })
-    const zipPath = `${FileSystem.cacheDirectory}billbox-attachments.zip`
-    await FileSystem.writeAsStringAsync(zipPath, zipContent, { encoding: FileSystem.EncodingType.Base64 })
-    if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(zipPath, { mimeType: 'application/zip', dialogTitle: 'Share attachments ZIP' })
-    else Alert.alert('ZIP saved', zipPath)
-    if (errors.length) {
-      Alert.alert('Some attachments skipped', errors.slice(0, 5).join('\n'))
-    }
+    const res = await callExportFunction(
+      'export-zip',
+      {
+        spaceId,
+        filters: {
+          start: range.start,
+          end: range.end,
+          dateMode,
+          supplierQuery,
+          amountMin,
+          amountMax,
+          hasAttachmentsOnly,
+          status,
+        },
+      },
+      'Preparing ZIP…'
+    )
+    if (!res) return
+    await downloadAndShare(res.url, res.filename, res.contentType)
   }
 
   if (spaceLoading || !space) {
@@ -4718,11 +4769,17 @@ function ExportsScreen() {
         <Surface elevated>
           <SectionHeader title="Export range" />
           <Text style={styles.bodyText}>Exports include linked warranty files when present.</Text>
+          {exportBusy ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
+              <ActivityIndicator size="small" color={themeColors.primary} />
+              <Text style={styles.mutedText}>{exportBusyLabel || 'Preparing export…'}</Text>
+            </View>
+          ) : null}
           <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-            <AppButton label="Export CSV" variant="secondary" iconName="document-outline" onPress={exportCSV} />
-            <AppButton label="Export PDF report" variant="secondary" iconName="print-outline" onPress={exportPDFRange} />
-            <AppButton label="Export ZIP (attachments)" variant="secondary" iconName="cloud-download-outline" onPress={exportAttachmentsZip} />
-            <AppButton label="Export JSON (backup)" variant="secondary" iconName="code-outline" onPress={exportJSONRange} />
+            <AppButton label="Export CSV" variant="secondary" iconName="document-outline" onPress={exportCSV} disabled={exportBusy} />
+            <AppButton label="Export PDF report" variant="secondary" iconName="print-outline" onPress={exportPDFRange} disabled={exportBusy} />
+            <AppButton label="Export ZIP (attachments)" variant="secondary" iconName="cloud-download-outline" onPress={exportAttachmentsZip} disabled={exportBusy} />
+            <AppButton label="Export JSON (backup)" variant="secondary" iconName="code-outline" onPress={exportJSONRange} disabled={exportBusy} />
           </View>
           <Text style={[styles.mutedText, { marginTop: themeSpacing.sm }]}>Free: JSON only • Basic: CSV + JSON • Pro: CSV + PDF + ZIP + JSON</Text>
         </Surface>
@@ -4745,7 +4802,7 @@ function ExportsScreen() {
                     </View>
                   </View>
                   <View style={styles.billActionsRow}>
-                    <AppButton label="Export PDF" variant="secondary" iconName="print-outline" onPress={() => exportPDFSingle(item)} />
+                    <AppButton label="Export PDF" variant="secondary" iconName="print-outline" onPress={() => exportPDFSingle(item)} disabled={exportBusy} />
                   </View>
                 </Surface>
               )}
@@ -4996,6 +5053,44 @@ function PaymentsScreen() {
     }
   }
 
+  function PlanIcon({ plan }: { plan: PlanId }) {
+    const color = themeColors.primary
+    const size = 16
+    if (plan === 'free') return <Ionicons name="gift-outline" size={size} color={color} />
+    if (plan === 'basic') return <Ionicons name="star-outline" size={size} color={color} />
+    return (
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+        <Ionicons name="star" size={size} color={color} />
+        <Ionicons name="star" size={size} color={color} />
+      </View>
+    )
+  }
+
+  function planFeatures(plan: PlanId): string[] {
+    if (plan === 'pro') {
+      return [
+        '• Unlimited bills + warranties',
+        '• 2 payers',
+        '• 300 OCR / month',
+        '• Export your data',
+      ]
+    }
+    if (plan === 'basic') {
+      return [
+        '• Unlimited bills + warranties',
+        '• 1 payer',
+        '• 100 OCR / month',
+        '• Export your data',
+      ]
+    }
+    return [
+      '• 10 bills / month',
+      '• 1 payer',
+      '• 3 OCR / month',
+      '• No exports',
+    ]
+  }
+
   return (
     <Screen>
       <View style={styles.pageStack}>
@@ -5003,49 +5098,67 @@ function PaymentsScreen() {
 
         <Surface elevated>
           <SectionHeader title="Current plan" />
-          <Text style={styles.bodyText}>
-            {tr('Your plan')}: {tr(planLabel(entitlements.plan)).toUpperCase()}
-          </Text>
-          <Text style={styles.bodyText}>
-            {tr('Payers')}: {entitlements.payerLimit} • OCR: {tr(entitlements.canUseOCR ? 'enabled' : 'disabled')} • {tr('Exports')}:{' '}
-            {tr(entitlements.exportsEnabled ? 'enabled' : 'disabled')}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <PlanIcon plan={entitlements.plan} />
+            <Text style={[styles.cardTitle, { marginBottom: 0 }]}>{tr(planLabel(entitlements.plan))}</Text>
+            <Badge label={entitlements.plan === 'free' ? 'Free' : entitlements.plan === 'basic' ? 'Basic' : 'Pro'} tone="info" />
+          </View>
+          <View style={{ marginTop: themeSpacing.xs, gap: 2 }}>
+            {planFeatures(entitlements.plan).map((line) => (
+              <Text key={line} style={styles.bodyText}>
+                {tr(line)}
+              </Text>
+            ))}
+          </View>
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title="Subscription plans" />
-          <Text style={styles.bodyText}>
-            {tr('Free')}: €0 • {tr('Basic')}: {tr('€2.20 / month or €20 / year')} • {tr('Pro')}: {tr('€4 / month or €38 / year')}.
-          </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
-            <AppButton
-              label="Basic monthly"
-              iconName="card-outline"
-              onPress={() => handleSubscribe('basic', 'monthly')}
-              disabled={busy}
-            />
-            <AppButton
-              label="Basic yearly"
-              variant="secondary"
-              iconName="card-outline"
-              onPress={() => handleSubscribe('basic', 'yearly')}
-              disabled={busy}
-            />
-            <AppButton
-              label="Pro monthly"
-              variant="secondary"
-              iconName="card-outline"
-              onPress={() => handleSubscribe('pro', 'monthly')}
-              disabled={busy}
-            />
-            <AppButton
-              label="Pro yearly"
-              variant="secondary"
-              iconName="card-outline"
-              onPress={() => handleSubscribe('pro', 'yearly')}
-              disabled={busy}
-            />
-          </View>
+          <SectionHeader title="Plans" />
+
+          {(['free', 'basic', 'pro'] as PlanId[]).map((plan) => {
+            const active = entitlements.plan === plan
+            const canPurchase = plan !== 'free'
+            return (
+              <View key={plan} style={[styles.planRow, active && styles.planRowActive, { marginBottom: themeSpacing.sm }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 }}>
+                    <PlanIcon plan={plan} />
+                    <Text style={styles.planRowTitle}>{tr(planLabel(plan))}</Text>
+                  </View>
+                  {active ? <Badge label="Active" tone="success" /> : null}
+                </View>
+
+                <Text style={styles.planRowItem}>{plan === 'free' ? '€0' : planPrice(plan)}</Text>
+
+                <View style={{ marginTop: themeSpacing.xs, gap: 2 }}>
+                  {planFeatures(plan).map((line) => (
+                    <Text key={line} style={styles.planRowItem}>
+                      {tr(line)}
+                    </Text>
+                  ))}
+                </View>
+
+                {canPurchase ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+                    <AppButton
+                      label="Monthly"
+                      iconName="card-outline"
+                      onPress={() => handleSubscribe(plan, 'monthly')}
+                      disabled={busy}
+                    />
+                    <AppButton
+                      label="Yearly"
+                      variant="secondary"
+                      iconName="card-outline"
+                      onPress={() => handleSubscribe(plan, 'yearly')}
+                      disabled={busy}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            )
+          })}
+
           <View style={{ marginTop: themeSpacing.sm }}>
             <AppButton
               label="Restore purchases"

@@ -13,6 +13,16 @@ export const phraseDict = {
     '• Separate data': '• Ločeni podatki',
     '• Two payers on one subscription': '• Dva plačnika na eni naročnini',
     '• Unlimited bills + warranties': '• Neomejeno računov + garancij',
+    upgrade_required_message: 'Za nadaljevanje nadgradi svoj paket.',
+
+    '• 10 bills / month': '• 10 računov / mesec',
+    '• 3 OCR / month': '• 3 OCR / mesec',
+    '• 100 OCR / month': '• 100 OCR / mesec',
+    '• 300 OCR / month': '• 300 OCR / mesec',
+    '• Export your data': '• Izvozi svoje podatke',
+    Plans: 'Paketi',
+    Monthly: 'Mesečno',
+    Yearly: 'Letno',
 
     Active: 'Aktivno',
     'Active payer': 'Aktivni plačnik',
@@ -342,6 +352,15 @@ export const phraseDict = {
     '• Two payers on one subscription': '• Dva platitelja na jednoj pretplati',
     '• Unlimited bills + warranties': '• Neograničeno računa + jamstava',
 
+    '• 10 bills / month': '• 10 računa / mjesec',
+    '• 3 OCR / month': '• 3 OCR / mjesec',
+    '• 100 OCR / month': '• 100 OCR / mjesec',
+    '• 300 OCR / month': '• 300 OCR / mjesec',
+    '• Export your data': '• Izvezi svoje podatke',
+    Plans: 'Paketi',
+    Monthly: 'Mjesečno',
+    Yearly: 'Godišnje',
+
     Active: 'Aktivno',
     'Active payer': 'Aktivni platitelj',
     'Active payer scopes Bills, Scan, Pay, Exports, and Warranties.':
@@ -355,6 +374,7 @@ export const phraseDict = {
     'Add PDF': 'Dodaj PDF',
     'Add warranty': 'Dodaj jamstvo',
     'Adjust the filters to include bills with attachments': 'Prilagodi filtre da uključiš račune s privicima',
+    upgrade_required_message: 'Za nastavak nadogradi plan.',
     'Align the QR code inside the frame. We will extract IBAN, reference, and amount automatically.':
       'Poravnaj QR kod unutar okvira. Automatski ćemo izdvojiti IBAN, poziv na broj i iznos.',
     All: 'Sve',
@@ -667,8 +687,18 @@ export const phraseDict = {
     '• No exports': '• Nessuna esportazione',
     '• Reminders': '• Promemoria',
     '• Separate data': '• Dati separati',
+    upgrade_required_message: 'Per continuare, aggiorna il piano.',
     '• Two payers on one subscription': '• Due pagatori con un abbonamento',
     '• Unlimited bills + warranties': '• Bollette + garanzie illimitate',
+
+    '• 10 bills / month': '• 10 bollette / mese',
+    '• 3 OCR / month': '• 3 OCR / mese',
+    '• 100 OCR / month': '• 100 OCR / mese',
+    '• 300 OCR / month': '• 300 OCR / mese',
+    '• Export your data': '• Esporta i tuoi dati',
+    Plans: 'Piani',
+    Monthly: 'Mensile',
+    Yearly: 'Annuale',
 
     Active: 'Attivo',
     'Active payer': 'Pagatore attivo',
@@ -999,6 +1029,16 @@ export const phraseDict = {
     '• Separate data': '• Getrennte Daten',
     '• Two payers on one subscription': '• Zwei Zahler in einem Abo',
     '• Unlimited bills + warranties': '• Unbegrenzte Rechnungen + Garantien',
+
+    upgrade_required_message: 'Zum Fortfahren bitte Plan upgraden.',
+    '• 10 bills / month': '• 10 Rechnungen / Monat',
+    '• 3 OCR / month': '• 3 OCR / Monat',
+    '• 100 OCR / month': '• 100 OCR / Monat',
+    '• 300 OCR / month': '• 300 OCR / Monat',
+    '• Export your data': '• Daten exportieren',
+    Plans: 'Pakete',
+    Monthly: 'Monatlich',
+    Yearly: 'Jährlich',
 
     Active: 'Aktiv',
     'Active payer': 'Aktiver Zahler',

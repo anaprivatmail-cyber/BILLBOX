@@ -27,7 +27,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 28,
+      "versionCode": 29,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"

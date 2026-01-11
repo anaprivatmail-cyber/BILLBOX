@@ -268,6 +268,7 @@ export async function handler(event) {
 
     // Load entitlements and enforce plan / quota
     let ent
+    let hasEntRow = false
     try {
       const { data, error } = await supabase
         .from('entitlements')
@@ -282,6 +283,7 @@ export async function handler(event) {
         return jsonResponse(403, { ok: false, error: 'ocr_not_allowed', message: 'OCR not available on your plan.' })
       }
 
+      hasEntRow = Boolean(data)
       ent = data || {
         plan: 'free',
         ocr_quota_monthly: null,
@@ -322,10 +324,26 @@ export async function handler(event) {
         // Increment usage (counts as OCR/document extraction)
         try {
           const newUsed = used + 1
-          await supabase
-            .from('entitlements')
-            .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
-            .eq('user_id', userId)
+          if (hasEntRow) {
+            await supabase
+              .from('entitlements')
+              .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+              .eq('user_id', userId)
+          } else {
+            await supabase
+              .from('entitlements')
+              .upsert({
+                user_id: userId,
+                plan: 'free',
+                payer_limit: 1,
+                exports_enabled: false,
+                ocr_quota_monthly: 3,
+                ocr_used_this_month: newUsed,
+                subscription_source: 'free',
+                status: 'active',
+                updated_at: now.toISOString(),
+              }, { onConflict: 'user_id' })
+          }
         } catch {}
 
         const fields0 = extractFields(text)
@@ -400,10 +418,26 @@ export async function handler(event) {
     // Increment OCR usage on success before returning
     try {
       const newUsed = used + 1
-      await supabase
-        .from('entitlements')
-        .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
-        .eq('user_id', userId)
+      if (hasEntRow) {
+        await supabase
+          .from('entitlements')
+          .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+          .eq('user_id', userId)
+      } else {
+        await supabase
+          .from('entitlements')
+          .upsert({
+            user_id: userId,
+            plan: 'free',
+            payer_limit: 1,
+            exports_enabled: false,
+            ocr_quota_monthly: 3,
+            ocr_used_this_month: newUsed,
+            subscription_source: 'free',
+            status: 'active',
+            updated_at: now.toISOString(),
+          }, { onConflict: 'user_id' })
+      }
     } catch {
       // If this fails, we still return success; usage may be slightly off but users are not blocked
     }

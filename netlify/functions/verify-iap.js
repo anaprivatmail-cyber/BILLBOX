@@ -23,10 +23,10 @@ function planConfigFromProduct(productId) {
   if (!id) return null
 
   if (id.includes('pro')) {
-    return { plan: 'pro', payer_limit: 2, ocr_quota_monthly: 100, exports_enabled: true, subscription_source: 'iap_google' }
+    return { plan: 'pro', payer_limit: 2, ocr_quota_monthly: 300, exports_enabled: true, subscription_source: 'iap_google' }
   }
   if (id.includes('basic')) {
-    return { plan: 'basic', payer_limit: 1, ocr_quota_monthly: 20, exports_enabled: true, subscription_source: 'iap_google' }
+    return { plan: 'basic', payer_limit: 1, ocr_quota_monthly: 100, exports_enabled: true, subscription_source: 'iap_google' }
   }
   return null
 }

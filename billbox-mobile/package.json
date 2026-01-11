@@ -17,7 +17,8 @@
     "ios": "expo start --ios",
 
     "preweb": "node tools/i18n-sync.js",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
@@ -47,6 +48,14 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "@types/estree": "^1.0.6",
+    "@types/json-schema": "^7.0.15",
+    "@types/raf": "^3.4.3",
+    "@types/resolve": "^1.20.6",
+    "@types/trusted-types": "^2.0.7",
+    "@types/jest": "^29.5.14",
+    "expo-module-scripts": "^5.0.8",
+    "patch-package": "^8.0.0",
     "typescript": "~5.9.2"
   },
   "private": true
