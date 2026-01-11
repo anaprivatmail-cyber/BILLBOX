@@ -15,7 +15,10 @@
     },
     "preview": {
       "releaseChannel": "preview",
-      "distribution": "internal",
+      "distribution": "store",
+      "android": {
+        "buildType": "app-bundle"
+      },
       "env": {
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
         "EXPO_PUBLIC_SITE_URL": "https://getbillbox.com",
