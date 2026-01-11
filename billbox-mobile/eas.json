@@ -26,6 +26,19 @@
         "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_oxNzCFtl2RQW1lDzBF1UEQ_qvuM8vQq"
       }
     },
+    "preview-apk": {
+      "releaseChannel": "preview",
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
+        "EXPO_PUBLIC_SITE_URL": "https://getbillbox.com",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://wokpzqubsccbpwbkfirz.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_oxNzCFtl2RQW1lDzBF1UEQ_qvuM8vQq"
+      }
+    },
     "production": {
       "autoIncrement": true,
       "env": {

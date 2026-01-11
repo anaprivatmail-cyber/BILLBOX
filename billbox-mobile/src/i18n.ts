@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
+import * as Localization from 'expo-localization'
 
 import { phraseDict } from './i18n.phrases'
 
@@ -683,8 +684,22 @@ export async function loadLang(): Promise<Lang> {
       return val
     }
   } catch {}
-  setCurrentLang('en')
-  return 'en'
+
+  // First run / missing preference: pick a reasonable default from device locale.
+  try {
+    const locale = String(Localization.getLocales?.()?.[0]?.languageCode || Localization.locale || '').toLowerCase()
+    const guessed: Lang =
+      locale.startsWith('sl') ? 'sl' :
+      locale.startsWith('hr') ? 'hr' :
+      locale.startsWith('it') ? 'it' :
+      locale.startsWith('de') ? 'de' :
+      'en'
+    setCurrentLang(guessed)
+    return guessed
+  } catch {
+    setCurrentLang('en')
+    return 'en'
+  }
 }
 
 export async function saveLang(lang: Lang): Promise<void> {

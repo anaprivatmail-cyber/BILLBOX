@@ -5269,6 +5269,21 @@ function SettingsScreen() {
     }
   }, [])
 
+  const diagnostics = useMemo(() => {
+    const functionsBase = getFunctionsBase()
+    const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL as string | undefined) || ''
+    const isExpoGo = IS_EXPO_GO
+    const buildNumber = String((Constants as any)?.nativeBuildVersion || '')
+    const appVersion = String((Constants as any)?.nativeAppVersion || '')
+    return {
+      functionsBase: functionsBase || '(missing)',
+      supabaseUrl: supabaseUrl ? supabaseUrl.replace(/^https?:\/\//, '') : '(missing)',
+      isExpoGo,
+      appVersion: appVersion || '(unknown)',
+      buildNumber: buildNumber || '(unknown)',
+    }
+  }, [])
+
   const saveRename = useCallback(async () => {
     if (!renameTarget) return
     const trimmed = renameDraft.trim()
@@ -5515,6 +5530,18 @@ function SettingsScreen() {
               onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/account-deletion`)}
             />
           </View>
+        </Surface>
+
+        <Surface elevated>
+          <SectionHeader title="Diagnostics" />
+          <Text style={styles.bodyText}>App version: {diagnostics.appVersion}</Text>
+          <Text style={styles.bodyText}>Build: {diagnostics.buildNumber}</Text>
+          <Text style={styles.bodyText}>Expo Go: {diagnostics.isExpoGo ? 'yes' : 'no'}</Text>
+          <Text style={styles.bodyText}>Functions base: {diagnostics.functionsBase}</Text>
+          <Text style={styles.bodyText}>Supabase: {diagnostics.supabaseUrl}</Text>
+          <Text style={styles.mutedText}>
+            If you are not on {tr('slovenian')}, switch it above.
+          </Text>
         </Surface>
 
         <Modal visible={renameVisible} transparent animationType="fade" onRequestClose={() => setRenameVisible(false)}>
