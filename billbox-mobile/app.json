@@ -44,7 +44,13 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "@react-native-community/datetimepicker"
-    ]
+      "@react-native-community/datetimepicker",
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "b201d860-e579-4734-acf9-71594e8d0054"
+      }
+    }
   }
 }
