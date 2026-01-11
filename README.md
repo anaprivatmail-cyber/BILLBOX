@@ -46,6 +46,37 @@ export default defineConfig([
 - Requirements: Node 18+, Expo CLI, EAS account for secrets.
 - Mobile app path: `billbox-mobile/`
 
+### Important: there are TWO “mobile” folders
+
+- ✅ **Production app**: `billbox-mobile/` (package `com.anaplus.billboxmobile`)
+- ❌ **Deprecated stub**: `apps/mobile/` (not used; can look like “nothing changed” if you build it)
+
+If your build has no translations / no packages / AI not working, 90% of the time it is because the build was created from the wrong folder.
+
+**Slovenščina (na kratko):**
+
+- Če buildaš iz napačne mape (npr. `apps/mobile` ali root), dobiš “napačen app” in potem izgleda, kot da ni prevodov/paketov.
+- Če build delaš v brskalniku, mora biti koda prej **pushana na GitHub**. Lokalni commiti brez `git push` v buildu ne bodo.
+
+### Why “browser builds” can look like old code
+
+EAS builds started from the web UI (or from GitHub) build **from what is pushed to GitHub**.
+If you have local commits that are not pushed, the build will NOT contain them.
+
+Quick check:
+
+- Local: `git status -sb` should show `main...origin/main` (no “ahead”)
+- If it says `[ahead N]`, run `tools/push-main.cmd`.
+
+### One safe workflow (recommended)
+
+1) Make changes locally in this repo.
+2) Commit.
+3) Push to GitHub (`tools/push-main.cmd`).
+4) Build **only** from `billbox-mobile/`:
+  - APK (fast install): `tools/build-mobile-apk.cmd`
+  - AAB (store): `tools/build-mobile-aab.cmd`
+
 ### Environment Variables (Expo)
 
 Define these in EAS secrets or `.env` (prefixed `EXPO_PUBLIC_`):
