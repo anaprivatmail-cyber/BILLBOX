@@ -27,7 +27,7 @@ import type { Lang } from './src/i18n'
 import { t, loadLang, saveLang, getCurrentLang } from './src/i18n'
 import type { InboxItem } from './src/inbox'
 import { listInbox, addToInbox, updateInboxItem, removeInboxItem, clearInbox } from './src/inbox'
-import { ensureNotificationConfig, requestPermissionIfNeeded, scheduleBillReminders, cancelBillReminders, snoozeBillReminder, scheduleGroupedPaymentReminder, scheduleWarrantyReminders, cancelWarrantyReminders } from './src/reminders'
+import { ensureNotificationConfig, requestPermissionIfNeeded, scheduleBillReminders, cancelBillReminders, snoozeBillReminder, scheduleGroupedPaymentReminder, scheduleWarrantyReminders, cancelWarrantyReminders, scheduleInboxReviewReminder, cancelInboxReviewReminder } from './src/reminders'
 import { ENABLE_PUSH_NOTIFICATIONS, PUBLIC_SITE_URL, ENABLE_IAP } from './src/env'
 import type { Space, SpacePlan } from './src/spaces'
 import { ensureDefaults as ensureSpacesDefaults, upsertSpace, removeSpace, loadCurrentSpaceId, saveCurrentSpaceId, loadSpaces } from './src/spaces'
@@ -113,11 +113,57 @@ function AiAssistant({ context }: { context: any }) {
   const navigation = useNavigation<any>()
   const { mode, setMode, colors } = useTheme()
   const { lang } = useLangContext()
+  const insets = useSafeAreaInsets()
   const [visible, setVisible] = useState(false)
   const [busy, setBusy] = useState(false)
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<AiChatMessage[]>([])
   const [suggestedActions, setSuggestedActions] = useState<AiSuggestedAction[]>([])
+
+  const bottomBarHeight = 56 + Math.max(insets.bottom, 12)
+
+  const pushLocalTips = useCallback(
+    (seed: number) => {
+      const tipsByScreen: Record<string, { tip: string; action?: AiSuggestedAction }[]> = {
+        Home: [
+          { tip: 'Tip: Use “Scan bill” to capture a payment QR and auto-fill IBAN, reference, and amount.', action: { label: 'Scan bill', route: 'Scan' } },
+          { tip: 'Tip: If you have many bills, use Filters to quickly find overdue or unpaid ones.', action: { label: 'Open Bills', route: 'Bills' } },
+          { tip: 'Tip: Add due dates so reminders can be scheduled automatically.', action: { label: 'Open Bills', route: 'Bills' } },
+        ],
+        Bills: [
+          { tip: 'Tip: Tap Filters to narrow by date range, supplier, amount, status, or attachments.' },
+          { tip: 'Tip: Mark bills as paid to keep your totals accurate.' },
+          { tip: 'Tip: Attach a PDF/photo so you can always find the original later.' },
+        ],
+        Pay: [
+          { tip: 'Tip: Plan payments by selecting upcoming bills and setting a Pay date.' },
+          { tip: 'Tip: Use “Use due date” to quickly set a planning date.' },
+        ],
+        Settings: [
+          { tip: 'Tip: Rename “Profil 1/2” so your workspace is easier to navigate.' },
+          { tip: 'Tip: If something looks untranslated, switch language and back to refresh UI strings.' },
+        ],
+      }
+
+      const screenKey = String(context?.screen || '')
+      const pool = tipsByScreen[screenKey] || tipsByScreen.Home
+      const pick = pool[seed % pool.length]
+      const second = pool[(seed + 1) % pool.length]
+
+      setMessages((prev) =>
+        prev.concat([
+          {
+            id: `a_${Date.now()}`,
+            role: 'assistant',
+            text: `${t(lang, 'Here are a few helpful next steps.')}\n\n${pick.tip}\n${second.tip}`,
+          },
+        ])
+      )
+      const actions = [pick.action, second.action].filter(Boolean) as AiSuggestedAction[]
+      setSuggestedActions(actions.slice(0, 3))
+    },
+    [context?.screen, lang]
+  )
 
   const pan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current
   const panResponder = useMemo(
@@ -141,7 +187,7 @@ function AiAssistant({ context }: { context: any }) {
     async (text: string) => {
       const base = getFunctionsBase()
       if (!base) {
-        Alert.alert(t(lang, 'AI unavailable'), t(lang, 'Missing EXPO_PUBLIC_FUNCTIONS_BASE'))
+        pushLocalTips(Date.now())
         return
       }
 
@@ -153,7 +199,10 @@ function AiAssistant({ context }: { context: any }) {
           body: JSON.stringify({ message: text, context: context || {} }),
         })
         const json = await resp.json().catch(() => null)
-        if (!resp.ok || !json) throw new Error(json?.error || `AI failed (${resp.status})`)
+        if (!resp.ok || !json) {
+          pushLocalTips(Date.now())
+          return
+        }
 
         const assistantText = String(json.message || '').trim() || t(lang, 'Here are a few helpful next steps.')
         const actions = Array.isArray(json.suggestedActions) ? json.suggestedActions : []
@@ -161,20 +210,12 @@ function AiAssistant({ context }: { context: any }) {
         setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: assistantText }]))
         setSuggestedActions(actions.slice(0, 3))
       } catch (e: any) {
-        setMessages((prev) =>
-          prev.concat([
-            {
-              id: `a_${Date.now()}`,
-              role: 'assistant',
-              text: e?.message || t(lang, 'AI request failed.'),
-            },
-          ])
-        )
+        pushLocalTips(Date.now())
       } finally {
         setBusy(false)
       }
     },
-    [context, lang]
+    [context, lang, pushLocalTips]
   )
 
   const open = useCallback(() => {
@@ -201,7 +242,7 @@ function AiAssistant({ context }: { context: any }) {
           {
             position: 'absolute',
             right: themeSpacing.lg,
-            bottom: themeSpacing.lg,
+            bottom: bottomBarHeight + themeSpacing.md,
             transform: pan.getTranslateTransform(),
             zIndex: 50,
           },
@@ -310,8 +351,8 @@ function AiAssistant({ context }: { context: any }) {
   )
 }
 
-function payerLabelFromSpaceId(spaceId: string | null | undefined): 'Payer 1' | 'Payer 2' {
-  return spaceId === 'personal2' ? 'Payer 2' : 'Payer 1'
+function payerLabelFromSpaceId(spaceId: string | null | undefined): 'Profil 1' | 'Profil 2' {
+  return spaceId === 'personal2' ? 'Profil 2' : 'Profil 1'
 }
 
 function isPayerSpaceId(spaceId: string | null | undefined): boolean {
@@ -327,8 +368,8 @@ async function removeAllLocalKeysWithPrefix(prefix: string): Promise<void> {
 }
 
 function planLabel(plan: PlanId): string {
-  if (plan === 'pro') return 'Pro'
-  if (plan === 'basic') return 'Basic'
+  if (plan === 'pro') return 'Več'
+  if (plan === 'basic') return 'Moje'
   return 'Free'
 }
 
@@ -621,6 +662,187 @@ async function deleteWarranty(supabase: SupabaseClient, id: string, _spaceId?: s
 
 // --- Local storage helpers (per-space offline mode) ---
 type LocalBill = Bill & { unsynced?: boolean }
+
+// --- Installment obligations (local-only, per-space) ---
+// Stored locally so it persists across app updates even without Supabase.
+type InstallmentObligation = {
+  id: string
+  created_at: string
+  space_id: string
+  title: string
+  amount: number
+  currency: string
+  start_month: string // YYYY-MM
+  due_day: number // 1-31 (clamped per month)
+  creditor_name?: string | null
+  iban?: string | null
+  reference?: string | null
+  purpose?: string | null
+  end_month?: string | null // YYYY-MM, optional
+}
+
+const LS_INSTALLMENTS_PREFIX = 'billbox.local.installments.'
+
+function installmentsKey(spaceId?: string | null) {
+  return `${LS_INSTALLMENTS_PREFIX}${normalizeSpaceId(spaceId)}`
+}
+
+async function loadLocalInstallments(spaceId?: string | null): Promise<InstallmentObligation[]> {
+  try {
+    const raw = await AsyncStorage.getItem(installmentsKey(spaceId))
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+async function saveLocalInstallments(spaceId: string | null | undefined, items: InstallmentObligation[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(installmentsKey(spaceId), JSON.stringify(items))
+  } catch {}
+}
+
+async function addLocalInstallment(spaceId: string | null | undefined, input: Omit<InstallmentObligation, 'id' | 'created_at' | 'space_id'>): Promise<InstallmentObligation> {
+  const items = await loadLocalInstallments(spaceId)
+  const now = new Date().toISOString()
+  const obligation: InstallmentObligation = {
+    id: `inst_${Math.random().toString(36).slice(2)}`,
+    created_at: now,
+    space_id: normalizeSpaceId(spaceId),
+    ...input,
+  }
+  items.unshift(obligation)
+  await saveLocalInstallments(spaceId, items)
+  return obligation
+}
+
+const INSTALLMENT_BILL_TAG = '#bbx:installment'
+
+function installmentBillMarker(obligationId: string, month: string): string {
+  return `${INSTALLMENT_BILL_TAG}:${obligationId}:${month}`
+}
+
+function isInstallmentBill(bill: Bill): boolean {
+  const hay = `${bill.reference || ''}\n${bill.purpose || ''}`
+  return hay.includes(INSTALLMENT_BILL_TAG)
+}
+
+function monthKeyFromDate(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  return `${y}-${m}`
+}
+
+function addMonthsToYYYYMM(yyyyMm: string, delta: number): string {
+  const parts = yyyyMm.split('-')
+  const y = Number(parts[0])
+  const m = Number(parts[1])
+  if (!y || !m) return yyyyMm
+  const base = new Date(y, m - 1, 1)
+  base.setMonth(base.getMonth() + delta)
+  return monthKeyFromDate(base)
+}
+
+function compareYYYYMM(a: string, b: string): number {
+  return a.localeCompare(b)
+}
+
+function daysInMonth(year: number, month1to12: number): number {
+  return new Date(year, month1to12, 0).getDate()
+}
+
+function dueDateForMonth(yyyyMm: string, dueDay: number): string {
+  const [yRaw, mRaw] = yyyyMm.split('-')
+  const y = Number(yRaw)
+  const m = Number(mRaw)
+  const dim = daysInMonth(y, m)
+  const day = Math.min(Math.max(1, Math.floor(dueDay || 1)), dim)
+  const mm = String(m).padStart(2, '0')
+  const dd = String(day).padStart(2, '0')
+  return `${y}-${mm}-${dd}`
+}
+
+async function ensureInstallmentBills(params: {
+  spaceId: string
+  supabase: SupabaseClient | null
+  existingBills: Bill[]
+  horizonMonths?: number
+}): Promise<Bill[]> {
+  const { spaceId, supabase, existingBills } = params
+  const horizonMonths = Math.max(0, Math.min(24, params.horizonMonths ?? 2))
+  const obligations = await loadLocalInstallments(spaceId)
+  if (!obligations.length) return existingBills
+
+  const nowYm = monthKeyFromDate(new Date())
+
+  const horizon: string[] = []
+  for (let i = 0; i <= horizonMonths; i += 1) horizon.push(addMonthsToYYYYMM(nowYm, i))
+
+  const enumerateRange = (start: string, end: string, limit = 240): string[] => {
+    const out: string[] = []
+    if (!start || !end) return out
+    let cur = start
+    for (let i = 0; i < limit; i += 1) {
+      if (compareYYYYMM(cur, end) > 0) break
+      out.push(cur)
+      cur = addMonthsToYYYYMM(cur, 1)
+    }
+    return out
+  }
+
+  const created: Bill[] = []
+  const hasMarker = (b: Bill, marker: string) => {
+    const hay = `${b.reference || ''}\n${b.purpose || ''}`
+    return hay.includes(marker)
+  }
+
+  for (const ob of obligations) {
+    const months = ob.end_month ? enumerateRange(ob.start_month, ob.end_month) : horizon
+    for (const ym of months) {
+      if (compareYYYYMM(ym, ob.start_month) < 0) continue
+      if (ob.end_month && compareYYYYMM(ym, ob.end_month) > 0) continue
+
+      const marker = installmentBillMarker(ob.id, ym)
+      const already = existingBills.some((b) => hasMarker(b, marker)) || created.some((b) => hasMarker(b, marker))
+      if (already) continue
+
+      const due = dueDateForMonth(ym, ob.due_day)
+      const purposeLines = [
+        ob.purpose ? String(ob.purpose) : '',
+        `${INSTALLMENT_BILL_TAG}: ${ob.title} (${ym})`,
+        marker,
+      ].filter((x) => String(x || '').trim().length > 0)
+
+      const input: CreateBillInput = {
+        supplier: ob.title,
+        amount: ob.amount,
+        currency: ob.currency || 'EUR',
+        due_date: due,
+        status: 'unpaid',
+        creditor_name: ob.creditor_name || null,
+        iban: ob.iban || null,
+        reference: ob.reference || null,
+        purpose: purposeLines.join('\n'),
+        space_id: spaceId,
+      }
+
+      try {
+        if (supabase) {
+          const { data, error } = await createBill(supabase, input)
+          if (error) throw error
+          if (data) created.push(data)
+        } else {
+          const b = await addLocalBill(spaceId, input)
+          created.push(b as any)
+        }
+      } catch {
+        // Best-effort: skip failures; next refresh can retry.
+      }
+    }
+  }
+
+  return created.length ? existingBills.concat(created) : existingBills
+}
 
 const LS_BILLS_PREFIX = 'billbox.local.bills.'
 
@@ -2162,14 +2384,14 @@ function ScanBillScreen() {
 
         {spacesCtx.spaces.length > 1 ? (
           <Surface elevated>
-            <SectionHeader title="Payer" />
+            <SectionHeader title="Profile" />
             <SegmentedControl
               value={spacesCtx.current?.id || spaceId || ''}
               onChange={(id) => { spacesCtx.setCurrent(id) }}
               options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
               style={{ marginTop: themeSpacing.xs }}
             />
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Bills you save are assigned to the active payer.</Text>
+            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Bills you save are assigned to the active profile.</Text>
           </Surface>
         ) : null}
 
@@ -2471,7 +2693,8 @@ function InboxScreen() {
       if (res.canceled) return
       const file = res.assets?.[0]
       if (!file?.uri) return
-      await addToInbox({ spaceId, uri: file.uri, name: file.name || 'document', mimeType: file.mimeType || undefined })
+      const item = await addToInbox({ spaceId, uri: file.uri, name: file.name || 'document', mimeType: file.mimeType || undefined })
+      await scheduleInboxReviewReminder(item.id, item.name, spaceId)
       await refresh()
       Alert.alert('Inbox', 'Document added to Inbox')
     } catch (e: any) {
@@ -2488,8 +2711,13 @@ function InboxScreen() {
     }
     try {
       setBusy(item.id)
-      const { fields, summary } = await performOCR(item.localPath)
-      await updateInboxItem(spaceId, item.id, { extractedFields: fields, notes: summary, status: 'pending' })
+      const sourceUri = (item as any).localPath || item.uri
+      const { fields, summary } = await performOCR(sourceUri)
+
+      const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
+      await updateInboxItem(spaceId, item.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
+      if (looksLikeBill) await cancelInboxReviewReminder(item.id, spaceId)
+      else await scheduleInboxReviewReminder(item.id, item.name, spaceId)
       await refresh()
       Alert.alert('OCR completed', summary)
     } catch (e: any) {
@@ -2501,7 +2729,8 @@ function InboxScreen() {
 
   async function openItem(item: InboxItem) {
     try {
-      await Linking.openURL(item.localPath)
+      const uri = (item as any).localPath || item.uri
+      await Linking.openURL(uri)
     } catch {
       Alert.alert('Open failed', 'Unable to open this file. You can export it from the Inbox screen.')
     }
@@ -2524,13 +2753,14 @@ function InboxScreen() {
 
   async function archiveItem(item: InboxItem) {
     await updateInboxItem(spaceId, item.id, { status: 'archived' })
+    await cancelInboxReviewReminder(item.id, spaceId)
     await refresh()
   }
 
   async function removeItem(item: InboxItem) {
     Alert.alert('Delete?', 'Remove this inbox item permanently?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: async () => { await removeInboxItem(spaceId, item.id); await refresh() } },
+      { text: 'Delete', style: 'destructive', onPress: async () => { await cancelInboxReviewReminder(item.id, spaceId); await removeInboxItem(spaceId, item.id); await refresh() } },
     ])
   }
 
@@ -2601,6 +2831,7 @@ function BillsListScreen() {
   const navigation = useNavigation<any>()
   const route = useRoute<any>()
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const { snapshot: entitlements } = useEntitlements()
   const insets = useSafeAreaInsets()
   const hasLoadedRef = useRef(false)
 
@@ -2626,6 +2857,20 @@ function BillsListScreen() {
   const [iosPickerVisible, setIosPickerVisible] = useState(false)
   const [iosPickerField, setIosPickerField] = useState<'from' | 'to' | null>(null)
   const [iosPickerValue, setIosPickerValue] = useState(new Date())
+
+  const [installmentVisible, setInstallmentVisible] = useState(false)
+  const [installmentTitle, setInstallmentTitle] = useState('')
+  const [installmentAmount, setInstallmentAmount] = useState('')
+  const [installmentCurrency, setInstallmentCurrency] = useState('EUR')
+  const [installmentStartMonth, setInstallmentStartMonth] = useState(monthKeyFromDate(new Date()))
+  const [installmentDueDay, setInstallmentDueDay] = useState(String(new Date().getDate()))
+  const [installmentCreditor, setInstallmentCreditor] = useState('')
+  const [installmentIban, setInstallmentIban] = useState('')
+  const [installmentReference, setInstallmentReference] = useState('')
+  const [installmentPurpose, setInstallmentPurpose] = useState('')
+  const [installmentMonths, setInstallmentMonths] = useState('')
+  const [installmentEndMonth, setInstallmentEndMonth] = useState('')
+  const [installmentSaving, setInstallmentSaving] = useState(false)
 
   const dateFieldLabels: Record<typeof dateMode, string> = {
     due: 'Due date',
@@ -2677,10 +2922,22 @@ function BillsListScreen() {
       if (supabase) {
         const { data, error } = await listBills(supabase, spaceId)
         if (error) throw error
-        setBills(data || [])
+        let next = (data || []) as Bill[]
+        if (entitlements.plan === 'pro') {
+          next = await ensureInstallmentBills({ spaceId, supabase, existingBills: next, horizonMonths: 2 })
+        } else {
+          next = next.filter((b) => !isInstallmentBill(b))
+        }
+        setBills(next)
       } else {
         const locals = await loadLocalBills(spaceId)
-        setBills((locals as any) || [])
+        let next = ((locals as any) || []) as Bill[]
+        if (entitlements.plan === 'pro') {
+          next = await ensureInstallmentBills({ spaceId, supabase: null, existingBills: next, horizonMonths: 2 })
+        } else {
+          next = next.filter((b) => !isInstallmentBill(b))
+        }
+        setBills(next)
       }
     } catch (e: any) {
       Alert.alert('Bills', e?.message || 'Unable to load bills')
@@ -2688,7 +2945,7 @@ function BillsListScreen() {
       hasLoadedRef.current = true
       silent ? setRefreshing(false) : setLoadingBills(false)
     }
-  }, [spaceLoading, space, supabase, spaceId])
+  }, [spaceLoading, space, supabase, spaceId, entitlements.plan])
 
   useFocusEffect(
     useCallback(() => {
@@ -2696,6 +2953,134 @@ function BillsListScreen() {
       return () => {}
     }, [loadBills])
   )
+
+  const openInstallment = useCallback(() => {
+    setInstallmentTitle('')
+    setInstallmentAmount('')
+    setInstallmentCurrency('EUR')
+    setInstallmentStartMonth(monthKeyFromDate(new Date()))
+    setInstallmentDueDay(String(new Date().getDate()))
+    setInstallmentCreditor('')
+    setInstallmentIban('')
+    setInstallmentReference('')
+    setInstallmentPurpose('')
+    setInstallmentMonths('')
+    setInstallmentEndMonth('')
+    setInstallmentVisible(true)
+  }, [])
+
+  const saveInstallment = useCallback(async () => {
+    if (installmentSaving) return
+
+    if (entitlements.plan !== 'pro') {
+      Alert.alert(
+        tr('Upgrade required'),
+        tr('Installment obligations are available on Več.'),
+        [
+          { text: tr('Cancel'), style: 'cancel' },
+          {
+            text: tr('Upgrade'),
+            onPress: () => {
+              setInstallmentVisible(false)
+              navigation.navigate('Payments', { focusPlan: 'pro' })
+            },
+          },
+        ]
+      )
+      return
+    }
+
+    const title = installmentTitle.trim()
+    if (!title) {
+      Alert.alert(tr('Missing supplier'), tr('Please enter the supplier name.'))
+      return
+    }
+    const amt = Number(String(installmentAmount).replace(',', '.'))
+    if (!Number.isFinite(amt) || amt <= 0) {
+      Alert.alert(tr('Invalid amount'), tr('Please enter a valid amount.'))
+      return
+    }
+
+    const creditor = installmentCreditor.trim()
+    const iban = installmentIban.trim()
+    const reference = installmentReference.trim()
+    const purpose = installmentPurpose.trim()
+    if (!creditor || !iban || !reference || !purpose) {
+      Alert.alert(tr('Missing payment details'), tr('Please fill creditor, IBAN, reference, and purpose.'))
+      return
+    }
+
+    const startMonth = installmentStartMonth.trim()
+    if (!/^\d{4}-\d{2}$/.test(startMonth)) {
+      Alert.alert(tr('Invalid month'), tr('Use YYYY-MM for the start month.'))
+      return
+    }
+
+    let endMonth: string | null = null
+    const endRaw = installmentEndMonth.trim()
+    if (endRaw) {
+      if (!/^\d{4}-\d{2}$/.test(endRaw)) {
+        Alert.alert(tr('Invalid month'), tr('Use YYYY-MM for the end month.'))
+        return
+      }
+      endMonth = endRaw
+    } else {
+      const monthsCount = Math.floor(Number(String(installmentMonths).trim()))
+      if (!Number.isFinite(monthsCount) || monthsCount < 1) {
+        Alert.alert(tr('Missing duration'), tr('Enter number of months or an end month.'))
+        return
+      }
+      endMonth = addMonthsToYYYYMM(startMonth, monthsCount - 1)
+    }
+    if (endMonth && compareYYYYMM(endMonth, startMonth) < 0) {
+      Alert.alert(tr('Invalid month'), tr('End month must be after start month.'))
+      return
+    }
+    const day = Math.floor(Number(String(installmentDueDay).trim()))
+    if (!Number.isFinite(day) || day < 1 || day > 31) {
+      Alert.alert(tr('Invalid day'), tr('Use a day number between 1 and 31.'))
+      return
+    }
+
+    try {
+      setInstallmentSaving(true)
+      await addLocalInstallment(spaceId, {
+        title,
+        amount: amt,
+        currency: (installmentCurrency || 'EUR').trim() || 'EUR',
+        start_month: startMonth,
+        due_day: day,
+        creditor_name: creditor,
+        iban,
+        reference,
+        purpose,
+        end_month: endMonth,
+      })
+
+      await loadBills(true)
+      setInstallmentVisible(false)
+      Alert.alert(tr('Saved'), tr('Installment obligation saved.'))
+    } catch (e: any) {
+      Alert.alert(tr('Save failed'), e?.message || tr('Unable to save.'))
+    } finally {
+      setInstallmentSaving(false)
+    }
+  }, [
+    entitlements.plan,
+    installmentAmount,
+    installmentCreditor,
+    installmentCurrency,
+    installmentDueDay,
+    installmentIban,
+    installmentPurpose,
+    installmentReference,
+    installmentSaving,
+    installmentStartMonth,
+    installmentTitle,
+    loadBills,
+    navigation,
+    spaceId,
+  ])
 
   useEffect(() => {
     const id = (route as any)?.params?.highlightBillId
@@ -3108,6 +3493,12 @@ function BillsListScreen() {
             <View style={styles.billsPrimaryActionsRow}>
               <View style={styles.flex1} />
               <AppButton
+                label={tr('Installments')}
+                iconName="repeat-outline"
+                variant="secondary"
+                onPress={openInstallment}
+              />
+              <AppButton
                 label="Add bill"
                 iconName="add-outline"
                 variant="secondary"
@@ -3153,6 +3544,96 @@ function BillsListScreen() {
           </Surface>
         </View>
       )}
+
+      <Modal visible={installmentVisible} transparent animationType="fade" onRequestClose={() => setInstallmentVisible(false)}>
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={{ width: '100%', maxWidth: 520, alignSelf: 'center' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
+              <Text style={styles.screenHeaderTitle}>{tr('Installment obligation')}</Text>
+              <AppButton label={tr('Close')} variant="ghost" iconName="close-outline" onPress={() => setInstallmentVisible(false)} />
+            </View>
+
+            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>
+              {tr('This creates a monthly bill so it appears in Bills and Pay automatically.')}
+            </Text>
+
+            <Divider style={{ marginTop: themeSpacing.sm }} />
+
+            <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
+              <AppInput placeholder={tr('Supplier')} value={installmentTitle} onChangeText={setInstallmentTitle} />
+              <View style={styles.filterRow}>
+                <AppInput
+                  placeholder={tr('Amount')}
+                  keyboardType="numeric"
+                  value={installmentAmount}
+                  onChangeText={setInstallmentAmount}
+                  style={styles.flex1}
+                />
+                <AppInput
+                  placeholder={tr('Currency')}
+                  value={installmentCurrency}
+                  onChangeText={setInstallmentCurrency}
+                  style={styles.flex1}
+                />
+              </View>
+
+              <View style={styles.filterRow}>
+                <AppInput
+                  placeholder={tr('Start month (YYYY-MM)')}
+                  value={installmentStartMonth}
+                  onChangeText={setInstallmentStartMonth}
+                  style={styles.flex1}
+                />
+                <AppInput
+                  placeholder={tr('Due day (1-31)')}
+                  keyboardType="numeric"
+                  value={installmentDueDay}
+                  onChangeText={setInstallmentDueDay}
+                  style={styles.flex1}
+                />
+              </View>
+
+              <View style={styles.filterRow}>
+                <AppInput
+                  placeholder={tr('Number of months')}
+                  keyboardType="numeric"
+                  value={installmentMonths}
+                  onChangeText={setInstallmentMonths}
+                  style={styles.flex1}
+                />
+                <AppInput
+                  placeholder={tr('End month (YYYY-MM)')}
+                  value={installmentEndMonth}
+                  onChangeText={setInstallmentEndMonth}
+                  style={styles.flex1}
+                />
+              </View>
+              <Text style={styles.mutedText}>{tr('Enter number of months or an end month.')}</Text>
+
+              <Text style={styles.formSectionTitle}>{tr('Payment details')}</Text>
+              <AppInput placeholder={tr('Creditor')} value={installmentCreditor} onChangeText={setInstallmentCreditor} />
+              <AppInput placeholder={tr('IBAN')} value={installmentIban} onChangeText={setInstallmentIban} />
+              <AppInput placeholder={tr('Reference')} value={installmentReference} onChangeText={setInstallmentReference} />
+              <AppInput placeholder={tr('Purpose')} value={installmentPurpose} onChangeText={setInstallmentPurpose} multiline />
+
+              <AppButton
+                label={installmentSaving ? tr('Saving…') : tr('Save')}
+                iconName="save-outline"
+                onPress={saveInstallment}
+                loading={installmentSaving}
+              />
+
+              {entitlements.plan !== 'pro' ? (
+                <InlineInfo
+                  tone="info"
+                  iconName="sparkles-outline"
+                  message={tr('You can enter this, but saving requires Več.')}
+                />
+              ) : null}
+            </View>
+          </Surface>
+        </View>
+      </Modal>
     </Screen>
   )
 }
@@ -3164,15 +3645,16 @@ function HomeScreen() {
   const { snapshot: entitlements } = useEntitlements()
   const { mode, setMode, colors } = useTheme()
   const { lang, setLang } = useLangContext()
+  const insets = useSafeAreaInsets()
   const [summary, setSummary] = useState<{ totalUnpaid: number; overdueCount: number; nextDueDate: string | null } | null>(null)
+
+  const [languagePickerVisible, setLanguagePickerVisible] = useState(false)
 
   const [payerNameDraft, setPayerNameDraft] = useState('')
   const [needsPayerName, setNeedsPayerName] = useState(false)
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
   const [upgradeModalVisible, setUpgradeModalVisible] = useState(false)
-  const [renameVisible, setRenameVisible] = useState(false)
-  const [renameDraft, setRenameDraft] = useState('')
 
   const payerOptions = useMemo(() => {
     const base = spacesCtx.spaces
@@ -3180,8 +3662,8 @@ function HomeScreen() {
       .map((s) => ({ value: s.id, label: payerLabelFromSpaceId(s.id) }))
     if (base.length >= 2) return base
     const second = entitlements.plan === 'pro'
-      ? { value: '__create_payer2__', label: 'Payer 2' }
-      : { value: '__locked_payer2__', label: 'Payer 2' }
+      ? { value: '__create_payer2__', label: 'Profil 2' }
+      : { value: '__locked_payer2__', label: 'Profil 2' }
     return base.concat([second])
   }, [entitlements.plan, spacesCtx.spaces])
 
@@ -3192,17 +3674,24 @@ function HomeScreen() {
       try {
         const key = 'billbox.onboarding.payer1Named'
         const raw = await AsyncStorage.getItem(key)
-        const named = raw === '1'
-        setNeedsPayerName(!named)
-        if (!named) setPayerNameDraft('')
+        void raw
+        const payer1 = spacesCtx.spaces.find((s) => s.id === 'personal') || null
+        const currentName = (payer1?.name || '').trim()
+        const looksDefault = !currentName || currentName.toLowerCase() === 'profil 1'
+        setNeedsPayerName(looksDefault)
+        if (looksDefault) setPayerNameDraft('')
       } catch {}
     })()
-  }, [loading, spaceId, spacesCtx.current])
+  }, [loading, spaceId, spacesCtx.current, spacesCtx.spaces])
 
   const savePayer1Name = useCallback(async () => {
     const trimmed = payerNameDraft.trim()
     if (!trimmed) {
-      Alert.alert('Name required', 'Please enter a name for Payer 1.')
+      Alert.alert(tr('Name required'), tr('Please enter a name for Profil 1.'))
+      return
+    }
+    if (trimmed.toLowerCase() === 'profil 1') {
+      Alert.alert(tr('Name required'), tr('Please choose a custom name (not "Profil 1").'))
       return
     }
     await spacesCtx.rename('personal', trimmed)
@@ -3212,22 +3701,6 @@ function HomeScreen() {
     setNeedsPayerName(false)
   }, [payerNameDraft, spacesCtx])
 
-  const saveRename = useCallback(async () => {
-    const target = spacesCtx.current
-    if (!target) return
-    const trimmed = renameDraft.trim()
-    if (!trimmed) {
-      Alert.alert('Name required', `Please enter a name for ${payerLabelFromSpaceId(target.id)}.`)
-      return
-    }
-    await spacesCtx.rename(target.id, trimmed)
-    if (target.id === 'personal') {
-      try { await AsyncStorage.setItem('billbox.onboarding.payer1Named', '1') } catch {}
-      setNeedsPayerName(false)
-    }
-    setRenameVisible(false)
-  }, [renameDraft, spacesCtx])
-
   const handlePayerChange = useCallback(async (id: string) => {
     if (id === '__locked_payer2__') {
       setUpgradeModalVisible(true)
@@ -3235,7 +3708,7 @@ function HomeScreen() {
     }
     if (id === '__create_payer2__') {
       setCreatingPayer2(true)
-      setPayer2NameDraft('Payer 2')
+      setPayer2NameDraft('Profil 2')
       return
     }
     await spacesCtx.setCurrent(id)
@@ -3244,7 +3717,7 @@ function HomeScreen() {
   const savePayer2 = useCallback(async () => {
     const trimmed = payer2NameDraft.trim()
     if (!trimmed) {
-      Alert.alert('Name required', 'Please enter a name for Payer 2.')
+      Alert.alert(tr('Name required'), tr('Please enter a name for Profil 2.'))
       return
     }
     await spacesCtx.addSpace({
@@ -3318,12 +3791,12 @@ function HomeScreen() {
   }
 
   const tiles = [
-    { label: 'Scan bill', icon: 'scan-outline', description: 'Capture QR codes or import documents.', target: 'Scan' },
-    { label: 'Bills', icon: 'receipt-outline', description: 'Review and manage all bills.', target: 'Bills' },
-    { label: 'Pay', icon: 'card-outline', description: 'Plan and schedule payments.', target: 'Pay' },
-    { label: 'Warranties', icon: 'shield-checkmark-outline', description: 'Track product warranties.', target: 'Warranties' },
-    { label: 'Reports', icon: 'bar-chart-outline', description: 'Analytics and totals.', target: 'Reports' },
-    { label: 'Exports', icon: 'download-outline', description: 'PDF, ZIP, CSV, JSON.', target: 'Exports' },
+    { label: tr('Scan bill'), icon: 'scan-outline', description: tr('Capture QR codes or import documents.'), target: 'Scan' },
+    { label: tr('Bills'), icon: 'receipt-outline', description: tr('Review and manage all bills.'), target: 'Bills' },
+    { label: tr('Pay'), icon: 'card-outline', description: tr('Plan and schedule payments.'), target: 'Pay' },
+    { label: tr('Warranties'), icon: 'shield-checkmark-outline', description: tr('Track product warranties.'), target: 'Warranties' },
+    { label: tr('Reports'), icon: 'bar-chart-outline', description: tr('Analytics and totals.'), target: 'Reports' },
+    { label: tr('Exports'), icon: 'download-outline', description: tr('PDF, ZIP, CSV, JSON.'), target: 'Exports' },
   ]
 
   return (
@@ -3331,18 +3804,14 @@ function HomeScreen() {
       <View style={[styles.pageStack, { gap: themeSpacing.xs }]}>
         <Surface elevated padded={false} style={[styles.card, styles.homeSummaryCard]}>
           <View style={styles.screenHeader}>
-            <View style={styles.screenHeaderText}>
-              <Pressable
-                onPress={() => {
-                  setRenameDraft(space?.name || '')
-                  setRenameVisible(true)
-                }}
-              >
-                <Text style={styles.screenHeaderTitle}>{space?.name || payerLabelFromSpaceId(space?.id)}</Text>
-              </Pressable>
-              <Text style={styles.screenHeaderSubtitle}>
-                {payerLabelFromSpaceId(space?.id)} • {planLabel(entitlements.plan)}
-              </Text>
+            <View style={[styles.screenHeaderText, { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }]}>
+              <Image source={BRAND_WORDMARK} style={styles.wordmarkSettingsHeader} resizeMode="contain" accessibilityLabel="BILLBOX" />
+              <View style={{ flexShrink: 1 }}>
+                <Text style={styles.screenHeaderTitle}>{tr('home')}</Text>
+                <Text style={styles.screenHeaderSubtitle}>
+                  {((space?.name || '').trim() || payerLabelFromSpaceId(space?.id))} • {tr(planLabel(entitlements.plan))}
+                </Text>
+              </View>
             </View>
             <View style={[styles.screenHeaderTrailing, { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs }]}>
               <TouchableOpacity
@@ -3363,25 +3832,7 @@ function HomeScreen() {
               </TouchableOpacity>
 
               <TouchableOpacity
-                onPress={() => {
-                  const options: { code: Lang; label: string }[] = [
-                    { code: 'sl', label: 'Slovenščina' },
-                    { code: 'en', label: 'English' },
-                    { code: 'hr', label: 'Hrvatski' },
-                    { code: 'it', label: 'Italiano' },
-                    { code: 'de', label: 'Deutsch' },
-                  ]
-                  Alert.alert(
-                    'Language',
-                    'Choose language',
-                    options
-                      .map((o) => ({
-                        text: o.label + (lang === o.code ? ' ✓' : ''),
-                        onPress: () => setLang(o.code),
-                      }))
-                      .concat([{ text: 'Cancel', style: 'cancel' }] as any)
-                  )
-                }}
+                onPress={() => setLanguagePickerVisible(true)}
                 style={{
                   width: 38,
                   height: 38,
@@ -3399,14 +3850,16 @@ function HomeScreen() {
 
               {space?.plan === 'free' ? (
                 <AppButton
-                  label="Upgrade"
+                  label={tr('Upgrade')}
                   variant="secondary"
                   iconName="arrow-up-circle-outline"
                   onPress={() => {
                     if (IS_EXPO_GO) {
                       Alert.alert(
-                        'Upgrade',
-                        'Purchases are disabled in Expo Go preview. Use an EAS dev/prod build with EXPO_PUBLIC_ENABLE_IAP=true to enable real in-app purchases.'
+                        tr('Upgrade'),
+                        tr(
+                          'Purchases are disabled in Expo Go preview. Use an EAS dev/prod build with EXPO_PUBLIC_ENABLE_IAP=true to enable real in-app purchases.'
+                        )
                       )
                       return
                     }
@@ -3415,7 +3868,7 @@ function HomeScreen() {
                 />
               ) : spacesCtx.spaces.length > 1 ? (
                 <AppButton
-                  label="Switch space"
+                  label={tr('Switch space')}
                   variant="secondary"
                   iconName="swap-horizontal-outline"
                   onPress={() => navigation.navigate('Settings')}
@@ -3426,24 +3879,18 @@ function HomeScreen() {
 
           <View style={{ marginTop: themeSpacing.xs }}>
             <Text style={styles.mutedText}>
-              Total unpaid: {summary ? `EUR ${summary.totalUnpaid.toFixed(2)}` : '—'}
+              {tr('Total unpaid')}: {summary ? `EUR ${summary.totalUnpaid.toFixed(2)}` : '—'}
             </Text>
             <Text style={styles.mutedText}>
-              Overdue: {summary ? `${summary.overdueCount} bill${summary.overdueCount === 1 ? '' : 's'}` : '—'}
+              {tr('Overdue')}: {summary ? tr('{count} bills', { count: summary.overdueCount }) : '—'}
             </Text>
             <Text style={styles.mutedText}>
-              Next due date: {summary ? (summary.nextDueDate || 'None') : '—'}
+              {tr('Next due date')}: {summary ? (summary.nextDueDate || tr('None')) : '—'}
             </Text>
           </View>
 
           <View style={{ marginTop: themeSpacing.sm }}>
-            <Text style={styles.mutedText}>Active payer</Text>
-
-            <View style={{ marginTop: themeSpacing.xs }}>
-              <Text style={styles.payerNameTitle} numberOfLines={1}>{(space?.name || '').trim() || payerLabelFromSpaceId(space?.id)}</Text>
-              <Text style={styles.payerSlotLabel}>{payerLabelFromSpaceId(space?.id)}</Text>
-            </View>
-
+            <Text style={styles.mutedText}>{tr('Profiles')}</Text>
             <SegmentedControl
               value={spacesCtx.current?.id || spaceId || ''}
               onChange={(id) => { handlePayerChange(id) }}
@@ -3454,24 +3901,24 @@ function HomeScreen() {
             {needsPayerName ? (
               <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
                 <Image source={BRAND_WORDMARK} style={styles.wordmarkOnboarding} resizeMode="contain" accessibilityLabel="BILLBOX" />
-                <Text style={styles.bodyText}>Name your Payer 1 to continue.</Text>
-                <AppInput placeholder="Payer 1 name" value={payerNameDraft} onChangeText={setPayerNameDraft} />
-                <AppButton label="Save" iconName="checkmark-outline" onPress={savePayer1Name} />
+                <Text style={styles.bodyText}>{tr('Please name Profil 1 to continue.')}</Text>
+                <AppInput placeholder={tr('Profil 1 name')} value={payerNameDraft} onChangeText={setPayerNameDraft} />
+                <AppButton label={tr('Save')} iconName="checkmark-outline" onPress={savePayer1Name} />
               </View>
             ) : null}
 
             {creatingPayer2 ? (
               <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-                <Text style={styles.bodyText}>Create Payer 2 (Pro only).</Text>
-                <AppInput placeholder="Payer 2 name" value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
+                <Text style={styles.bodyText}>{tr('Create Profil 2 (Več only).')}</Text>
+                <AppInput placeholder={tr('Profil 2 name')} value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
                 <View style={{ flexDirection: 'row', gap: themeLayout.gap }}>
-                  <AppButton label="Cancel" variant="ghost" onPress={() => setCreatingPayer2(false)} />
-                  <AppButton label="Create" iconName="add-outline" onPress={savePayer2} />
+                  <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setCreatingPayer2(false)} />
+                  <AppButton label={tr('Create Profil 2')} iconName="add-outline" onPress={savePayer2} />
                 </View>
               </View>
             ) : null}
 
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>Active payer scopes Bills, Scan, Pay, Exports, and Warranties.</Text>
+            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>{tr('Active profile scopes Bills, Scan, Pay, Exports, and Warranties.')}</Text>
           </View>
         </Surface>
         <View style={styles.gridWrap}>
@@ -3480,7 +3927,11 @@ function HomeScreen() {
               key={tile.label}
               onPress={() => {
                 if (needsPayerName) {
-                  Alert.alert('Name required', 'Please name Payer 1 to continue.')
+                  Alert.alert(tr('Name required'), tr('Please name Profil 1 to continue.'))
+                  return
+                }
+                if (tile.target === 'Exports' && !entitlements.exportsEnabled) {
+                  showUpgradeAlert('export')
                   return
                 }
                 navigation.navigate(tile.target)
@@ -3502,28 +3953,35 @@ function HomeScreen() {
       </View>
 
       <Modal visible={upgradeModalVisible} transparent animationType="fade" onRequestClose={() => setUpgradeModalVisible(false)}>
-        <View style={styles.iosPickerOverlay}>
+        <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
           <Surface elevated style={styles.iosPickerSheet}>
-            <SectionHeader title="Add a second payer" />
-            <Text style={styles.bodyText}>Payer 2 is available on Pro.</Text>
+            <SectionHeader title={tr('Add a second profile')} />
+            <Text style={styles.bodyText}>{tr('Profil 2 is available on Več.')}</Text>
             <View style={{ gap: themeSpacing.xs, marginTop: themeSpacing.sm }}>
-              <Text style={styles.bodyText}>• Keep personal and business bills separate</Text>
-              <Text style={styles.bodyText}>• Independent exports and reports</Text>
-              <Text style={styles.bodyText}>• Two payers on one subscription</Text>
-              <Text style={styles.mutedText}>Save with yearly billing: Basic saves €{planSavings.basic} • Pro saves €{planSavings.pro}</Text>
+              <Text style={styles.bodyText}>{tr('• Keep personal and business bills separate')}</Text>
+              <Text style={styles.bodyText}>{tr('• Independent exports and reports')}</Text>
+              <Text style={styles.bodyText}>{tr('• Two profiles on one subscription')}</Text>
+              <Text style={styles.mutedText}>
+                {t(lang, 'Save with yearly billing: {planBasic} saves €{basicAmount} • {planPro} saves €{proAmount}', {
+                  planBasic: t(lang, 'Moje'),
+                  planPro: t(lang, 'Več'),
+                  basicAmount: planSavings.basic,
+                  proAmount: planSavings.pro,
+                })}
+              </Text>
             </View>
             <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
-              <AppButton label="Not now" variant="ghost" onPress={() => setUpgradeModalVisible(false)} />
+              <AppButton label={tr('Not now')} variant="ghost" onPress={() => setUpgradeModalVisible(false)} />
               <AppButton
-                label="Upgrade to Pro"
+                label={tr('Upgrade to Več')}
                 iconName="arrow-up-outline"
                 onPress={() => {
                   setUpgradeModalVisible(false)
                   if (IS_EXPO_GO) {
-                    Alert.alert('Upgrade', 'Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.')
+                    Alert.alert(tr('Upgrade'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.'))
                     return
                   }
-                  navigation.navigate('Payments')
+                  navigation.navigate('Payments', { focusPlan: 'pro' })
                 }}
               />
             </View>
@@ -3531,14 +3989,32 @@ function HomeScreen() {
         </View>
       </Modal>
 
-      <Modal visible={renameVisible} transparent animationType="fade" onRequestClose={() => setRenameVisible(false)}>
-        <View style={styles.iosPickerOverlay}>
+      <Modal visible={languagePickerVisible} transparent animationType="slide" onRequestClose={() => setLanguagePickerVisible(false)}>
+        <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
           <Surface elevated style={styles.iosPickerSheet}>
-            <SectionHeader title={`Rename ${payerLabelFromSpaceId(spacesCtx.current?.id)}`} />
-            <AppInput placeholder="New name" value={renameDraft} onChangeText={setRenameDraft} />
+            <SectionHeader title={tr('Language')} />
+            <Text style={styles.bodyText}>{tr('Choose language')}</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+              {([
+                { code: 'sl', label: 'Slovenščina' },
+                { code: 'en', label: 'English' },
+                { code: 'hr', label: 'Hrvatski' },
+                { code: 'it', label: 'Italiano' },
+                { code: 'de', label: 'Deutsch' },
+              ] as { code: Lang; label: string }[]).map((o) => (
+                <AppButton
+                  key={o.code}
+                  label={o.label + (lang === o.code ? ' ✓' : '')}
+                  variant={lang === o.code ? 'primary' : 'secondary'}
+                  onPress={() => {
+                    setLang(o.code)
+                    setLanguagePickerVisible(false)
+                  }}
+                />
+              ))}
+            </View>
             <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
-              <AppButton label="Cancel" variant="ghost" onPress={() => setRenameVisible(false)} />
-              <AppButton label="Save" iconName="checkmark-outline" onPress={saveRename} />
+              <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setLanguagePickerVisible(false)} />
             </View>
           </Surface>
         </View>
@@ -3734,7 +4210,7 @@ function WarrantiesScreen() {
           <SectionHeader title="New warranty" />
           {spacesCtx.spaces.length > 1 ? (
             <View style={{ marginBottom: themeSpacing.sm }}>
-              <Text style={styles.mutedText}>Payer</Text>
+              <Text style={styles.mutedText}>Profile</Text>
               <SegmentedControl
                 value={spacesCtx.current?.id || spaceId || ''}
                 onChange={(id) => { spacesCtx.setCurrent(id) }}
@@ -4056,7 +4532,7 @@ function WarrantyDetailsScreen() {
                 />
               </>
             ) : (
-              <Text style={styles.mutedText}>This warranty is linked to a bill, but it was not found in the current payer.</Text>
+              <Text style={styles.mutedText}>This warranty is linked to a bill, but it was not found in the current profile.</Text>
             )}
           </Surface>
         ) : null}
@@ -4244,7 +4720,7 @@ function ReportsScreen() {
               <InlineInfo
                 tone="info"
                 iconName="sparkles-outline"
-                message="Exports are locked on the Free plan. Upgrade to Basic or Pro to enable CSV, PDF, ZIP, and JSON exports."
+                message="Exports are available on Več. Upgrade to Več to enable CSV, PDF, ZIP, and JSON exports."
               />
             </View>
           ) : null}
@@ -4433,11 +4909,14 @@ function ExportsScreen() {
     const base = getFunctionsBase()
     const s = getSupabase()
     if (!base) {
-      Alert.alert('Export', 'Export is unavailable (missing server configuration).')
+      Alert.alert(
+        t(lang, 'Export'),
+        t(lang, 'Export is unavailable (missing server configuration).'),
+      )
       return null
     }
     if (!s) {
-      Alert.alert('Export', 'Exports require an online account.')
+      Alert.alert(t(lang, 'Export'), t(lang, 'Exports require an online account.'))
       return null
     }
 
@@ -4447,7 +4926,7 @@ function ExportsScreen() {
       const { data } = await s.auth.getSession()
       const token = data?.session?.access_token
       if (!token) {
-        Alert.alert('Export', 'Please sign in again.')
+        Alert.alert(t(lang, 'Export'), t(lang, 'Please sign in again.'))
         return null
       }
 
@@ -4459,7 +4938,7 @@ function ExportsScreen() {
       const json = await resp.json().catch(() => null)
 
       if (resp.status === 401) {
-        Alert.alert('Export', 'Please sign in again.')
+        Alert.alert(t(lang, 'Export'), t(lang, 'Please sign in again.'))
         return null
       }
       if (resp.status === 403) {
@@ -4467,7 +4946,7 @@ function ExportsScreen() {
         return null
       }
       if (!resp.ok || !json?.ok || !json?.url) {
-        Alert.alert('Export', 'Pri izvozu je prišlo do napake. Poskusi znova.')
+        Alert.alert(t(lang, 'Export'), t(lang, 'Export failed. Please try again.'))
         return null
       }
 
@@ -4478,7 +4957,7 @@ function ExportsScreen() {
         sizeBytes: Number(json.sizeBytes || 0),
       }
     } catch {
-      Alert.alert('Export', 'Pri izvozu je prišlo do napake. Poskusi znova.')
+      Alert.alert(t(lang, 'Export'), t(lang, 'Export failed. Please try again.'))
       return null
     } finally {
       setExportBusy(false)
@@ -4492,19 +4971,17 @@ function ExportsScreen() {
       const localPath = `${FileSystem.cacheDirectory}${safe}`
       await FileSystem.downloadAsync(url, localPath)
       if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(localPath, { mimeType, dialogTitle: 'Share export' })
+        await Sharing.shareAsync(localPath, { mimeType, dialogTitle: t(lang, 'Share export') })
       } else {
-        Alert.alert('Export ready', localPath)
+        Alert.alert(t(lang, 'Export ready'), localPath)
       }
     } catch {
-      Alert.alert('Export', 'Pri izvozu je prišlo do napake. Poskusi znova.')
+      Alert.alert(t(lang, 'Export'), t(lang, 'Export failed. Please try again.'))
     }
   }
 
   async function exportJSONRange() {
-    if (entitlements.plan === 'basic' || entitlements.plan === 'pro' || entitlements.plan === 'free') {
-      // allowed
-    } else {
+    if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
       return
     }
@@ -4554,7 +5031,7 @@ function ExportsScreen() {
   }
 
   async function exportCSV() {
-    if (entitlements.plan === 'free') {
+    if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
       return
     }
@@ -4628,7 +5105,7 @@ function ExportsScreen() {
   }
 
   async function exportPDFRange() {
-    if (entitlements.plan !== 'pro') {
+    if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
       return
     }
@@ -4655,7 +5132,7 @@ function ExportsScreen() {
   }
 
   async function exportPDFSingle(bill: Bill) {
-    if (entitlements.plan !== 'pro') {
+    if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
       return
     }
@@ -4673,7 +5150,7 @@ function ExportsScreen() {
   }
 
   async function exportAttachmentsZip() {
-    if (entitlements.plan !== 'pro') {
+    if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
       return
     }
@@ -4761,7 +5238,7 @@ function ExportsScreen() {
                 <AppButton label="Paid" variant={status === 'paid' ? 'secondary' : 'ghost'} onPress={() => setStatus('paid')} />
                 <AppButton label="Archived" variant={status === 'archived' ? 'secondary' : 'ghost'} onPress={() => setStatus('archived')} />
               </View>
-              <Text style={styles.helperText}>Exports are scoped to the active payer and the filters above.</Text>
+              <Text style={styles.helperText}>Exports are scoped to the active profile and the filters above.</Text>
             </View>
           </View>
         </Surface>
@@ -4781,7 +5258,15 @@ function ExportsScreen() {
             <AppButton label="Export ZIP (attachments)" variant="secondary" iconName="cloud-download-outline" onPress={exportAttachmentsZip} disabled={exportBusy} />
             <AppButton label="Export JSON (backup)" variant="secondary" iconName="code-outline" onPress={exportJSONRange} disabled={exportBusy} />
           </View>
-          <Text style={[styles.mutedText, { marginTop: themeSpacing.sm }]}>Free: JSON only • Basic: CSV + JSON • Pro: CSV + PDF + ZIP + JSON</Text>
+          {!entitlements.exportsEnabled ? (
+            <View style={{ marginTop: themeSpacing.sm }}>
+              <InlineInfo
+                tone="info"
+                iconName="sparkles-outline"
+                message="Exports are available on Več (CSV, PDF, ZIP, JSON)."
+              />
+            </View>
+          ) : null}
         </Surface>
 
         <Surface elevated>
@@ -4821,6 +5306,7 @@ function PayScreen() {
   const [planningDate, setPlanningDate] = useState(new Date().toISOString().slice(0,10))
   const [permissionExplained, setPermissionExplained] = useState(false)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const { snapshot: entitlements } = useEntitlements()
   useEffect(() => { (async ()=>{
     if (!permissionExplained) {
       await ensureNotificationConfig()
@@ -4831,8 +5317,26 @@ function PayScreen() {
       setPermissionExplained(true)
     }
     if (spaceLoading || !space) return
-    if (supabase) { const { data } = await listBills(supabase, spaceId); setItems(data) } else { const locals = await loadLocalBills(spaceId); setItems(locals as any) }
-  })() }, [supabase, permissionExplained, spaceLoading, space, spaceId])
+    if (supabase) {
+      const { data } = await listBills(supabase, spaceId)
+      let next = (data || []) as Bill[]
+      if (entitlements.plan === 'pro') {
+        next = await ensureInstallmentBills({ spaceId, supabase, existingBills: next, horizonMonths: 2 })
+      } else {
+        next = next.filter((b) => !isInstallmentBill(b))
+      }
+      setItems(next)
+    } else {
+      const locals = await loadLocalBills(spaceId)
+      let next = (locals as any) as Bill[]
+      if (entitlements.plan === 'pro') {
+        next = await ensureInstallmentBills({ spaceId, supabase: null, existingBills: next, horizonMonths: 2 })
+      } else {
+        next = next.filter((b) => !isInstallmentBill(b))
+      }
+      setItems(next)
+    }
+  })() }, [supabase, permissionExplained, spaceLoading, space, spaceId, entitlements.plan])
   const upcoming = items.filter(b=> b.status==='unpaid').sort((a,b)=> (a.pay_date||a.due_date).localeCompare(b.pay_date||b.due_date))
   const today = new Date().toISOString().slice(0,10)
   const thisWeekEnd = new Date(Date.now()+7*24*3600*1000).toISOString().slice(0,10)
@@ -4842,8 +5346,9 @@ function PayScreen() {
     later: upcoming.filter(b=> (b.pay_date||b.due_date)>thisWeekEnd),
   }
   async function markPaid(b: Bill) {
-    if (supabase) { const { data } = await setBillStatus(supabase!, b.id, 'paid', spaceId); if (data) setItems(prev=>prev.map(x=>x.id===b.id?data:x)) }
-    else { await setLocalBillStatus(spaceId, b.id, 'paid'); setItems(prev=>prev.map((x:any)=>x.id===b.id? { ...x, status: 'paid' }:x)) }
+    const nextStatus: BillStatus = isInstallmentBill(b) ? 'archived' : 'paid'
+    if (supabase) { const { data } = await setBillStatus(supabase!, b.id, nextStatus, spaceId); if (data) setItems(prev=>prev.map(x=>x.id===b.id?data:x)) }
+    else { await setLocalBillStatus(spaceId, b.id, nextStatus); setItems(prev=>prev.map((x:any)=>x.id===b.id? { ...x, status: nextStatus }:x)) }
     await cancelBillReminders(b.id, spaceId)
   }
   async function snooze(b: Bill, days: number) { await snoozeBillReminder({ ...b, space_id: spaceId } as any, days, spaceId) }
@@ -4986,6 +5491,7 @@ function PayScreen() {
 function PaymentsScreen() {
   const { snapshot: entitlements, refresh: refreshEntitlements } = useEntitlements()
   const { lang } = useLangContext()
+  const route = useRoute<any>()
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
 
@@ -5022,37 +5528,6 @@ function PaymentsScreen() {
     }
   }
 
-  async function handleRestore() {
-    if (!iapAvailable) {
-      Alert.alert('Purchases unavailable', 'Purchases are available only in the store build.')
-      return
-    }
-    try {
-      setBusy(true)
-      setStatus(null)
-      const InAppPurchases = await import('expo-in-app-purchases')
-      await InAppPurchases.connectAsync()
-      const { results } = await InAppPurchases.getPurchaseHistoryAsync()
-      const last = Array.isArray(results) && results.length > 0 ? results[0] : null
-      const productId = last?.productId
-      if (!productId) {
-        Alert.alert('No purchases', 'No previous purchases were found for this account.')
-        return
-      }
-      const ok = await verifyIapOnBackend(productId)
-      if (ok) {
-        refreshEntitlements()
-        setStatus('Purchases restored. Your plan is up to date.')
-      } else {
-        Alert.alert('Restore failed', 'We could not restore your purchases. Please try again later.')
-      }
-    } catch (e) {
-      Alert.alert('Restore error', 'Something went wrong while restoring purchases.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   function PlanIcon({ plan }: { plan: PlanId }) {
     const color = themeColors.primary
     const size = 16
@@ -5070,26 +5545,44 @@ function PaymentsScreen() {
     if (plan === 'pro') {
       return [
         '• Unlimited bills + warranties',
-        '• 2 payers',
-        '• 300 OCR / month',
-        '• Export your data',
+        '• 2 profiles',
+        '• Installment obligations (credits/leasing)',
+        '• Import bills from email',
+        '• OCR import (higher limit)',
+        '• Export (CSV / PDF / ZIP / JSON)',
       ]
     }
     if (plan === 'basic') {
       return [
         '• Unlimited bills + warranties',
-        '• 1 payer',
-        '• 100 OCR / month',
-        '• Export your data',
+        '• 1 profile',
+        '• OCR import (higher limit)',
+        '• No exports',
       ]
     }
     return [
       '• 10 bills / month',
-      '• 1 payer',
+      '• 1 profile',
       '• 3 OCR / month',
       '• No exports',
     ]
   }
+
+  const planSavings = useMemo(() => {
+    const basicMonthly = 2.2
+    const basicYearly = 20
+    const proMonthly = 4
+    const proYearly = 38
+    return {
+      basic: Math.max(0, Math.round((basicMonthly * 12 - basicYearly) * 100) / 100),
+      pro: Math.max(0, Math.round((proMonthly * 12 - proYearly) * 100) / 100),
+    }
+  }, [])
+
+  const focusPlan: PlanId | null = useMemo(() => {
+    const raw = route?.params?.focusPlan
+    return raw === 'basic' || raw === 'pro' || raw === 'free' ? raw : null
+  }, [route?.params?.focusPlan])
 
   return (
     <Screen>
@@ -5097,29 +5590,24 @@ function PaymentsScreen() {
         <SectionHeader title="Payments" />
 
         <Surface elevated>
-          <SectionHeader title="Current plan" />
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <PlanIcon plan={entitlements.plan} />
-            <Text style={[styles.cardTitle, { marginBottom: 0 }]}>{tr(planLabel(entitlements.plan))}</Text>
-            <Badge label={entitlements.plan === 'free' ? 'Free' : entitlements.plan === 'basic' ? 'Basic' : 'Pro'} tone="info" />
-          </View>
-          <View style={{ marginTop: themeSpacing.xs, gap: 2 }}>
-            {planFeatures(entitlements.plan).map((line) => (
-              <Text key={line} style={styles.bodyText}>
-                {tr(line)}
-              </Text>
-            ))}
-          </View>
-        </Surface>
+          <SectionHeader title="Subscription plans" />
+          <Text style={styles.mutedText}>{tr('Your plan')}: {tr(planLabel(entitlements.plan))}</Text>
+          {entitlements.plan !== 'pro' ? (
+            <Text style={styles.mutedText}>
+              {entitlements.plan === 'free'
+                ? t(lang, 'Save €{amount} with yearly billing', { amount: planSavings.basic })
+                : t(lang, 'Save €{amount} with yearly billing', { amount: planSavings.pro })}
+            </Text>
+          ) : null}
 
-        <Surface elevated>
-          <SectionHeader title="Plans" />
-
-          {(['free', 'basic', 'pro'] as PlanId[]).map((plan) => {
+          {(['basic', 'pro'] as PlanId[]).map((plan) => {
             const active = entitlements.plan === plan
-            const canPurchase = plan !== 'free'
+            const suggested = focusPlan === plan
             return (
-              <View key={plan} style={[styles.planRow, active && styles.planRowActive, { marginBottom: themeSpacing.sm }]}>
+              <View
+                key={plan}
+                style={[styles.planRow, (active || suggested) && styles.planRowActive, { marginBottom: themeSpacing.sm }]}
+              >
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 }}>
                     <PlanIcon plan={plan} />
@@ -5128,7 +5616,7 @@ function PaymentsScreen() {
                   {active ? <Badge label="Active" tone="success" /> : null}
                 </View>
 
-                <Text style={styles.planRowItem}>{plan === 'free' ? '€0' : planPrice(plan)}</Text>
+                <Text style={styles.planRowItem}>{planPrice(plan)}</Text>
 
                 <View style={{ marginTop: themeSpacing.xs, gap: 2 }}>
                   {planFeatures(plan).map((line) => (
@@ -5138,36 +5626,32 @@ function PaymentsScreen() {
                   ))}
                 </View>
 
-                {canPurchase ? (
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
-                    <AppButton
-                      label="Monthly"
-                      iconName="card-outline"
-                      onPress={() => handleSubscribe(plan, 'monthly')}
-                      disabled={busy}
-                    />
-                    <AppButton
-                      label="Yearly"
-                      variant="secondary"
-                      iconName="card-outline"
-                      onPress={() => handleSubscribe(plan, 'yearly')}
-                      disabled={busy}
-                    />
-                  </View>
-                ) : null}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+                  <AppButton
+                    label="Monthly"
+                    iconName="card-outline"
+                    onPress={() => handleSubscribe(plan, 'monthly')}
+                    disabled={busy}
+                  />
+                  <AppButton
+                    label={
+                      plan === 'basic'
+                        ? t(lang, 'Yearly (save €{amount})', { amount: planSavings.basic })
+                        : t(lang, 'Yearly (save €{amount})', { amount: planSavings.pro })
+                    }
+                    variant="secondary"
+                    iconName="card-outline"
+                    onPress={() => handleSubscribe(plan, 'yearly')}
+                    disabled={busy}
+                  />
+                </View>
+
+                <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>
+                  {t(lang, 'OCR helps extract data from photos/PDFs. Limits reset monthly.')}
+                </Text>
               </View>
             )
           })}
-
-          <View style={{ marginTop: themeSpacing.sm }}>
-            <AppButton
-              label="Restore purchases"
-              variant="outline"
-              iconName="refresh-outline"
-              onPress={handleRestore}
-              disabled={busy}
-            />
-          </View>
           {busy && (
             <View style={{ marginTop: themeSpacing.sm, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <ActivityIndicator />
@@ -5246,6 +5730,7 @@ function SettingsScreen() {
   const supabase = useMemo(() => getSupabase(), [])
   const navigation = useNavigation<any>()
   const { lang, setLang } = useLangContext()
+  const insets = useSafeAreaInsets()
   function changeLang(l: Lang) { setLang(l) }
   const [notifStatus, setNotifStatus] = useState<string>('')
   useEffect(()=>{ (async()=>{ const p = await Notifications.getPermissionsAsync(); setNotifStatus(p.status) })() }, [])
@@ -5302,7 +5787,7 @@ function SettingsScreen() {
   const savePayer2 = useCallback(async () => {
     const trimmed = payer2NameDraft.trim()
     if (!trimmed) {
-      Alert.alert('Name required', 'Please enter a name for Payer 2.')
+      Alert.alert('Name required', 'Please enter a name for Profil 2.')
       return
     }
     await spacesCtx.addSpace({ name: trimmed, kind: 'personal', plan: spacesCtx.current?.plan || 'free' })
@@ -5330,7 +5815,7 @@ function SettingsScreen() {
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title="Payers" />
+          <SectionHeader title="Profiles" />
           {(['personal', 'personal2'] as const).map((id) => {
             const sp = spacesCtx.spaces.find((s) => s.id === id) || null
             const active = spacesCtx.current?.id === id
@@ -5344,11 +5829,11 @@ function SettingsScreen() {
                   style={{ marginBottom: themeSpacing.xs, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}
                 >
                   <Text style={{ fontWeight: '600' }}>{slotLabel}</Text>
-                  <Text style={styles.mutedText}>{locked ? 'Locked (Pro only)' : 'Not created yet'}</Text>
+                  <Text style={styles.mutedText}>{locked ? 'Locked (Več only)' : 'Not created yet'}</Text>
                   <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
                     {locked ? (
                       <AppButton
-                        label="Upgrade to Pro"
+                        label="Upgrade to Več"
                         variant="secondary"
                         iconName="arrow-up-circle-outline"
                         onPress={() => {
@@ -5356,17 +5841,17 @@ function SettingsScreen() {
                             Alert.alert('Upgrade', 'Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.')
                             return
                           }
-                          navigation.navigate('Payments')
+                          navigation.navigate('Payments', { focusPlan: 'pro' })
                         }}
                       />
                     ) : (
                       <AppButton
-                        label="Create Payer 2"
+                        label="Create Profil 2"
                         variant="secondary"
                         iconName="add-outline"
                         onPress={() => {
                           setCreatingPayer2(true)
-                          setPayer2NameDraft('Payer 2')
+                          setPayer2NameDraft('Profil 2')
                         }}
                       />
                     )}
@@ -5414,48 +5899,57 @@ function SettingsScreen() {
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title="Subscription" />
+          <SectionHeader title={tr('Subscription')} />
           <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.xs }}>
             <View style={[styles.planRow, entitlements.plan === 'free' && styles.planRowActive]}>
               <View style={styles.planRowHeader}>
-                <Text style={styles.planRowTitle}>FREE</Text>
-                {entitlements.plan === 'free' ? <Badge label="Active" tone="info" /> : null}
+                <Text style={styles.planRowTitle}>{t(lang, planLabel('free')).toUpperCase()}</Text>
+                {entitlements.plan === 'free' ? <Badge label={tr('Active')} tone="info" /> : null}
               </View>
-              <Text style={styles.planRowItem}>• 1 payer</Text>
-              <Text style={styles.planRowItem}>• Basic scan</Text>
-              <Text style={styles.planRowItem}>• Limited OCR</Text>
-              <Text style={styles.planRowItem}>• No exports</Text>
+              <Text style={styles.planRowItem}>{tr('• 1 profile')}</Text>
+              <Text style={styles.planRowItem}>{tr('• Basic scan')}</Text>
+              <Text style={styles.planRowItem}>{tr('• Limited OCR')}</Text>
+              <Text style={styles.planRowItem}>{tr('• No exports')}</Text>
             </View>
 
             <View style={[styles.planRow, entitlements.plan === 'basic' && styles.planRowActive]}>
               <View style={styles.planRowHeader}>
-                <Text style={styles.planRowTitle}>BASIC</Text>
-                {entitlements.plan === 'basic' ? <Badge label="Active" tone="info" /> : null}
+                <Text style={styles.planRowTitle}>{t(lang, planLabel('basic')).toUpperCase()}</Text>
+                {entitlements.plan === 'basic' ? <Badge label={tr('Active')} tone="info" /> : null}
               </View>
-              <Text style={styles.planRowItem}>• 1 payer</Text>
-              <Text style={styles.planRowItem}>• Unlimited bills + warranties</Text>
-              <Text style={styles.planRowItem}>• Reminders</Text>
-              <Text style={styles.planRowItem}>• CSV + JSON export</Text>
+              <Text style={styles.planRowItem}>{tr('• 1 profile')}</Text>
+              <Text style={styles.planRowItem}>{tr('• Unlimited bills + warranties')}</Text>
+              <Text style={styles.planRowItem}>{tr('• Reminders')}</Text>
+              <Text style={styles.planRowItem}>{tr('• OCR import (higher limit)')}</Text>
+              <Text style={styles.planRowItem}>{tr('• No exports')}</Text>
             </View>
 
             <View style={[styles.planRow, entitlements.plan === 'pro' && styles.planRowActive]}>
               <View style={styles.planRowHeader}>
-                <Text style={styles.planRowTitle}>PRO</Text>
-                {entitlements.plan === 'pro' ? <Badge label="Active" tone="info" /> : null}
+                <Text style={styles.planRowTitle}>{t(lang, planLabel('pro')).toUpperCase()}</Text>
+                {entitlements.plan === 'pro' ? <Badge label={tr('Active')} tone="info" /> : null}
               </View>
-              <Text style={styles.planRowItem}>• 2 payers</Text>
-              <Text style={styles.planRowItem}>• Separate data</Text>
-              <Text style={styles.planRowItem}>• CSV + PDF + ZIP + JSON export</Text>
+              <Text style={styles.planRowItem}>{tr('• 2 profiles')}</Text>
+              <Text style={styles.planRowItem}>{tr('• Separate data')}</Text>
+              <Text style={styles.planRowItem}>{tr('• Import bills from email')}</Text>
+              <Text style={styles.planRowItem}>{tr('• OCR import (higher limit)')}</Text>
+              <Text style={styles.planRowItem}>{tr('• CSV + PDF + ZIP + JSON export')}</Text>
             </View>
 
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, alignItems: 'center' }}>
               <AppButton
-                label={entitlements.plan === 'free' ? 'Upgrade to Basic' : entitlements.plan === 'basic' ? 'Upgrade to Pro' : 'Manage subscription'}
+                label={
+                  entitlements.plan === 'free'
+                    ? tr('Upgrade to Moje')
+                    : entitlements.plan === 'basic'
+                      ? tr('Upgrade to Več')
+                      : tr('Manage subscription')
+                }
                 variant="secondary"
                 iconName="arrow-up-circle-outline"
                 onPress={() => {
                   if (IS_EXPO_GO) {
-                    Alert.alert('Subscription', 'Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.')
+                    Alert.alert(tr('Subscription'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to manage your subscription.'))
                     return
                   }
                   navigation.navigate('Payments')
@@ -5464,8 +5958,8 @@ function SettingsScreen() {
               {entitlements.plan !== 'pro' ? (
                 <Text style={styles.mutedText}>
                   {entitlements.plan === 'free'
-                    ? `Save €${planSavings.basic} with yearly billing`
-                    : `Save €${planSavings.pro} with yearly billing`}
+                    ? t(lang, 'Save €{amount} with yearly billing', { amount: planSavings.basic })
+                    : t(lang, 'Save €{amount} with yearly billing', { amount: planSavings.pro })}
                 </Text>
               ) : null}
             </View>
@@ -5473,7 +5967,7 @@ function SettingsScreen() {
         </Surface>
 
         <Surface elevated style={{ marginTop: themeSpacing.md }}>
-          <SectionHeader title="Language" />
+          <SectionHeader title={tr('Language')} />
           <View style={{ flexDirection: 'row', gap: themeSpacing.sm, flexWrap: 'wrap', marginTop: themeSpacing.xs, paddingBottom: themeSpacing.xs }}>
           {(['sl','en','hr','it','de'] as Lang[]).map(code => (
             <TouchableOpacity key={code} style={[styles.secondaryBtn, { backgroundColor: lang===code? '#2b6cb0':'#00000088' }]} onPress={()=> changeLang(code)}>
@@ -5545,7 +6039,7 @@ function SettingsScreen() {
         </Surface>
 
         <Modal visible={renameVisible} transparent animationType="fade" onRequestClose={() => setRenameVisible(false)}>
-          <View style={styles.iosPickerOverlay}>
+          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
             <Surface elevated style={styles.iosPickerSheet}>
               <SectionHeader title={`Rename ${payerLabelFromSpaceId(renameTarget)}`} />
               <AppInput placeholder="New name" value={renameDraft} onChangeText={setRenameDraft} />
@@ -5558,10 +6052,10 @@ function SettingsScreen() {
         </Modal>
 
         <Modal visible={creatingPayer2} transparent animationType="fade" onRequestClose={() => setCreatingPayer2(false)}>
-          <View style={styles.iosPickerOverlay}>
+          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
             <Surface elevated style={styles.iosPickerSheet}>
-              <SectionHeader title="Create Payer 2" />
-              <AppInput placeholder="Payer 2 name" value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
+              <SectionHeader title="Create Profil 2" />
+              <AppInput placeholder="Profil 2 name" value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
               <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
                 <AppButton label="Cancel" variant="ghost" onPress={() => setCreatingPayer2(false)} />
                 <AppButton label="Create" iconName="add-outline" onPress={savePayer2} />
@@ -5640,12 +6134,27 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
           targetSpaceId = await new Promise<string | null>((resolve) => {
             const buttons = spacesCtx.spaces.map((s) => ({ text: s.name, onPress: () => resolve(s.id) }))
             buttons.push({ text: 'Cancel', style: 'cancel', onPress: () => resolve(null) } as any)
-            Alert.alert('Choose payer', 'Import this file into which payer?', buttons)
+            Alert.alert('Choose profile', 'Import this file into which profile?', buttons)
           })
           if (!targetSpaceId) return
         }
 
         const item = await addToInbox({ spaceId: targetSpaceId, uri: targetUri, name: fileName, mimeType })
+        await scheduleInboxReviewReminder(item.id, item.name, targetSpaceId)
+
+        // Več: attempt OCR automatically for better "email/attachment import" flow.
+        if (entitlements.plan === 'pro' && entitlements.canUseOCR) {
+          try {
+            const sourceUri = (item as any).localPath || item.uri
+            const { fields, summary } = await performOCR(sourceUri)
+            const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
+            await updateInboxItem(targetSpaceId, item.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
+            if (looksLikeBill) await cancelInboxReviewReminder(item.id, targetSpaceId)
+          } catch {
+            // Keep reminder; user can open Inbox and run OCR manually.
+          }
+        }
+
         Alert.alert('Inbox', `${item.name} added to Inbox`) 
         setTimeout(() => {
           navRef.current?.navigate('Inbox', { highlight: item.id })
@@ -5654,7 +6163,7 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
         Alert.alert('Import failed', e?.message || 'Unable to capture document')
       }
     }
-  }, [loading, space, spaceId, spacesCtx.spaces])
+  }, [loading, space, spaceId, spacesCtx.spaces, entitlements.plan, entitlements.canUseOCR])
 
   useEffect(() => {
     lastHandled.current = null
@@ -5689,7 +6198,7 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
     content = (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#2b6cb0" />
-          <Text style={{ marginTop: 8 }}>{t(lang, 'Preparing payers…')}</Text>
+          <Text style={{ marginTop: 8 }}>{t(lang, 'Preparing profiles…')}</Text>
       </View>
     )
   } else {

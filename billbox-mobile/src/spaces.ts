@@ -53,7 +53,7 @@ export async function ensureDefaults(): Promise<{ spaces: Space[]; currentId: st
     spaces = [
       {
         id: 'personal',
-        name: 'Payer 1',
+        name: 'Profil 1',
         kind: 'personal',
         plan: 'free',
         seats: 1,

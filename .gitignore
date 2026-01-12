@@ -9,6 +9,10 @@ packages/**/.env
 VERZIJA */
 tools/
 
+# Android build artifacts (keep out of git)
+*.aab
+android-tools/
+
 # Node & Expo
 node_modules/
 dist/

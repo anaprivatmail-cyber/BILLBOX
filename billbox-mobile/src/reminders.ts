@@ -5,13 +5,17 @@ import * as Notifications from 'expo-notifications'
 export async function ensureNotificationConfig(): Promise<void> {
   try {
     Notifications.setNotificationHandler({
-      handleNotification: async () => ({
+      handleNotification: async (notification) => {
+        const data: any = (notification as any)?.request?.content?.data || {}
+        const playSound = !!data?.playSound
+        return {
         shouldShowAlert: true,
         shouldShowBanner: true,
         shouldShowList: true,
-        shouldPlaySound: false,
+          shouldPlaySound: playSound,
         shouldSetBadge: false,
-      }),
+        }
+      },
     })
   } catch {}
 }
@@ -33,6 +37,10 @@ function billKey(billId: string, spaceId: string | null | undefined) {
 
 function warrantyKey(warrantyId: string, spaceId: string | null | undefined) {
   return `billbox.reminders.warranty.${spaceId || 'default'}.${warrantyId}`
+}
+
+function inboxKey(inboxId: string, spaceId: string | null | undefined) {
+  return `billbox.reminders.inbox.${spaceId || 'default'}.${inboxId}`
 }
 
 async function saveIds(storageKey: string, ids: string[]) {
@@ -182,4 +190,33 @@ export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30,
 
 export async function cancelWarrantyReminders(warrantyId: string, spaceId?: string | null): Promise<void> {
   await cancelIds(warrantyKey(warrantyId, spaceId))
+}
+
+export async function scheduleInboxReviewReminder(inboxId: string, name: string, spaceId?: string | null): Promise<void> {
+  if (!inboxId) return
+  const ok = await requestPermissionIfNeeded()
+  if (!ok) return
+
+  const storageKey = inboxKey(String(inboxId), spaceId)
+  await cancelIds(storageKey)
+
+  try {
+    const id = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Inbox review',
+        body: `${name || 'Document'} needs review. If it is not a bill, delete or archive it.`,
+        data: { inbox_id: inboxId, space_id: spaceId || null, playSound: true },
+        categoryIdentifier: 'inbox',
+      },
+      // Repeating time interval. OS limitations apply; this is best-effort.
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 6 * 60 * 60, repeats: true },
+    })
+    await saveIds(storageKey, [id])
+  } catch {
+    await saveIds(storageKey, [])
+  }
+}
+
+export async function cancelInboxReviewReminder(inboxId: string, spaceId?: string | null): Promise<void> {
+  await cancelIds(inboxKey(String(inboxId), spaceId))
 }

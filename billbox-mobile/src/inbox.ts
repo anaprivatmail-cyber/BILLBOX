@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
+import * as FileSystem from 'expo-file-system'
 
 export type InboxStatus = 'new' | 'pending' | 'processed' | 'archived'
 
@@ -8,6 +9,7 @@ export type InboxItem = {
   spaceId: string
   name: string
   uri: string
+  localPath?: string
   mimeType?: string
   status: InboxStatus
   extractedFields?: any
@@ -45,15 +47,39 @@ export async function addToInbox(input: {
   uri: string
   name: string
   mimeType?: string
+  id?: string
 }): Promise<InboxItem> {
   const items = await load(input.spaceId)
   const now = new Date().toISOString()
+  const safeSpace = String(input.spaceId || 'default')
+  const id = (input.id && String(input.id)) || `inbox_${Math.random().toString(36).slice(2, 10)}`
+  const safeName = String(input.name || 'document').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'document'
+  let localPath: string | undefined
+  try {
+    const base = (FileSystem as any).documentDirectory || (FileSystem as any).cacheDirectory
+    if (base) {
+      const dir = `${base}inbox/${safeSpace}`
+      try { await FileSystem.makeDirectoryAsync(dir, { intermediates: true }) } catch {}
+      const dest = `${dir}/${id}_${safeName}`
+      const from = String(input.uri || '')
+      if (/^https?:\/\//i.test(from)) {
+        const dl = await FileSystem.downloadAsync(from, dest)
+        localPath = dl?.uri || dest
+      } else {
+        await FileSystem.copyAsync({ from, to: dest })
+        localPath = dest
+      }
+    }
+  } catch {
+    localPath = undefined
+  }
   const next: InboxItem = {
-    id: `inbox_${Math.random().toString(36).slice(2, 10)}`,
+    id,
     created_at: now,
-    spaceId: String(input.spaceId || 'default'),
+    spaceId: safeSpace,
     name: input.name || 'document',
     uri: input.uri,
+    localPath: localPath || input.uri,
     mimeType: input.mimeType,
     status: 'new',
   }

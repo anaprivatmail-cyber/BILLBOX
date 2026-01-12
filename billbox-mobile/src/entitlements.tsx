@@ -36,7 +36,7 @@ function snapshotForPlan(plan: PlanId): EntitlementsSnapshot {
     return { plan, payerLimit: 2, canUseOCR: true, exportsEnabled: true }
   }
   if (plan === 'basic') {
-    return { plan, payerLimit: 1, canUseOCR: true, exportsEnabled: true }
+    return { plan, payerLimit: 1, canUseOCR: true, exportsEnabled: false }
   }
   return { ...DEFAULT, plan: 'free' }
 }
@@ -47,8 +47,8 @@ export function setUpgradeNavigation(nav: { navigate: (route: string, params?: a
   navigationRef = nav
 }
 
-export function showUpgradeAlert(reason: 'ocr' | 'export' | 'space_limit' | 'business_space' | 'bills_limit') {
-  void reason
+export function showUpgradeAlert(reason: 'ocr' | 'export' | 'space_limit' | 'business_space' | 'bills_limit' | 'email_import') {
+  const targetPlan: PlanId = reason === 'export' || reason === 'space_limit' || reason === 'business_space' || reason === 'email_import' ? 'pro' : 'basic'
   const lang = getCurrentLang()
   const message = t(lang, 'upgrade_required_message')
 
@@ -58,7 +58,7 @@ export function showUpgradeAlert(reason: 'ocr' | 'export' | 'space_limit' | 'bus
       text: t(lang, 'Upgrade'),
       onPress: () => {
         try {
-          navigationRef?.navigate('Payments')
+          navigationRef?.navigate('Payments', { focusPlan: targetPlan, reason })
         } catch {}
       },
     },
@@ -106,7 +106,7 @@ export function EntitlementsProvider({
       const plan = (String(e.plan || 'free').trim() as PlanId)
       const normalizedPlan: PlanId = plan === 'basic' || plan === 'pro' || plan === 'free' ? plan : 'free'
       const payerLimit = typeof e.payerLimit === 'number' ? e.payerLimit : normalizedPlan === 'pro' ? 2 : 1
-      const exportsEnabled = Boolean(e.exportsEnabled)
+      const exportsEnabled = normalizedPlan === 'pro' ? Boolean(e.exportsEnabled) : false
 
       // Free includes OCR (limited), so canUseOCR stays true.
       return {
