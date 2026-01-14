@@ -6,6 +6,16 @@ import { getCurrentLang, t } from './i18n'
 
 export type PlanId = 'free' | 'basic' | 'pro'
 
+export type UpgradeReason =
+  | 'ocr'
+  | 'export'
+  | 'space_limit'
+  | 'business_space'
+  | 'bills_limit'
+  | 'email_import'
+  | 'profile2'
+  | 'installments'
+
 export type EntitlementsSnapshot = {
   plan: PlanId
   payerLimit: number
@@ -43,12 +53,41 @@ function snapshotForPlan(plan: PlanId): EntitlementsSnapshot {
 
 let navigationRef: { navigate: (route: string, params?: any) => void } | null = null
 
+type UpgradePromptPayload = {
+  reason: UpgradeReason
+  targetPlan: PlanId
+}
+
+let upgradePromptRef: ((payload: UpgradePromptPayload) => void) | null = null
+
 export function setUpgradeNavigation(nav: { navigate: (route: string, params?: any) => void } | null) {
   navigationRef = nav
 }
 
-export function showUpgradeAlert(reason: 'ocr' | 'export' | 'space_limit' | 'business_space' | 'bills_limit' | 'email_import') {
-  const targetPlan: PlanId = reason === 'export' || reason === 'space_limit' || reason === 'business_space' || reason === 'email_import' ? 'pro' : 'basic'
+export function setUpgradePrompt(fn: ((payload: UpgradePromptPayload) => void) | null) {
+  upgradePromptRef = fn
+}
+
+export function showUpgradeAlert(reason: UpgradeReason) {
+  const targetPlan: PlanId =
+    reason === 'export' ||
+    reason === 'space_limit' ||
+    reason === 'business_space' ||
+    reason === 'email_import' ||
+    reason === 'profile2' ||
+    reason === 'installments'
+      ? 'pro'
+      : 'basic'
+
+  if (upgradePromptRef) {
+    try {
+      upgradePromptRef({ reason, targetPlan })
+      return
+    } catch {
+      // Fall through to native alert.
+    }
+  }
+
   const lang = getCurrentLang()
   const message = t(lang, 'upgrade_required_message')
 

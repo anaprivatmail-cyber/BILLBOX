@@ -1,5 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import * as Notifications from 'expo-notifications'
+import { t, getCurrentLang } from './i18n'
+
+function tr(key: string, vars?: any): string {
+  return t(getCurrentLang(), key, vars)
+}
 
 // Keep behaviour predictable for local notifications.
 export async function ensureNotificationConfig(): Promise<void> {
@@ -71,14 +76,26 @@ async function cancelIds(storageKey: string) {
 
 function isoToDate(iso: string): Date | null {
   try {
-    const d = new Date(iso)
+    const raw = String(iso || '').trim()
+    if (!raw) return null
+    // Treat date-only strings as local dates (not UTC midnight).
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const [y, m, d] = raw.split('-').map((p) => Number(p))
+      const out = new Date(y, m - 1, d)
+      return Number.isNaN(out.getTime()) ? null : out
+    }
+    const d = new Date(raw)
     return Number.isNaN(d.getTime()) ? null : d
   } catch {
     return null
   }
 }
 
-export async function scheduleBillReminders(bill: any, daysBefore = [3, 1, 0], spaceId?: string | null): Promise<void> {
+function atLocalHour(day: Date, hour: number): Date {
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, 0, 0, 0)
+}
+
+export async function scheduleBillReminders(bill: any, daysBefore = [3, 0], spaceId?: string | null): Promise<void> {
   if (!bill?.id || !bill?.due_date) return
   const ok = await requestPermissionIfNeeded()
   if (!ok) return
@@ -91,14 +108,18 @@ export async function scheduleBillReminders(bill: any, daysBefore = [3, 1, 0], s
 
   const ids: string[] = []
   for (const days of daysBefore) {
-    const when = new Date(due.getTime() - days * 24 * 3600 * 1000)
+    const day = new Date(due.getTime() - days * 24 * 3600 * 1000)
+    // Make reminders more noticeable at consistent times.
+    // - 3 days before: 10:00
+    // - day-of: 09:00
+    const when = atLocalHour(day, days === 0 ? 9 : 10)
     if (when.getTime() <= Date.now()) continue
     try {
       const id = await Notifications.scheduleNotificationAsync({
         content: {
-          title: 'Bill reminder',
-          body: `${bill.supplier || 'Bill'} is due ${bill.due_date}.`,
-          data: { bill_id: bill.id, space_id: spaceId || null },
+          title: tr('Bill reminder'),
+          body: tr('{supplier} is due {date}.', { supplier: bill.supplier || tr('Bill'), date: bill.due_date }),
+          data: { bill_id: bill.id, space_id: spaceId || null, playSound: days === 0 },
           categoryIdentifier: 'bill',
         },
         trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
@@ -121,8 +142,8 @@ export async function scheduleGroupedPaymentReminder(dateISO: string, count: num
   try {
     await Notifications.scheduleNotificationAsync({
       content: {
-        title: 'Payment plan',
-        body: `You planned payments for ${count} bill(s) on ${dateISO}.`,
+        title: tr('Payment plan'),
+        body: tr('You planned payments for {count} bill(s) on {date}.', { count, date: dateISO }),
         data: { space_id: spaceId || null },
       },
       trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
@@ -142,8 +163,8 @@ export async function snoozeBillReminder(bill: any, days: number, spaceId?: stri
   try {
     const id = await Notifications.scheduleNotificationAsync({
       content: {
-        title: 'Bill snoozed',
-        body: `${bill.supplier || 'Bill'} reminder snoozed for ${days} day(s).`,
+        title: tr('Bill snoozed'),
+        body: tr('{supplier} reminder snoozed for {days} day(s).', { supplier: bill.supplier || tr('Bill'), days }),
         data: { bill_id: bill.id, space_id: spaceId || null },
         categoryIdentifier: 'bill',
       },
@@ -157,7 +178,7 @@ export async function cancelBillReminders(billId: string, spaceId?: string | nul
   await cancelIds(billKey(billId, spaceId))
 }
 
-export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30, 7, 1], spaceId?: string | null): Promise<void> {
+export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30], spaceId?: string | null): Promise<void> {
   if (!warranty?.id || !warranty?.expires_at) return
   const ok = await requestPermissionIfNeeded()
   if (!ok) return
@@ -175,8 +196,8 @@ export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30,
     try {
       const id = await Notifications.scheduleNotificationAsync({
         content: {
-          title: 'Warranty reminder',
-          body: `${warranty.item_name || 'Warranty'} expires ${warranty.expires_at}.`,
+          title: tr('Warranty reminder'),
+          body: tr('{item} expires {date}.', { item: warranty.item_name || tr('Warranty'), date: warranty.expires_at }),
           data: { warranty_id: warranty.id, space_id: spaceId || null },
         },
         trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
@@ -203,8 +224,8 @@ export async function scheduleInboxReviewReminder(inboxId: string, name: string,
   try {
     const id = await Notifications.scheduleNotificationAsync({
       content: {
-        title: 'Inbox review',
-        body: `${name || 'Document'} needs review. If it is not a bill, delete or archive it.`,
+        title: tr('Inbox review'),
+        body: tr('{name} needs review. If it is not a bill, delete or archive it.', { name: name || tr('Document') }),
         data: { inbox_id: inboxId, space_id: spaceId || null, playSound: true },
         categoryIdentifier: 'inbox',
       },

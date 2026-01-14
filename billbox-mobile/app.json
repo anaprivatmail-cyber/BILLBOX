@@ -28,7 +28,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 34,
+      "versionCode": 35,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
@@ -50,33 +50,62 @@
               "host": "import"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         },
         {
           "action": "VIEW",
           "data": [
-            { "scheme": "content", "mimeType": "application/pdf" },
-            { "scheme": "file", "mimeType": "application/pdf" },
-            { "scheme": "content", "mimeType": "image/*" },
-            { "scheme": "file", "mimeType": "image/*" }
+            {
+              "scheme": "content",
+              "mimeType": "application/pdf"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/pdf"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "image/*"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "image/*"
+            }
           ],
-          "category": ["DEFAULT"]
+          "category": [
+            "DEFAULT"
+          ]
         },
         {
           "action": "SEND",
           "data": [
-            { "mimeType": "application/pdf" },
-            { "mimeType": "image/*" }
+            {
+              "mimeType": "application/pdf"
+            },
+            {
+              "mimeType": "image/*"
+            }
           ],
-          "category": ["DEFAULT"]
+          "category": [
+            "DEFAULT"
+          ]
         },
         {
           "action": "SEND_MULTIPLE",
           "data": [
-            { "mimeType": "application/pdf" },
-            { "mimeType": "image/*" }
+            {
+              "mimeType": "application/pdf"
+            },
+            {
+              "mimeType": "image/*"
+            }
           ],
-          "category": ["DEFAULT"]
+          "category": [
+            "DEFAULT"
+          ]
         }
       ]
     },

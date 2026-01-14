@@ -234,19 +234,22 @@ export function InlineInfo({
   tone,
   message,
   iconName,
+  translate = true,
 }: {
   tone: 'info' | 'warning' | 'danger' | 'success'
   message: string
   iconName?: keyof typeof Ionicons.glyphMap
+  translate?: boolean
 }) {
   const colors = useThemeColors()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const bg = tone === 'info' ? '#EFF6FF' : tone === 'warning' ? '#FFFBEB' : tone === 'danger' ? '#FEF2F2' : '#F0FDF4'
   const fg = tone === 'info' ? '#1D4ED8' : tone === 'warning' ? '#92400E' : tone === 'danger' ? '#991B1B' : '#166534'
+  const text = translate ? tr(message) : message
   return (
     <View style={[styles.inlineInfo, { backgroundColor: bg }]}> 
       {iconName ? <Ionicons name={iconName} size={16} color={fg} /> : null}
-      <Text style={[styles.inlineInfoText, { color: fg }]}>{tr(message)}</Text>
+      <Text style={[styles.inlineInfoText, { color: fg }]}>{text}</Text>
     </View>
   )
 }
