@@ -7830,6 +7830,14 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: themeLayout.screenPadding },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: themeLayout.screenPadding },
   pageStack: { flex: 1, gap: themeSpacing.sm },
+
+  // Tab header
+  tabTopBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: themeLayout.gap },
+  tabTopBarLeft: { flexDirection: 'row', alignItems: 'center', flexShrink: 1 },
+  tabTopBarRight: { flexDirection: 'row', alignItems: 'center', marginLeft: 'auto' },
+  tabTopBarLogo: { width: 18, height: 18, marginRight: themeSpacing.xs },
+  tabTopBarTitle: { fontSize: 18, fontWeight: '700', color: themeColors.text, flexShrink: 1 },
+
   screenHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: themeSpacing.sm, gap: themeLayout.gap },
   screenHeaderText: { flexShrink: 1, gap: 2 },
   screenHeaderTitle: { fontSize: 18, fontWeight: '700', color: themeColors.text },
