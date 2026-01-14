@@ -3996,9 +3996,50 @@ function HomeScreen() {
     { label: tr('Exports'), icon: 'download-outline', description: tr('PDF, ZIP, CSV, JSON.'), target: 'Exports' },
   ]
 
+  const activePayerName = useMemo(() => {
+    const currentId = spacesCtx.current?.id || spaceId
+    const current = spacesCtx.spaces.find((s) => s.id === currentId) || null
+    return ((current?.name || '').trim() || payerLabelFromSpaceId(currentId || 'personal')).trim()
+  }, [spaceId, spacesCtx.current?.id, spacesCtx.spaces])
+
+  const activePayerLabel = useMemo(() => {
+    const currentId = spacesCtx.current?.id || spaceId
+    return payerLabelFromSpaceId(currentId || 'personal')
+  }, [spaceId, spacesCtx.current?.id])
+
+  const activeSummary = useMemo(() => {
+    const currentId = spacesCtx.current?.id || spaceId
+    return (summaries || []).find((s) => s.spaceId === currentId) || null
+  }, [spaceId, spacesCtx.current?.id, summaries])
+
+  const mask = '•••'
+  const totalUnpaidText = activeSummary
+    ? homeSummaryVisibility.totalUnpaid
+      ? `EUR ${Number(activeSummary.totalUnpaid || 0).toFixed(2)}`
+      : mask
+    : homeSummaryVisibility.totalUnpaid
+      ? '—'
+      : mask
+
+  const overdueText = activeSummary
+    ? homeSummaryVisibility.overdue
+      ? tr('{count} bills', { count: activeSummary.overdueCount || 0 })
+      : mask
+    : homeSummaryVisibility.overdue
+      ? '—'
+      : mask
+
+  const nextDueText = activeSummary
+    ? homeSummaryVisibility.nextDue
+      ? activeSummary.nextDueDate || tr('None')
+      : mask
+    : homeSummaryVisibility.nextDue
+      ? '—'
+      : mask
+
   return (
     <Screen>
-      <View style={[styles.pageStack, { gap: themeSpacing.xs }]}>
+      <View style={[styles.pageStack, { gap: themeSpacing.sm }]}>
         <TabTopBar
           titleKey="home"
           right={
@@ -4067,65 +4108,71 @@ function HomeScreen() {
           }
         />
 
-        <Surface elevated padded={false} style={[styles.card, styles.homeSummaryCard]}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap }}>
-            <Text style={styles.mutedText}>{tr('Home summary')}</Text>
+        <Surface elevated style={styles.homeHeroCard}>
+          <View style={styles.homeHeroTopRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.homeHeroEyebrow}>{activePayerLabel}</Text>
+              <Text style={styles.homeHeroTitle} numberOfLines={1}>
+                {activePayerName}
+              </Text>
+            </View>
             <TouchableOpacity
               onPress={() => setHomeSummarySettingsVisible(true)}
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: 17,
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderWidth: StyleSheet.hairlineWidth,
-                borderColor: colors.border,
-                backgroundColor: colors.surface,
-              }}
+              style={styles.homeHeroIconButton}
               accessibilityLabel="Home summary settings"
             >
               <Ionicons name="options-outline" size={18} color={colors.text} />
             </TouchableOpacity>
           </View>
 
-          <View style={{ marginTop: themeSpacing.xs }}>
-            {(summaries || []).length ? (
-              (summaries || []).map((s) => {
-                const active = (spacesCtx.current?.id || spaceId) === s.spaceId
-                const mask = '•••'
-                return (
-                  <View key={s.spaceId} style={{ marginBottom: themeSpacing.xs }}>
-                    <Text style={[styles.mutedText, active ? { color: themeColors.text } : null]}>
-                      {payerLabelFromSpaceId(s.spaceId)} • {s.spaceName}{active ? ` • ${tr('Active')}` : ''}
-                    </Text>
-                    <Text style={styles.mutedText}>
-                      {tr('Total unpaid')}: {homeSummaryVisibility.totalUnpaid ? `EUR ${Number(s.totalUnpaid || 0).toFixed(2)}` : mask}
-                    </Text>
-                    <Text style={styles.mutedText}>
-                      {tr('Overdue')}: {homeSummaryVisibility.overdue ? tr('{count} bills', { count: s.overdueCount || 0 }) : mask}
-                    </Text>
-                    <Text style={styles.mutedText}>
-                      {tr('Next due date')}: {homeSummaryVisibility.nextDue ? (s.nextDueDate || tr('None')) : mask}
-                    </Text>
-                  </View>
-                )
-              })
-            ) : (
-              <>
-                <Text style={styles.mutedText}>{tr('Total unpaid')}: {homeSummaryVisibility.totalUnpaid ? '—' : '•••'}</Text>
-                <Text style={styles.mutedText}>{tr('Overdue')}: {homeSummaryVisibility.overdue ? '—' : '•••'}</Text>
-                <Text style={styles.mutedText}>{tr('Next due date')}: {homeSummaryVisibility.nextDue ? '—' : '•••'}</Text>
-              </>
-            )}
+          <View style={styles.homeMetricsRow}>
+            <Pressable
+              onPress={() => navigation.navigate('Bills')}
+              style={({ pressed }) => [styles.homeMetricCard, pressed && styles.homeMetricCardPressed]}
+            >
+              <View style={styles.homeMetricIconWrap}>
+                <Ionicons name="wallet-outline" size={18} color={themeColors.primary} />
+              </View>
+              <Text style={styles.homeMetricLabel}>{tr('Total unpaid')}</Text>
+              <Text style={styles.homeMetricValue} numberOfLines={1}>
+                {totalUnpaidText}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => navigation.navigate('Bills')}
+              style={({ pressed }) => [styles.homeMetricCard, pressed && styles.homeMetricCardPressed]}
+            >
+              <View style={[styles.homeMetricIconWrap, { backgroundColor: 'rgba(245, 158, 11, 0.14)' }]}>
+                <Ionicons name="alert-circle-outline" size={18} color="#B45309" />
+              </View>
+              <Text style={styles.homeMetricLabel}>{tr('Overdue')}</Text>
+              <Text style={styles.homeMetricValue} numberOfLines={1}>
+                {overdueText}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => navigation.navigate('Pay')}
+              style={({ pressed }) => [styles.homeMetricCard, pressed && styles.homeMetricCardPressed]}
+            >
+              <View style={[styles.homeMetricIconWrap, { backgroundColor: 'rgba(34, 197, 94, 0.14)' }]}>
+                <Ionicons name="calendar-outline" size={18} color="#15803D" />
+              </View>
+              <Text style={styles.homeMetricLabel}>{tr('Next due date')}</Text>
+              <Text style={styles.homeMetricValue} numberOfLines={1}>
+                {nextDueText}
+              </Text>
+            </Pressable>
           </View>
 
           <View style={{ marginTop: themeSpacing.sm }}>
-            <Text style={styles.mutedText}>{tr('Profiles')}</Text>
             <SegmentedControl
               value={spacesCtx.current?.id || spaceId || ''}
-              onChange={(id) => { handlePayerChange(id) }}
+              onChange={(id) => {
+                handlePayerChange(id)
+              }}
               options={payerOptions}
-              style={{ marginTop: themeSpacing.xs }}
             />
 
             {needsPayerName ? (
@@ -4148,9 +4195,12 @@ function HomeScreen() {
               </View>
             ) : null}
 
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>{tr('Active profile scopes Bills, Scan, Pay, Exports, and Warranties.')}</Text>
+            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>
+              {tr('Active profile scopes Bills, Scan, Pay, Exports, and Warranties.')}
+            </Text>
           </View>
         </Surface>
+
         <View style={styles.gridWrap}>
           {tiles.map((tile) => (
             <Pressable
@@ -4164,12 +4214,17 @@ function HomeScreen() {
               }}
               style={({ pressed }) => [styles.statCardPressable, pressed && styles.statCardPressed]}
             >
-              <Surface elevated padded={false} style={[styles.statCard, tile.target === 'Scan' && styles.statCardPrimary]}>
-                <View style={styles.statIconWrap}>
-                  <Ionicons name={tile.icon as keyof typeof Ionicons.glyphMap} size={20} color={themeColors.primary} />
+              <Surface elevated style={[styles.statCard, tile.target === 'Scan' && styles.statCardPrimary]}>
+                <View style={styles.statHeaderRow}>
+                  <View style={styles.statIconWrap}>
+                    <Ionicons name={tile.icon as keyof typeof Ionicons.glyphMap} size={20} color={tile.target === 'Scan' ? '#FFFFFF' : themeColors.primary} />
+                  </View>
+                  <Ionicons name="chevron-forward" size={18} color={tile.target === 'Scan' ? 'rgba(255,255,255,0.9)' : colors.textMuted} />
                 </View>
-                <Text style={styles.statLabel}>{tile.label}</Text>
-                <Text style={styles.statValue} numberOfLines={1}>
+                <Text style={[styles.statLabel, tile.target === 'Scan' && { color: '#FFFFFF' }]} numberOfLines={1}>
+                  {tile.label}
+                </Text>
+                <Text style={[styles.statValue, tile.target === 'Scan' && { color: 'rgba(255,255,255,0.9)' }]} numberOfLines={2}>
                   {tile.description}
                 </Text>
               </Surface>
@@ -7957,15 +8012,57 @@ const styles = StyleSheet.create({
   codeBlock: { marginTop: themeSpacing.xs, fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }), fontSize: 12, color: '#374151' },
 
   // Home tiles
-  gridWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
-  statCardPressable: { width: '48%', height: 104, marginBottom: themeSpacing.sm },
-  statCardPressed: { opacity: 0.9 },
-  homeSummaryCard: { padding: themeSpacing.sm },
-  statCard: { paddingVertical: themeSpacing.xs, paddingHorizontal: themeSpacing.sm, gap: themeSpacing.xs, flex: 1, justifyContent: 'space-between' },
-  statCardPrimary: { borderWidth: 1, borderColor: themeColors.primary },
-  statIconWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
-  statLabel: { fontSize: 13, fontWeight: '600', color: themeColors.text },
-  statValue: { fontSize: 11, color: themeColors.textMuted },
+  homeHeroCard: {
+    padding: themeSpacing.md,
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+  },
+  homeHeroTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap },
+  homeHeroEyebrow: { fontSize: 12, color: themeColors.textMuted, fontWeight: '600' },
+  homeHeroTitle: { fontSize: 18, fontWeight: '800', color: themeColors.text, marginTop: 2 },
+  homeHeroIconButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+    backgroundColor: themeColors.surface,
+  },
+  homeMetricsRow: { flexDirection: 'row', gap: themeSpacing.sm, marginTop: themeSpacing.md },
+  homeMetricCard: {
+    flex: 1,
+    borderRadius: 16,
+    padding: themeSpacing.sm,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+  },
+  homeMetricCardPressed: { opacity: 0.92, transform: [{ scale: 0.99 }] },
+  homeMetricIconWrap: { width: 32, height: 32, borderRadius: 16, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  homeMetricLabel: { fontSize: 11, color: themeColors.textMuted, fontWeight: '700', marginTop: themeSpacing.xs },
+  homeMetricValue: { fontSize: 13, color: themeColors.text, fontWeight: '700', marginTop: 2 },
+
+  gridWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginTop: themeSpacing.xs },
+  statCardPressable: { width: '48%', minHeight: 124, marginBottom: themeSpacing.sm },
+  statCardPressed: { opacity: 0.94, transform: [{ scale: 0.99 }] },
+  statCard: {
+    flex: 1,
+    borderRadius: 18,
+    padding: themeSpacing.md,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+    gap: 6,
+  },
+  statCardPrimary: { backgroundColor: themeColors.primary, borderColor: themeColors.primary },
+  statHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  statIconWrap: { width: 40, height: 40, borderRadius: 20, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  statLabel: { fontSize: 14, fontWeight: '800', color: themeColors.text, marginTop: 2 },
+  statValue: { fontSize: 12, color: themeColors.textMuted, lineHeight: 16 },
 
   payerNameTitle: { fontSize: 16, fontWeight: '600', color: themeColors.text },
   payerSlotLabel: { fontSize: 12, color: themeColors.textMuted },
