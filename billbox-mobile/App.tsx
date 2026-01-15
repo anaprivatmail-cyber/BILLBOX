@@ -500,6 +500,26 @@ type EPCResult = {
   purpose?: string
   reference?: string
   currency?: string
+  due_date?: string
+  payment_details?: string
+}
+
+function parseDateToISO(input: string): string | null {
+  const s = String(input || '')
+  const dmy = s.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/)
+  if (dmy) {
+    const day = Number(dmy[1])
+    const month = Number(dmy[2])
+    let year = Number(dmy[3])
+    if (year < 100) year += 2000
+    if (year < 2000 || year > 2100) return null
+    if (month < 1 || month > 12) return null
+    if (day < 1 || day > 31) return null
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  }
+  const ymd = s.match(/\b(\d{4})-(\d{2})-(\d{2})\b/)
+  if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`
+  return null
 }
 
 function normalizeQrText(input: string): string {
@@ -638,6 +658,8 @@ function parseUPN(text: string): EPCResult | null {
       for (let i = scope.length - 1; i >= 0; i--) {
         const l = scope[i]
         if (/UPNQR|\bUPN\b/i.test(l)) continue
+        if (/\b(rok|zapad|zapadl|valuta|datum|due|pay\s*by|payment\s*due)\b/i.test(l)) continue
+        if (/\b\d{4}-\d{2}-\d{2}\b/.test(l) || /\b\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}\b/.test(l)) continue
         if (!/[A-Za-zÀ-žČŠŽčšž]/.test(l)) continue
         if (l.length < 2 || l.length > 70) continue
         if (/\bEUR\b/i.test(l)) continue
@@ -646,7 +668,24 @@ function parseUPN(text: string): EPCResult | null {
         break
       }
     }
+
+    // Due date (Rok plačila / Due / Pay by): try labeled first, then first date.
+    let due_date: string | undefined
+    for (const l of lines) {
+      const m = l.match(/\b(rok\s*pla\w*|rok|zapad\w*|due\s*date|pay\s*by)\b\s*[:\-]?\s*(.+)/i)
+      if (!m) continue
+      const iso = parseDateToISO(m[2] || '')
+      if (iso) { due_date = iso; break }
+    }
+    if (!due_date) {
+      for (const l of lines) {
+        const iso = parseDateToISO(l)
+        if (iso) { due_date = iso; break }
+      }
+    }
+
     const result: EPCResult = { iban, amount, purpose, reference, creditor_name, currency }
+    if (due_date) result.due_date = due_date
     if (result.iban || typeof result.amount === 'number') return result
     return null
   } catch {
@@ -655,7 +694,67 @@ function parseUPN(text: string): EPCResult | null {
 }
 
 function parsePaymentQR(text: string): EPCResult | null {
-  return parseEPC(text) || parseUPN(text)
+  return parseEPC(text) || parseUPN(text) || parseUrlPayment(text)
+}
+
+function parseUrlPayment(input: string): EPCResult | null {
+  try {
+    const raw = String(input || '').trim()
+    if (!/^https?:\/\//i.test(raw)) return null
+
+    let url: URL
+    try {
+      url = new URL(raw)
+    } catch {
+      return null
+    }
+
+    const get = (...keys: string[]) => {
+      for (const k of keys) {
+        const v = url.searchParams.get(k)
+        if (v != null && String(v).trim()) return String(v).trim()
+      }
+      return ''
+    }
+
+    const iban = get('iban', 'IBAN', 'account', 'acct', 'accountNumber', 'account_number').replace(/\s+/g, '')
+    const name = get('name', 'recipient', 'payee', 'creditor', 'beneficiary', 'receiver')
+    const purpose = get('purpose', 'message', 'remittance', 'note', 'reason', 'description')
+    const reference = get('reference', 'ref', 'paymentReference', 'payment_reference', 'variableSymbol', 'vs', 'sklic')
+    const currency = get('currency', 'ccy').toUpperCase()
+    const amountRaw = get('amount', 'amt', 'sum')
+    const amountVal = amountRaw ? Number(amountRaw.replace(',', '.')) : NaN
+    const dueRaw = get('due', 'dueDate', 'duedate', 'date', 'payBy', 'payby')
+    const due = dueRaw ? parseDateToISO(dueRaw) : null
+
+    const extras: string[] = []
+    const bic = get('bic', 'BIC', 'swift', 'SWIFT')
+    if (bic) extras.push(`SWIFT/BIC: ${bic}`)
+    const routing = get('routing', 'routingNumber', 'routing_number', 'aba', 'ABA')
+    if (routing) extras.push(`Routing: ${routing}`)
+    const sort = get('sortCode', 'sort_code')
+    if (sort) extras.push(`Sort code: ${sort}`)
+    const bsb = get('bsb', 'BSB')
+    if (bsb) extras.push(`BSB: ${bsb}`)
+    const acctNo = get('acctNo', 'accountNo', 'account_no')
+    if (acctNo) extras.push(`Account: ${acctNo}`)
+
+    const out: EPCResult = {
+      iban: iban || undefined,
+      creditor_name: name || undefined,
+      purpose: purpose || undefined,
+      reference: reference ? reference.replace(/\s+/g, '') : undefined,
+      currency: /^[A-Z]{3}$/.test(currency) ? currency : undefined,
+      amount: Number.isFinite(amountVal) && amountVal > 0 ? amountVal : undefined,
+      due_date: due || undefined,
+      payment_details: extras.length ? extras.join('\n') : undefined,
+    }
+
+    if (out.iban || typeof out.amount === 'number' || out.reference || out.purpose || out.payment_details) return out
+    return null
+  } catch {
+    return null
+  }
 }
 
 // Safely coerce potentially stringy booleans to real booleans
@@ -2465,15 +2564,57 @@ function ScanBillScreen() {
   const [cameraVisible, setCameraVisible] = useState(true)
   const [missingManualVisible, setMissingManualVisible] = useState(false)
 
+  function looksLikeMisassignedName(input: any): boolean {
+    const s = (input ?? '').toString().trim()
+    if (!s) return true
+    if (/\b(rok|zapad|zapadl|valuta|datum|due|pay\s*by|payment\s*due)\b/i.test(s)) return true
+    if (/\b\d{4}-\d{2}-\d{2}\b/.test(s)) return true
+    if (/\b\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}\b/.test(s)) return true
+    if (/\bEUR\b/i.test(s) || /€/.test(s)) return true
+    const compact = s.replace(/\s+/g, '')
+    if (/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/.test(compact)) return true
+    if (/SI\d{2}/i.test(compact)) return true
+    if (/^[Rr]\d{6,}/.test(compact)) return true
+    const digits = (s.match(/\d/g) || []).length
+    const letters = (s.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
+    if (letters === 0) return true
+    if (digits >= 8 && digits > letters) return true
+    if (s.length > 70) return true
+    return false
+  }
+
   function pickNameCandidate(...candidates: any[]): string {
     for (const c of candidates) {
       const s = (c ?? '').toString().trim()
       if (!s) continue
       if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) continue
       if (/^[0-9\s.,:\-\/]+$/.test(s)) continue
+      if (looksLikeMisassignedName(s)) continue
       return s
     }
-    return (candidates[0] ?? '').toString().trim()
+    return ''
+  }
+
+  async function extractTextWithAI(text: string) {
+    const base = getFunctionsBase()
+    if (!base) throw new Error('OCR unavailable: missing EXPO_PUBLIC_FUNCTIONS_BASE')
+    const supabase = getSupabase()
+    let authHeader: Record<string, string> = {}
+    if (supabase) {
+      try {
+        const { data } = await supabase.auth.getSession()
+        const token = data?.session?.access_token
+        if (token) authHeader = { Authorization: `Bearer ${token}` }
+      } catch {}
+    }
+    const resp = await fetch(`${base}/.netlify/functions/ocr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8', ...authHeader },
+      body: String(text || ''),
+    })
+    const data = await resp.json().catch(() => null as any)
+    if (!resp.ok || !data?.ok) throw new Error(data?.error || `Extract failed (${resp.status})`)
+    return { fields: data.fields || {}, rawText: typeof data.rawText === 'string' ? data.rawText : '' }
   }
 
   function normalizeIban(input: string): string {
@@ -2542,8 +2683,9 @@ function ScanBillScreen() {
     if (payload && payload.fields) {
       const f = payload.fields as ExtractedFields
       const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
-      setSupplier(supplierName)
-      setCreditorName(pickNameCandidate(f.creditor_name, supplierName))
+      if (supplierName) setSupplier(supplierName)
+      const cred = pickNameCandidate(f.creditor_name, supplierName)
+      if (cred) setCreditorName(cred)
       setIban(f.iban || '')
       setReference(f.reference || '')
       setPurpose(f.purpose || '')
@@ -2621,19 +2763,85 @@ function ScanBillScreen() {
     if (!t) { setFormat('Unknown'); setParsed(null); Alert.alert(tr('QR detected but no text decoded')); return }
     const epc = parseEPC(t)
     const upn = !epc ? parseUPN(t) : null
-    const p = epc || upn
-    if (!p) { setFormat('Unknown'); setParsed(null); Alert.alert(tr('Unsupported QR format')); return }
-    setFormat(epc ? 'EPC/SEPA SCT' : 'UPN')
+    const urlPay = !epc && !upn ? parseUrlPayment(t) : null
+    const p = epc || upn || urlPay
+    if (!p) {
+      setFormat('Unknown')
+      setParsed(null)
+      // Fallback to AI extraction from text when QR parsing fails.
+      if (entitlements.canUseOCR) {
+        ;(async () => {
+          try {
+            setOcrError(null)
+            setOcrBusy(true)
+            const { fields: f } = await extractTextWithAI(t)
+            const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
+            if (supplierName) setSupplier(supplierName)
+            const cred = pickNameCandidate(f.creditor_name, supplierName)
+            if (cred) setCreditorName(cred)
+            if (f.iban) setIban(f.iban || '')
+            if (f.reference) setReference(f.reference || '')
+            if (f.purpose) setPurpose(f.purpose || '')
+            if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
+            if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
+            if (typeof f.amount === 'number') setAmountStr(String(f.amount))
+            if (f.currency) setCurrency(f.currency)
+            if (f.due_date) setDueDate(f.due_date)
+            setUseDataActive(true)
+            setCameraVisible(false)
+            setTorch('off')
+          } catch (e: any) {
+            Alert.alert(tr('Unsupported QR format'), e?.message || tr('Unsupported QR format'))
+          } finally {
+            setOcrBusy(false)
+          }
+        })()
+        return
+      }
+      Alert.alert(tr('Unsupported QR format'))
+      return
+    }
+    setFormat(epc ? 'EPC/SEPA SCT' : (upn ? 'UPN' : 'URL'))
     setParsed(p)
     const supplierName = pickNameCandidate(p.creditor_name, supplier)
-    setSupplier(supplierName)
-    setCreditorName(pickNameCandidate(p.creditor_name, supplierName))
+    if (supplierName) setSupplier(supplierName)
+    const cred = pickNameCandidate(p.creditor_name, supplierName)
+    if (cred) setCreditorName(cred)
     setIban(p.iban || '')
     setReference(p.reference || '')
     setPurpose(p.purpose || '')
-    setPaymentDetails('')
+    setPaymentDetails(p.payment_details ? String(p.payment_details) : '')
     if (typeof p.amount === 'number') setAmountStr(String(p.amount))
     if (p.currency) setCurrency(p.currency)
+    if (p.due_date) setDueDate(p.due_date)
+
+    // If we parsed the QR but still don't have a usable name, ask AI to classify fields from the raw text.
+    const missingName = !supplierName && !cred
+    if (missingName && entitlements.canUseOCR) {
+      ;(async () => {
+        try {
+          setOcrError(null)
+          setOcrBusy(true)
+          const { fields: f } = await extractTextWithAI(t)
+          const s2 = pickNameCandidate(f.creditor_name, f.supplier, supplier)
+          if (s2) setSupplier(s2)
+          const c2 = pickNameCandidate(f.creditor_name, s2)
+          if (c2) setCreditorName(c2)
+          if (!p.iban && f.iban) setIban(f.iban || '')
+          if (!p.reference && f.reference) setReference(f.reference || '')
+          if (!p.purpose && f.purpose) setPurpose(f.purpose || '')
+          if (!p.payment_details && f.payment_details) setPaymentDetails(String(f.payment_details || ''))
+          if (!p.invoice_number && f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
+          if (typeof p.amount !== 'number' && typeof f.amount === 'number') setAmountStr(String(f.amount))
+          if (!p.currency && f.currency) setCurrency(f.currency)
+          if (!p.due_date && f.due_date) setDueDate(f.due_date)
+        } catch {
+          // Silent: user can still edit manually.
+        } finally {
+          setOcrBusy(false)
+        }
+      })()
+    }
     setUseDataActive(true)
     setCameraVisible(false)
     setTorch('off')
@@ -2649,8 +2857,9 @@ function ScanBillScreen() {
       setOcrBusy(true)
       const { fields: f, summary } = await performOCR(uri)
       const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
-      setSupplier(supplierName)
-      setCreditorName(pickNameCandidate(f.creditor_name, supplierName))
+      if (supplierName) setSupplier(supplierName)
+      const cred = pickNameCandidate(f.creditor_name, supplierName)
+      if (cred) setCreditorName(cred)
       setIban(f.iban || '')
       setReference(f.reference || '')
       setPurpose(f.purpose || '')

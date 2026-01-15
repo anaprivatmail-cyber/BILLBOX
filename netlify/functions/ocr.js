@@ -10,8 +10,33 @@ function resolveModel() {
 }
 
 function isAiOcrEnabled() {
-  const flag = process.env.ENABLE_OCR_AI
-  return String(flag || '').toLowerCase() === 'true' && !!OPENAI_API_KEY
+  // Enabled by default when the API key exists.
+  // Can be explicitly disabled via ENABLE_OCR_AI=false (or 0).
+  const flag = String(process.env.ENABLE_OCR_AI || '').trim().toLowerCase()
+  if (flag === 'false' || flag === '0') return false
+  // If flag is explicitly true, or unset/other, enable when we have a key.
+  return !!OPENAI_API_KEY
+}
+
+function looksLikeMisassignedName(input) {
+  const s = String(input || '').trim()
+  if (!s) return true
+  // Obvious non-name markers
+  if (/\b(rok|zapad|zapadl|valuta|datum|due|pay\s*by|payment\s*due)\b/i.test(s)) return true
+  if (/\b\d{4}-\d{2}-\d{2}\b/.test(s)) return true
+  if (/\b\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}\b/.test(s)) return true
+  if (/\bEUR\b/i.test(s) || /€/.test(s)) return true
+  const compact = s.replace(/\s+/g, '')
+  if (/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/.test(compact)) return true // IBAN-like
+  if (/SI\d{2}/i.test(compact)) return true // SI reference prefix
+  if (/^[Rr]\d{6,}/.test(compact)) return true // reference-like (common OCR artifact)
+  // If it's mostly digits/punctuation, it's not a name.
+  const digits = (s.match(/\d/g) || []).length
+  const letters = (s.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
+  if (letters === 0) return true
+  if (digits >= 8 && digits > letters) return true
+  if (s.length > 70) return true
+  return false
 }
 
 function safeParseJson(s) {
@@ -189,6 +214,10 @@ function sanitizeFields(rawText, fields) {
     else out.supplier = s
   }
   if (out.purpose && typeof out.purpose === 'string') out.purpose = out.purpose.trim() || null
+  if (out.payment_details && typeof out.payment_details === 'string') {
+    const s = out.payment_details.trim()
+    out.payment_details = s ? (s.length > 1200 ? s.slice(0, 1200) : s) : null
+  }
   return out
 }
 
@@ -219,6 +248,11 @@ function bodyToBuffer(event) {
   if (event.isBase64Encoded) return Buffer.from(event.body || '', 'base64')
   if (Buffer.isBuffer(event.body)) return event.body
   return Buffer.from(event.body || '')
+}
+
+function getContentType(event) {
+  const h = event?.headers || {}
+  return String(h['content-type'] || h['Content-Type'] || '').toLowerCase()
 }
 
 function getSupabaseAdmin() {
@@ -289,10 +323,10 @@ function extractFields(rawText) {
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean)
   if (lines.length) {
     const candidate =
-      lines.find((l) => hasLetters(l) && !isLikelyNoiseLine(l) && l.length >= 3) ||
-      lines.find((l) => hasLetters(l) && l.length >= 3) ||
+      lines.find((l) => hasLetters(l) && !isLikelyNoiseLine(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
+      lines.find((l) => hasLetters(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
       lines[0]
-    out.supplier = candidate
+    out.supplier = looksLikeMisassignedName(candidate) ? null : candidate
   }
 
   // IBAN
@@ -350,9 +384,9 @@ function extractFields(rawText) {
   const cred = text.match(/(prejemnik|recipient|payee|upravi\w*):?\s*(.+)/i)
   if (cred) {
     const v = String(cred[2] || '').trim()
-    if (v && /[A-Za-zÀ-žČŠŽčšž]/.test(v) && v.length >= 2) out.creditor_name = v
+    if (v && /[A-Za-zÀ-žČŠŽčšž]/.test(v) && v.length >= 2 && !looksLikeMisassignedName(v)) out.creditor_name = v
   }
-  if (!out.creditor_name && out.supplier) out.creditor_name = out.supplier
+  if (!out.creditor_name && out.supplier && !looksLikeMisassignedName(out.supplier)) out.creditor_name = out.supplier
 
   // Invoice number / document number (safe field; AI also helps later)
   const inv = text.match(/(ra\u010dun\s*(št\.|st\.|stevilka)?|\binvoice\b\s*(no\.|number)?|\bšt\.?\s*ra\u010duna|\bdokument\b\s*(št\.|no\.)?)\s*[:#]?\s*([A-Z0-9\-\/]{3,})/i)
@@ -420,15 +454,17 @@ async function extractFieldsWithAI(rawText) {
   const system =
     'You extract structured payment/invoice fields from OCR text for a bill-tracking app. ' +
     'Return JSON ONLY with schema: ' +
-    '{"supplier": string|null, "creditor_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null}. ' +
+    '{"supplier": string|null, "creditor_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "payment_details": string|null}. ' +
     'Rules: ' +
     '- Do NOT guess. Use null if uncertain. ' +
+    '- supplier and creditor_name must be clean names only (no dates, references, amounts, or “rok plačila” text). ' +
     '- Prefer extracting invoice_number when present (invoice no / račun št / dokument št). ' +
     '- supplier is the issuer/seller; creditor_name is the payee on the payment instruction (often same as supplier). ' +
     '- due_date must be ISO YYYY-MM-DD if present, else null. ' +
     '- currency must be 3-letter uppercase (e.g., EUR) if present. ' +
     '- iban should be compact (no spaces) if present. ' +
-    '- amount should be numeric (e.g., 12.34).'
+    '- amount should be numeric (e.g., 12.34). ' +
+    '- If the payment system is non-IBAN (routing/SWIFT/account), put those instructions into payment_details as a short multiline string, else null.'
 
   const user =
     'OCR text (may be messy):\n' +
@@ -470,6 +506,7 @@ async function extractFieldsWithAI(rawText) {
       iban: typeof parsed.iban === 'string' ? parsed.iban.replace(/\s+/g, '').trim() || null : null,
       reference: typeof parsed.reference === 'string' ? parsed.reference.trim() || null : null,
       purpose: typeof parsed.purpose === 'string' ? parsed.purpose.trim() || null : null,
+      payment_details: typeof parsed.payment_details === 'string' ? parsed.payment_details.trim() || null : null,
     }
 
     if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(out.due_date)) out.due_date = null
@@ -491,11 +528,17 @@ function mergeFields(base, ai, rawText) {
   if (!ai) return sanitizeFields(rawText, out)
 
   // AI is allowed to help with non-payment-critical fields.
-  if (!out.supplier && ai.supplier) out.supplier = ai.supplier
-  if (!out.creditor_name && ai.creditor_name) out.creditor_name = ai.creditor_name
+  // Also allow AI to override clearly misassigned heuristic names.
+  if ((out.supplier == null || looksLikeMisassignedName(out.supplier)) && ai.supplier && !looksLikeMisassignedName(ai.supplier)) {
+    out.supplier = ai.supplier
+  }
+  if ((out.creditor_name == null || looksLikeMisassignedName(out.creditor_name)) && ai.creditor_name && !looksLikeMisassignedName(ai.creditor_name)) {
+    out.creditor_name = ai.creditor_name
+  }
   if (!out.invoice_number && ai.invoice_number) out.invoice_number = ai.invoice_number
   if (!out.purpose && ai.purpose) out.purpose = ai.purpose
   if (!out.due_date && ai.due_date) out.due_date = ai.due_date
+  if (!out.payment_details && ai.payment_details) out.payment_details = ai.payment_details
 
   // Payment-critical: only fill if base is missing AND the value is verifiable.
   // IBAN is chosen from OCR text via sanitizeFields (AI may misread digits).
@@ -526,9 +569,22 @@ export async function handler(event) {
     const supabase = authInfo.supabase
     const userId = authInfo.userId
 
-    const contentType = event.headers['content-type'] || event.headers['Content-Type'] || ''
+    const contentType = getContentType(event)
 
+    const isText = /^text\/plain\b/i.test(contentType)
     const isPdf = /application\/pdf/i.test(contentType)
+
+    // Text-only path: AI extraction from pasted QR text or other text payloads.
+    // This does NOT count against OCR quota because no OCR/vision work is performed.
+    if (isText) {
+      const buf = bodyToBuffer(event)
+      const text = String(buf?.toString('utf8') || '').trim()
+      if (!text) return jsonResponse(400, { ok: false, error: 'missing_text' })
+      const fields0 = extractFields(text)
+      const aiFields = await extractFieldsWithAI(text)
+      const fields = mergeFields(fields0, aiFields, text)
+      return jsonResponse(200, { ok: true, rawText: text, fields, ai: !!aiFields, mode: 'text' })
+    }
 
     let base64Image
     let pdfBuffer
@@ -641,7 +697,7 @@ export async function handler(event) {
 
         const fields0 = extractFields(text)
         const aiFields = await extractFieldsWithAI(text)
-        const fields = mergeFields(fields0, aiFields)
+        const fields = mergeFields(fields0, aiFields, text)
         return jsonResponse(200, { ok: true, rawText: text, fields, ai: !!aiFields })
       } catch (e) {
         return jsonResponse(500, { ok: false, error: 'pdf_parse_failed', detail: safeDetailFromError(e) })
@@ -737,9 +793,10 @@ export async function handler(event) {
 
     const annotation = raw?.responses?.[0]
     const fullText = annotation?.fullTextAnnotation?.text || annotation?.textAnnotations?.[0]?.description || ''
-    const fields0 = extractFields(fullText || '')
-    const aiFields = await extractFieldsWithAI(fullText || '')
-    const fields = mergeFields(fields0, aiFields)
+    const full = fullText || ''
+    const fields0 = extractFields(full)
+    const aiFields = await extractFieldsWithAI(full)
+    const fields = mergeFields(fields0, aiFields, full)
 
     return jsonResponse(200, { ok: true, rawText: fullText || '', fields, ai: !!aiFields })
   } catch (err) {
