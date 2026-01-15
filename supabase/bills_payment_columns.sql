@@ -5,3 +5,4 @@ alter table public.bills add column if not exists creditor_name text;
 alter table public.bills add column if not exists iban text;
 alter table public.bills add column if not exists reference text;
 alter table public.bills add column if not exists purpose text;
+alter table public.bills add column if not exists invoice_number text;

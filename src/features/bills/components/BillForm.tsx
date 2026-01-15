@@ -22,6 +22,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [iban, setIban] = useState<string>('')
   const [reference, setReference] = useState<string>('')
   const [purpose, setPurpose] = useState<string>('')
+  const [invoiceNumber, setInvoiceNumber] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [inputMethod, setInputMethod] = useState<'manual' | 'upload' | 'qr'>('manual')
@@ -47,6 +48,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       setIban(initial.iban || '')
       setReference(initial.reference || '')
       setPurpose(initial.purpose || '')
+      setInvoiceNumber((initial as any).invoice_number || '')
     } else {
       setSupplier('')
       setAmount(0)
@@ -56,6 +58,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       setIban('')
       setReference('')
       setPurpose('')
+      setInvoiceNumber('')
     }
   }, [initial])
 
@@ -205,6 +208,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         iban: iban || null,
         reference: reference || null,
         purpose: purpose || null,
+        invoice_number: invoiceNumber || null,
       }, initial?.id)
     } catch (err: any) {
       setError(err?.message || 'Could not save bill')
@@ -282,6 +286,16 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
                 required
                 className="input"
               />
+            </div>
+            <div>
+              <label className="label">Invoice number</label>
+              <input
+                type="text"
+                value={invoiceNumber}
+                onChange={(e) => setInvoiceNumber(e.target.value)}
+                className="input"
+              />
+              <div className="helper mt-1">Required for accounting exports. Do not guess.</div>
             </div>
             <div>
               <label className="label">Due date</label>

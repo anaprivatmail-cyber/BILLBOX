@@ -7,12 +7,21 @@ export type EPCResult = {
   currency?: string
 }
 
+function normalizeQrText(input: string): string {
+  const s = (input ?? '').toString()
+  let out = s.replace(/\u001d/g, '\n').replace(/\r/g, '\n')
+  if (!out.includes('\n') && out.includes('|') && (/\bBCD\b/.test(out) || /UPNQR/i.test(out))) {
+    out = out.replace(/\|/g, '\n')
+  }
+  return out
+}
+
 // Minimal EPC/SEPA QR parser. Accepts plain text content of QR.
 // Spec (simplified):
 // BCD\n001\n1\nSCT\nBIC\nName\nIBAN\nEURamount\nPurpose\nReference\n...
 export function parseEPC(text: string): EPCResult | null {
   try {
-    const lines = text.split(/\r?\n/).map((l) => l.trim())
+    const lines = normalizeQrText(text).split(/\n+/).map((l) => l.trim())
     if (lines.length < 7) return null
     if (lines[0] !== 'BCD') return null
     const serviceTag = lines[3]
@@ -46,7 +55,8 @@ export function parseEPC(text: string): EPCResult | null {
 // Common payloads contain markers like UPNQR and fields with IBAN (SI..), amount, reference (sklic), purpose (namen), and name.
 export function parseUPN(text: string): EPCResult | null {
   try {
-    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    const normalized = normalizeQrText(text)
+    const lines = normalized.split(/\n+/).map((l) => l.trim()).filter(Boolean)
     const joined = lines.join('\n')
     // Detect presence
     if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
@@ -62,6 +72,11 @@ export function parseUPN(text: string): EPCResult | null {
         const val = Number(eurMatch[1].replace(',', '.'))
         if (!Number.isNaN(val)) { amount = val; currency = 'EUR'; break }
       }
+      if (!amount && /^\d{11}$/.test(l)) {
+        const cents = Number(l)
+        const val = cents / 100
+        if (Number.isFinite(val) && val > 0) { amount = val; currency = currency || 'EUR'; break }
+      }
       const amtMatch = l.match(/([0-9]+(?:[\.,][0-9]{1,2})?)/)
       if (!amount && amtMatch) {
         const val = Number(amtMatch[1].replace(',', '.'))
@@ -71,7 +86,7 @@ export function parseUPN(text: string): EPCResult | null {
     // Reference (sklic)
     let reference: string | undefined
     for (const l of lines) {
-      const m = l.match(/(SI\d{2}[0-9]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
+      const m = l.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
       if (m) { reference = (m[1] || m[2] || '').replace(/\s+/g, ''); if (reference) break }
     }
     // Purpose (namen)

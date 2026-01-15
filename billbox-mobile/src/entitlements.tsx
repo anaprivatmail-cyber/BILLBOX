@@ -7,6 +7,7 @@ import { getCurrentLang, t } from './i18n'
 export type PlanId = 'free' | 'basic' | 'pro'
 
 export type UpgradeReason =
+  | 'reports'
   | 'ocr'
   | 'export'
   | 'space_limit'
@@ -70,6 +71,7 @@ export function setUpgradePrompt(fn: ((payload: UpgradePromptPayload) => void) |
 
 export function showUpgradeAlert(reason: UpgradeReason) {
   const targetPlan: PlanId =
+    reason === 'reports' ||
     reason === 'export' ||
     reason === 'space_limit' ||
     reason === 'business_space' ||

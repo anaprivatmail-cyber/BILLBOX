@@ -6,4 +6,5 @@ ALTER TABLE public.bills
   ADD COLUMN IF NOT EXISTS creditor_name text NULL,
   ADD COLUMN IF NOT EXISTS iban text NULL,
   ADD COLUMN IF NOT EXISTS reference text NULL,
-  ADD COLUMN IF NOT EXISTS purpose text NULL;
+  ADD COLUMN IF NOT EXISTS purpose text NULL,
+  ADD COLUMN IF NOT EXISTS invoice_number text NULL;

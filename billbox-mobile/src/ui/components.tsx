@@ -34,6 +34,7 @@ export function Screen({
 }) {
   const insets = useSafeAreaInsets()
   const colors = useThemeColors()
+  const topPad = Math.max(8, layout.screenPadding - 4)
 
   if (!scroll) {
     return (
@@ -41,7 +42,8 @@ export function Screen({
         <View
           style={{
             flex: 1,
-            padding: layout.screenPadding,
+            paddingHorizontal: layout.screenPadding,
+            paddingTop: topPad,
             paddingBottom: Math.max(insets.bottom, layout.screenPadding),
             position: 'relative',
           }}
@@ -57,7 +59,8 @@ export function Screen({
       <ScrollView
         contentContainerStyle={{
           flexGrow: 1,
-          padding: layout.screenPadding,
+          paddingHorizontal: layout.screenPadding,
+          paddingTop: topPad,
           paddingBottom: Math.max(insets.bottom, layout.screenPadding),
         }}
         keyboardShouldPersistTaps="handled"
@@ -254,17 +257,48 @@ export function InlineInfo({
   )
 }
 
-export function Disclosure({ title, children }: { title: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false)
+export function Disclosure({
+  title,
+  children,
+  defaultOpen = false,
+  open: controlledOpen,
+  onOpenChange,
+  highlightOnOpen = false,
+  style,
+  bodyStyle,
+}: {
+  title: string
+  children: React.ReactNode
+  defaultOpen?: boolean
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  highlightOnOpen?: boolean
+  style?: StyleProp<ViewStyle>
+  bodyStyle?: StyleProp<ViewStyle>
+}) {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen)
   const colors = useThemeColors()
   const styles = useMemo(() => makeStyles(colors), [colors])
+
+  const open = controlledOpen ?? uncontrolledOpen
+  const setOpen = (value: boolean) => {
+    if (controlledOpen === undefined) setUncontrolledOpen(value)
+    onOpenChange?.(value)
+  }
+
   return (
-    <View style={styles.disclosureWrap}>
-      <TouchableOpacity onPress={() => setOpen((v) => !v)} style={styles.disclosureHeader}>
+    <View
+      style={[
+        styles.disclosureWrap,
+        style,
+        highlightOnOpen && open ? { borderColor: colors.primary } : null,
+      ]}
+    >
+      <TouchableOpacity onPress={() => setOpen(!open)} style={styles.disclosureHeader}>
         <Text style={styles.disclosureTitle}>{tr(title)}</Text>
         <Ionicons name={open ? 'chevron-up-outline' : 'chevron-down-outline'} size={18} color={colors.textMuted} />
       </TouchableOpacity>
-      {open ? <View style={styles.disclosureBody}>{children}</View> : null}
+      {open ? <View style={[styles.disclosureBody, bodyStyle]}>{children}</View> : null}
     </View>
   )
 }

@@ -48,9 +48,14 @@ export async function addToInbox(input: {
   name: string
   mimeType?: string
   id?: string
+  createdAt?: string
+  status?: InboxStatus
+  extractedFields?: any
+  notes?: string
 }): Promise<InboxItem> {
   const items = await load(input.spaceId)
   const now = new Date().toISOString()
+  const createdAt = input.createdAt && typeof input.createdAt === 'string' ? input.createdAt : now
   const safeSpace = String(input.spaceId || 'default')
   const id = (input.id && String(input.id)) || `inbox_${Math.random().toString(36).slice(2, 10)}`
   const safeName = String(input.name || 'document').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'document'
@@ -75,13 +80,15 @@ export async function addToInbox(input: {
   }
   const next: InboxItem = {
     id,
-    created_at: now,
+    created_at: createdAt,
     spaceId: safeSpace,
     name: input.name || 'document',
     uri: input.uri,
     localPath: localPath || input.uri,
     mimeType: input.mimeType,
-    status: 'new',
+    status: input.status || 'new',
+    extractedFields: input.extractedFields,
+    notes: input.notes,
   }
   items.unshift(next)
   await save(input.spaceId, items)

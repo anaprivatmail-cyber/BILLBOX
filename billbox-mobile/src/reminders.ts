@@ -6,6 +6,31 @@ function tr(key: string, vars?: any): string {
   return t(getCurrentLang(), key, vars)
 }
 
+const LS_REMINDERS_ENABLED = 'billbox.reminders.enabled'
+
+export async function getRemindersEnabled(): Promise<boolean> {
+  try {
+    const raw = await AsyncStorage.getItem(LS_REMINDERS_ENABLED)
+    if (raw === '0') return false
+    if (raw === '1') return true
+    return true // default: enabled
+  } catch {
+    return true
+  }
+}
+
+export async function setRemindersEnabled(enabled: boolean): Promise<void> {
+  try {
+    await AsyncStorage.setItem(LS_REMINDERS_ENABLED, enabled ? '1' : '0')
+  } catch {}
+}
+
+export async function cancelAllReminders(): Promise<void> {
+  try {
+    await Notifications.cancelAllScheduledNotificationsAsync()
+  } catch {}
+}
+
 // Keep behaviour predictable for local notifications.
 export async function ensureNotificationConfig(): Promise<void> {
   try {
@@ -96,6 +121,7 @@ function atLocalHour(day: Date, hour: number): Date {
 }
 
 export async function scheduleBillReminders(bill: any, daysBefore = [3, 0], spaceId?: string | null): Promise<void> {
+  if (!(await getRemindersEnabled())) return
   if (!bill?.id || !bill?.due_date) return
   const ok = await requestPermissionIfNeeded()
   if (!ok) return
@@ -132,6 +158,7 @@ export async function scheduleBillReminders(bill: any, daysBefore = [3, 0], spac
 }
 
 export async function scheduleGroupedPaymentReminder(dateISO: string, count: number, spaceId?: string | null): Promise<void> {
+  if (!(await getRemindersEnabled())) return
   const ok = await requestPermissionIfNeeded()
   if (!ok) return
 
@@ -152,6 +179,7 @@ export async function scheduleGroupedPaymentReminder(dateISO: string, count: num
 }
 
 export async function snoozeBillReminder(bill: any, days: number, spaceId?: string | null): Promise<void> {
+  if (!(await getRemindersEnabled())) return
   if (!bill?.id) return
   const ok = await requestPermissionIfNeeded()
   if (!ok) return
@@ -179,6 +207,7 @@ export async function cancelBillReminders(billId: string, spaceId?: string | nul
 }
 
 export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30], spaceId?: string | null): Promise<void> {
+  if (!(await getRemindersEnabled())) return
   if (!warranty?.id || !warranty?.expires_at) return
   const ok = await requestPermissionIfNeeded()
   if (!ok) return
@@ -214,6 +243,7 @@ export async function cancelWarrantyReminders(warrantyId: string, spaceId?: stri
 }
 
 export async function scheduleInboxReviewReminder(inboxId: string, name: string, spaceId?: string | null): Promise<void> {
+  if (!(await getRemindersEnabled())) return
   if (!inboxId) return
   const ok = await requestPermissionIfNeeded()
   if (!ok) return
@@ -224,8 +254,8 @@ export async function scheduleInboxReviewReminder(inboxId: string, name: string,
   try {
     const id = await Notifications.scheduleNotificationAsync({
       content: {
-        title: tr('Inbox review'),
-        body: tr('{name} needs review. If it is not a bill, delete or archive it.', { name: name || tr('Document') }),
+        title: tr('Inbox reminder'),
+        body: tr('Review {name}. If it is not a bill, you can archive or delete it.', { name: name || tr('Document') }),
         data: { inbox_id: inboxId, space_id: spaceId || null, playSound: true },
         categoryIdentifier: 'inbox',
       },

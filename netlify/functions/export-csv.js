@@ -146,7 +146,7 @@ export async function handler(event) {
         b.purpose,
         b.created_at,
         b.space_id,
-        '',
+        b.invoice_number || '',
         '',
         '',
         '',

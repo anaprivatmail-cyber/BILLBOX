@@ -57,6 +57,17 @@ export async function handler(event) {
     const spaceId = body.spaceId ? String(body.spaceId) : null
     const filters = body.filters || {}
     const billId = body.billId ? String(body.billId) : null
+    const billIdsRaw = Array.isArray(body.billIds)
+      ? body.billIds
+      : Array.isArray(body.bill_ids)
+        ? body.bill_ids
+        : null
+    const billIds = billIdsRaw
+      ? billIdsRaw
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+        .slice(0, 500)
+      : []
 
     const supabase = authInfo.supabase
     const userId = authInfo.userId
@@ -85,22 +96,30 @@ export async function handler(event) {
       }
       bills = [data]
     } else {
-      const { query, hasAttachmentsOnly } = buildBillQueryWithFilters({ supabase, userId, spaceId, filters })
-      const { data, error } = await query.order('due_date', { ascending: true })
-      queryError = error || null
-      bills = data || []
+      if (billIds.length) {
+        let q = supabase.from('bills').select('*').eq('user_id', userId).in('id', billIds)
+        if (spaceId) q = q.eq('space_id', spaceId)
+        const { data, error } = await q
+        queryError = error || null
+        bills = data || []
+      } else {
+        const { query, hasAttachmentsOnly } = buildBillQueryWithFilters({ supabase, userId, spaceId, filters })
+        const { data, error } = await query.order('due_date', { ascending: true })
+        queryError = error || null
+        bills = data || []
 
-      if (!queryError && hasAttachmentsOnly && bills.length) {
-        const kept = []
-        for (const b of bills) {
-          try {
-            const count = await listBillAttachmentsCount(supabase, userId, b.id)
-            if (count > 0) kept.push(b)
-          } catch {
-            // ignore
+        if (!queryError && hasAttachmentsOnly && bills.length) {
+          const kept = []
+          for (const b of bills) {
+            try {
+              const count = await listBillAttachmentsCount(supabase, userId, b.id)
+              if (count > 0) kept.push(b)
+            } catch {
+              // ignore
+            }
           }
+          bills = kept
         }
-        bills = kept
       }
     }
 
@@ -167,8 +186,9 @@ export async function handler(event) {
       }
     })
 
+    const selectionLabel = billIds.length ? `selection-${bills.length}` : `${start || 'range'}-${end || ''}`
     const filename = sanitizeFilename(
-      kind === 'single' ? `bill-${billId}.pdf` : `billbox-report-${start || 'range'}-${end || ''}.pdf`,
+      kind === 'single' ? `bill-${billId}.pdf` : `billbox-report-${selectionLabel}.pdf`,
       'billbox-report.pdf'
     )
 

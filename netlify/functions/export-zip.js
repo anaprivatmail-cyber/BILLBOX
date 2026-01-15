@@ -68,6 +68,17 @@ export async function handler(event) {
     const body = await safeJsonBody(event)
     const spaceId = body.spaceId ? String(body.spaceId) : null
     const filters = body.filters || {}
+    const billIdsRaw = Array.isArray(body.billIds)
+      ? body.billIds
+      : Array.isArray(body.bill_ids)
+        ? body.bill_ids
+        : null
+    const billIds = billIdsRaw
+      ? billIdsRaw
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+        .slice(0, 500)
+      : []
 
     const supabase = authInfo.supabase
     const userId = authInfo.userId
@@ -81,13 +92,27 @@ export async function handler(event) {
       return jsonResponse(403, { ok: false, error: 'upgrade_required', code: payerCheck.code || 'upgrade_required' })
     }
 
-    const { query, hasAttachmentsOnly } = buildBillQueryWithFilters({ supabase, userId, spaceId, filters })
-    const { data: bills, error } = await query.order('due_date', { ascending: true })
-    if (error) {
-      return jsonResponse(500, { ok: false, error: 'query_failed', code: 'query_failed' })
+    let billList = []
+    let hasAttachmentsOnly = false
+    if (billIds.length) {
+      let q = supabase.from('bills').select('*').eq('user_id', userId).in('id', billIds)
+      if (spaceId) q = q.eq('space_id', spaceId)
+      const { data, error } = await q
+      if (error) {
+        return jsonResponse(500, { ok: false, error: 'query_failed', code: 'query_failed' })
+      }
+      billList = data || []
+      hasAttachmentsOnly = Boolean(filters?.hasAttachmentsOnly)
+    } else {
+      const built = buildBillQueryWithFilters({ supabase, userId, spaceId, filters })
+      hasAttachmentsOnly = Boolean(built.hasAttachmentsOnly)
+      const { data: bills, error } = await built.query.order('due_date', { ascending: true })
+      if (error) {
+        return jsonResponse(500, { ok: false, error: 'query_failed', code: 'query_failed' })
+      }
+      billList = bills || []
     }
 
-    const billList = bills || []
     if (!billList.length) {
       return jsonResponse(400, { ok: false, error: 'no_bills', code: 'no_bills' })
     }
@@ -170,7 +195,8 @@ export async function handler(event) {
 
     const start = String(filters?.start || '')
     const end = String(filters?.end || '')
-    const filename = sanitizeFilename(`billbox-attachments-${start || 'range'}-${end || ''}.zip`, 'billbox-attachments.zip')
+    const selectionLabel = billIds.length ? `selection-${filteredBills.length}` : `${start || 'range'}-${end || ''}`
+    const filename = sanitizeFilename(`billbox-attachments-${selectionLabel}.zip`, 'billbox-attachments.zip')
     const path = `${userId}/exports/${Date.now()}-${filename}`
 
     const uploaded = await uploadAndSign({

@@ -22,6 +22,176 @@ function safeParseJson(s) {
   }
 }
 
+function normalizeIban(input) {
+  return String(input || '').toUpperCase().replace(/\s+/g, '')
+}
+
+function isValidIbanChecksum(iban) {
+  const s = normalizeIban(iban)
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(s)) return false
+  // Move first 4 chars to end, convert letters to numbers (A=10..Z=35), mod 97 must be 1.
+  const rearranged = s.slice(4) + s.slice(0, 4)
+  let remainder = 0
+  for (let i = 0; i < rearranged.length; i++) {
+    const ch = rearranged[i]
+    const code = ch.charCodeAt(0)
+    if (code >= 48 && code <= 57) {
+      remainder = (remainder * 10 + (code - 48)) % 97
+    } else {
+      const val = code - 55 // 'A' -> 10
+      remainder = (remainder * 100 + val) % 97
+    }
+  }
+  return remainder === 1
+}
+
+function textContainsLabeledIban(rawText, iban) {
+  const s = normalizeIban(iban)
+  if (!s) return false
+  const raw = String(rawText || '')
+  const compact = raw.toUpperCase().replace(/\s+/g, '')
+  const idx = compact.indexOf(s)
+  if (idx < 0) return false
+  // Require an explicit label nearby to avoid accidental matches.
+  const windowStart = Math.max(0, idx - 40)
+  const windowEnd = Math.min(compact.length, idx + s.length + 40)
+  const around = compact.slice(windowStart, windowEnd)
+  return (
+    around.includes('IBAN') ||
+    around.includes('TRR') ||
+    around.includes('RACUN') ||
+    around.includes('RAČUN'.toUpperCase().replace(/\s+/g, '')) ||
+    around.includes('ACCOUNT')
+  )
+}
+
+function scoreIbanContext(rawText, iban) {
+  const s = normalizeIban(iban)
+  const raw = String(rawText || '')
+  const compact = raw.toUpperCase().replace(/\s+/g, '')
+  const idx = compact.indexOf(s)
+  if (idx < 0) return -999
+  const windowStart = Math.max(0, idx - 80)
+  const windowEnd = Math.min(compact.length, idx + s.length + 80)
+  const around = compact.slice(windowStart, windowEnd)
+
+  // Strong indicators (explicit payment/bank/account labels)
+  const strong = [
+    // Slovenia / EU
+    'IBAN',
+    'TRR',
+    'RACUN',
+    'RAČUN'.toUpperCase().replace(/\s+/g, ''),
+    'ZAPLACILO',
+    'PLAČILO'.toUpperCase().replace(/\s+/g, ''),
+    'NAKAZILO',
+    // International
+    'PAYMENT',
+    'PAYEE',
+    'BENEFICIARY',
+    'BANK',
+    'BANKDETAILS',
+    'ACCOUNT',
+    'ACCOUNTNO',
+    'A/C',
+    'A\C',
+    'SWIFT',
+    'BIC',
+    'WIRE',
+    'TRANSFER',
+    // UK / AU / US labels (even if not IBAN-based, they signal the bank-details area)
+    'SORTCODE',
+    'BSB',
+    'ROUTING',
+    'ABAROUTING',
+    'ABA',
+  ]
+
+  // Weaker indicators
+  const weak = [
+    'SEPA',
+    'SCT',
+    'REMITTANCE',
+    'REFERENCE',
+    'PAYMENTREFERENCE',
+    'DETAILS',
+    'DUE',
+    'PAYBY',
+  ]
+
+  let score = 0
+  for (const k of strong) if (around.includes(k)) score += 3
+  for (const k of weak) if (around.includes(k)) score += 1
+  // Prefer domestic SI IBAN slightly when ambiguous.
+  if (s.startsWith('SI')) score += 1
+  return score
+}
+
+function pickBestIbanFromText(rawText) {
+  const compact = String(rawText || '').toUpperCase()
+  const found = compact.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/g) || []
+  const unique = [...new Set(found.map(normalizeIban).filter(isValidIbanChecksum))]
+  if (unique.length === 0) return { iban: null, reason: 'none' }
+  if (unique.length === 1) return { iban: unique[0], reason: 'single' }
+
+  const scored = unique
+    .map((iban) => ({ iban, score: scoreIbanContext(rawText, iban) }))
+    .sort((a, b) => b.score - a.score)
+
+  const best = scored[0]
+  const second = scored[1]
+  // Only accept if we have a clear winner with a decent score.
+  if (best.score >= 4 && best.score >= (second.score + 2)) {
+    return { iban: best.iban, reason: 'scored_unique_best' }
+  }
+
+  // If multiple IBANs are present but exactly one has an explicit label, accept it.
+  const labeled = unique.filter((iban) => textContainsLabeledIban(rawText, iban))
+  if (labeled.length === 1) return { iban: labeled[0], reason: 'single_labeled' }
+
+  return { iban: null, reason: 'ambiguous_multi' }
+}
+
+function textContainsReference(rawText, ref) {
+  const s = String(ref || '').replace(/\s+/g, '').toUpperCase()
+  if (!s) return false
+  const compact = String(rawText || '').replace(/\s+/g, '').toUpperCase()
+  return compact.includes(s)
+}
+
+function sanitizeFields(rawText, fields) {
+  const out = { ...fields }
+  // IBAN: never guess. If multiple are present, only auto-pick a clearly best candidate.
+  const best = pickBestIbanFromText(rawText)
+  if (out.iban) {
+    const iban = normalizeIban(out.iban)
+    if (!isValidIbanChecksum(iban)) out.iban = null
+    else if (best.iban && iban === best.iban) out.iban = iban
+    else if (textContainsLabeledIban(rawText, iban) && best.reason !== 'ambiguous_multi') out.iban = iban
+    else out.iban = best.iban || null
+  } else {
+    out.iban = best.iban || null
+  }
+  if (out.reference) {
+    const r = String(out.reference || '').replace(/\s+/g, '').toUpperCase()
+    // Keep conservative: must look like SI.. or be explicitly present in OCR text.
+    if (!(r.startsWith('SI') && r.length >= 6) && !textContainsReference(rawText, r)) out.reference = null
+    else out.reference = r
+  }
+  if (typeof out.amount === 'number') {
+    if (!Number.isFinite(out.amount) || out.amount <= 0 || out.amount > 1000000) out.amount = null
+  }
+  if (out.currency && !/^[A-Z]{3}$/.test(String(out.currency))) out.currency = null
+  if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(String(out.due_date))) out.due_date = null
+  if (out.supplier && typeof out.supplier === 'string') {
+    const s = out.supplier.trim()
+    if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) out.supplier = null
+    else out.supplier = s
+  }
+  if (out.purpose && typeof out.purpose === 'string') out.purpose = out.purpose.trim() || null
+  return out
+}
+
 function jsonResponse(statusCode, payload) {
   return {
     statusCode,
@@ -93,11 +263,37 @@ async function parsePdfText(pdfBuffer) {
 
 function extractFields(rawText) {
   const text = (rawText || '').replace(/\r/g, '')
-  const out = { supplier: null, amount: null, currency: null, due_date: null, iban: null, reference: null, purpose: null }
+  const out = { supplier: null, creditor_name: null, invoice_number: null, amount: null, currency: null, due_date: null, iban: null, reference: null, purpose: null, payment_details: null }
 
-  // Supplier: first non-empty line candidate
+  function hasLetters(s) {
+    return /[A-Za-zÀ-žČŠŽčšž]/.test(String(s || ''))
+  }
+
+  function isLikelyNoiseLine(line) {
+    const s = String(line || '').trim()
+    if (!s) return true
+    const compact = s.replace(/\s+/g, '')
+    // Pure numbers / punctuation
+    if (/^[0-9\s.,:\-\/]+$/.test(s)) return true
+    // IBAN
+    if (/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(compact)) return true
+    // Amount snippets
+    if (/^EUR\s*\d/i.test(s)) return true
+    // Dates
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return true
+    if (/^\d{2}[\.\/]\d{2}[\.\/]\d{2,4}$/.test(s)) return true
+    return false
+  }
+
+  // Supplier: pick a line that actually looks like a name (letters), not a random number/header.
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean)
-  if (lines.length) out.supplier = lines[0]
+  if (lines.length) {
+    const candidate =
+      lines.find((l) => hasLetters(l) && !isLikelyNoiseLine(l) && l.length >= 3) ||
+      lines.find((l) => hasLetters(l) && l.length >= 3) ||
+      lines[0]
+    out.supplier = candidate
+  }
 
   // IBAN
   const ibanMatch = text.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
@@ -108,6 +304,16 @@ function extractFields(rawText) {
   let amount = null
   const eur = text.match(/EUR\s*([0-9]+(?:[\.,][0-9]{1,2})?)/i)
   if (eur) { currency = 'EUR'; amount = eur[1] }
+  if (!amount) {
+    // 12,34 EUR / 12.34 EUR
+    const eurAfter = text.match(/([0-9]+(?:[\.,][0-9]{1,2})?)\s*EUR\b/i)
+    if (eurAfter) { currency = 'EUR'; amount = eurAfter[1] }
+  }
+  if (!amount) {
+    // 12,34€ / 12.34 €
+    const euroSign = text.match(/([0-9]+(?:[\.,][0-9]{1,2})?)\s*€/) 
+    if (euroSign) { currency = 'EUR'; amount = euroSign[1] }
+  }
   if (!amount) {
     const anyAmt = text.match(/([0-9]+(?:[\.,][0-9]{1,2})?)\s*(EUR|USD|GBP)/i)
     if (anyAmt) { amount = anyAmt[1]; currency = anyAmt[2].toUpperCase() }
@@ -133,12 +339,75 @@ function extractFields(rawText) {
   }
 
   // Reference / sklic
-  const ref = text.match(/(SI\d{2}[0-9]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
+  const ref = text.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
   if (ref) out.reference = (ref[1] || ref[2] || '').replace(/\s+/g, '')
 
   // Purpose / namen
   const purp = text.match(/namen:?\s*(.+)|purpose:?\s*(.+)/i)
   if (purp) out.purpose = (purp[1] || purp[2] || '').trim()
+
+  // Creditor/payee name (often same as supplier)
+  const cred = text.match(/(prejemnik|recipient|payee|upravi\w*):?\s*(.+)/i)
+  if (cred) {
+    const v = String(cred[2] || '').trim()
+    if (v && /[A-Za-zÀ-žČŠŽčšž]/.test(v) && v.length >= 2) out.creditor_name = v
+  }
+  if (!out.creditor_name && out.supplier) out.creditor_name = out.supplier
+
+  // Invoice number / document number (safe field; AI also helps later)
+  const inv = text.match(/(ra\u010dun\s*(št\.|st\.|stevilka)?|\binvoice\b\s*(no\.|number)?|\bšt\.?\s*ra\u010duna|\bdokument\b\s*(št\.|no\.)?)\s*[:#]?\s*([A-Z0-9\-\/]{3,})/i)
+  if (inv) {
+    const v = String(inv[4] || '').trim()
+    if (v) out.invoice_number = v
+  }
+
+  // Payment details (non-IBAN systems): collect labeled lines verbatim-ish from OCR.
+  // This is displayed as notes and can be used when IBAN/reference are not applicable (e.g. USA/UK/AU).
+  try {
+    const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    const keyLine = /(SWIFT|BIC|ROUTING|ABA|SORT\s*CODE|BSB|ACCOUNT\s*(NO\.?|NUMBER)?|A\/?C\b|BENEFICIARY|PAYEE|BANK\s*DETAILS|BANK\s*NAME|WIRE\b)/i
+    const picked = []
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i]
+      if (!keyLine.test(l)) continue
+      picked.push(l)
+      // If it's a label-only line, also grab the next line.
+      if ((/[:\-]$/.test(l) || l.length <= 18) && lines[i + 1]) {
+        const n = lines[i + 1]
+        if (n && n.length <= 120) picked.push(n)
+      }
+    }
+
+    // Also capture common labeled numeric identifiers when present.
+    const more = []
+    const routing = text.match(/(ROUTING\s*(NUMBER|NO\.?|#)?\s*[:\-]?\s*)(\d{9})/i)
+    if (routing) more.push(`Routing: ${routing[3]}`)
+    const sort = text.match(/(SORT\s*CODE\s*[:\-]?\s*)(\d{2}[-\s]?\d{2}[-\s]?\d{2})/i)
+    if (sort) more.push(`Sort code: ${sort[2].replace(/\s+/g, '')}`)
+    const bsb = text.match(/(\bBSB\b\s*[:\-]?\s*)(\d{3}[-\s]?\d{3})/i)
+    if (bsb) more.push(`BSB: ${bsb[2].replace(/\s+/g, '')}`)
+    const acct = text.match(/(ACCOUNT\s*(NUMBER|NO\.?|#)\s*[:\-]?\s*)([0-9]{6,20})/i)
+    if (acct) more.push(`Account: ${acct[3]}`)
+    const swift = text.match(/(SWIFT|BIC)\s*[:\-]?\s*([A-Z0-9]{8}(?:[A-Z0-9]{3})?)/i)
+    if (swift) more.push(`${swift[1].toUpperCase()}: ${swift[2].toUpperCase()}`)
+
+    const merged = [...picked, ...more]
+      .map((s) => String(s || '').trim())
+      .filter(Boolean)
+      .filter((s) => s.length <= 180)
+
+    // Dedupe
+    const uniq = []
+    const seen = new Set()
+    for (const s of merged) {
+      const key = s.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      uniq.push(s)
+    }
+
+    if (uniq.length) out.payment_details = uniq.slice(0, 8).join('\n')
+  } catch {}
 
   return out
 }
@@ -151,9 +420,11 @@ async function extractFieldsWithAI(rawText) {
   const system =
     'You extract structured payment/invoice fields from OCR text for a bill-tracking app. ' +
     'Return JSON ONLY with schema: ' +
-    '{"supplier": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null}. ' +
+    '{"supplier": string|null, "creditor_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null}. ' +
     'Rules: ' +
     '- Do NOT guess. Use null if uncertain. ' +
+    '- Prefer extracting invoice_number when present (invoice no / račun št / dokument št). ' +
+    '- supplier is the issuer/seller; creditor_name is the payee on the payment instruction (often same as supplier). ' +
     '- due_date must be ISO YYYY-MM-DD if present, else null. ' +
     '- currency must be 3-letter uppercase (e.g., EUR) if present. ' +
     '- iban should be compact (no spaces) if present. ' +
@@ -191,6 +462,8 @@ async function extractFieldsWithAI(rawText) {
 
     const out = {
       supplier: typeof parsed.supplier === 'string' ? parsed.supplier.trim() || null : null,
+      creditor_name: typeof parsed.creditor_name === 'string' ? parsed.creditor_name.trim() || null : null,
+      invoice_number: typeof parsed.invoice_number === 'string' ? parsed.invoice_number.trim() || null : null,
       amount: typeof parsed.amount === 'number' && Number.isFinite(parsed.amount) ? parsed.amount : null,
       currency: typeof parsed.currency === 'string' ? parsed.currency.trim().toUpperCase() || null : null,
       due_date: typeof parsed.due_date === 'string' ? parsed.due_date.trim() || null : null,
@@ -201,7 +474,11 @@ async function extractFieldsWithAI(rawText) {
 
     if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(out.due_date)) out.due_date = null
     if (out.currency && !/^[A-Z]{3}$/.test(out.currency)) out.currency = null
-    if (out.iban && !/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(out.iban)) out.iban = null
+    if (out.iban) {
+      const iban = normalizeIban(out.iban)
+      if (!isValidIbanChecksum(iban)) out.iban = null
+      else out.iban = iban
+    }
 
     return out
   } catch {
@@ -209,13 +486,29 @@ async function extractFieldsWithAI(rawText) {
   }
 }
 
-function mergeFields(base, override) {
+function mergeFields(base, ai, rawText) {
   const out = { ...base }
-  if (!override) return out
-  for (const k of Object.keys(out)) {
-    if (override[k] !== null && override[k] !== undefined && override[k] !== '') out[k] = override[k]
+  if (!ai) return sanitizeFields(rawText, out)
+
+  // AI is allowed to help with non-payment-critical fields.
+  if (!out.supplier && ai.supplier) out.supplier = ai.supplier
+  if (!out.creditor_name && ai.creditor_name) out.creditor_name = ai.creditor_name
+  if (!out.invoice_number && ai.invoice_number) out.invoice_number = ai.invoice_number
+  if (!out.purpose && ai.purpose) out.purpose = ai.purpose
+  if (!out.due_date && ai.due_date) out.due_date = ai.due_date
+
+  // Payment-critical: only fill if base is missing AND the value is verifiable.
+  // IBAN is chosen from OCR text via sanitizeFields (AI may misread digits).
+  if (!out.reference && ai.reference) {
+    const r = String(ai.reference || '').replace(/\s+/g, '').toUpperCase()
+    const compact = String(rawText || '').toUpperCase()
+    const allRefs = [...new Set((compact.match(/SI\d{2}\s*[0-9A-Z\-\/]{4,}/g) || []).map((x) => String(x || '').replace(/\s+/g, '').toUpperCase()))]
+    if (textContainsReference(rawText, r) || allRefs.length === 1) out.reference = r
   }
-  return out
+  if (out.currency == null && ai.currency && /^[A-Z]{3}$/.test(String(ai.currency))) out.currency = ai.currency
+  if (typeof out.amount !== 'number' && typeof ai.amount === 'number' && Number.isFinite(ai.amount) && ai.amount > 0) out.amount = ai.amount
+
+  return sanitizeFields(rawText, out)
 }
 
 export async function handler(event) {
