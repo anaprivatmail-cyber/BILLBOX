@@ -3144,14 +3144,14 @@ function ScanBillScreen() {
                   />
                   <AppButton
                     label={ocrBusy ? tr('Extracting…') : tr('Import photo')}
-                    variant="secondary"
+                    variant="outline"
                     iconName="image-outline"
                     onPress={pickImage}
                     loading={ocrBusy}
                   />
                   <AppButton
                     label={ocrBusy ? tr('Extracting…') : tr('Import PDF')}
-                    variant="secondary"
+                    variant="outline"
                     iconName="document-text-outline"
                     onPress={pickPdfForOCR}
                     loading={ocrBusy}
@@ -3165,7 +3165,7 @@ function ScanBillScreen() {
                 <View style={styles.captureActions}>
                   <AppButton
                     label={tr('Scan again')}
-                    variant="secondary"
+                    variant="outline"
                     iconName="scan-outline"
                     onPress={() => {
                       setCameraVisible(true)
@@ -3175,14 +3175,14 @@ function ScanBillScreen() {
                   />
                   <AppButton
                     label={ocrBusy ? tr('Extracting…') : tr('Import photo')}
-                    variant="secondary"
+                    variant="outline"
                     iconName="image-outline"
                     onPress={pickImage}
                     loading={ocrBusy}
                   />
                   <AppButton
                     label={ocrBusy ? tr('Extracting…') : tr('Import PDF')}
-                    variant="secondary"
+                    variant="outline"
                     iconName="document-text-outline"
                     onPress={pickPdfForOCR}
                     loading={ocrBusy}
@@ -3198,8 +3198,7 @@ function ScanBillScreen() {
         )}
 
         <Surface elevated>
-          <SectionHeader title={tr('Bill data sources')} actionLabel={tr('Clear')} onActionPress={clearExtraction} />
-          <Text style={styles.bodyText}>{tr('Use any source below to prefill the bill. All fields stay editable before you save.')}</Text>
+          <SectionHeader title={tr('Advanced')} actionLabel={tr('Clear')} onActionPress={clearExtraction} />
           <Disclosure title={tr('Paste QR text (advanced)')}>
             <Text style={styles.mutedText}>{tr('Paste QR text to extract payment fields.')}</Text>
             <AppInput
@@ -3209,7 +3208,7 @@ function ScanBillScreen() {
               multiline
             />
             <View style={styles.actionRow}>
-              <AppButton label={tr('Extract fields')} iconName="sparkles-outline" onPress={handleManualExtract} />
+              <AppButton label={tr('Extract fields')} variant="outline" iconName="sparkles-outline" onPress={handleManualExtract} />
               <Badge label={format ? `${tr('Detected:')} ${format}` : tr('Awaiting data')} tone={format ? 'info' : 'neutral'} />
             </View>
           </Disclosure>
@@ -5566,7 +5565,7 @@ function HomeScreen() {
                 ]}
               >
                 <View style={styles.statIconWrap}>
-                  <Ionicons name={tile.icon as keyof typeof Ionicons.glyphMap} size={20} color={themeColors.primary} />
+                  <Ionicons name={tile.icon as keyof typeof Ionicons.glyphMap} size={20} color={colors.text} />
                 </View>
                 <Text style={styles.statLabel}>{tile.label}</Text>
                 <Text style={styles.statValue} numberOfLines={1}>
@@ -8917,7 +8916,7 @@ function ProfileRenameGate() {
 
 function MainTabs() {
   const insets = useSafeAreaInsets()
-  const bottomPadding = Math.max(insets.bottom, 6)
+  const bottomPadding = Math.max(insets.bottom, 2)
   const { lang } = useLangContext()
 
   return (
@@ -8945,9 +8944,9 @@ function MainTabs() {
             borderTopColor: '#E5E7EB',
             borderTopWidth: StyleSheet.hairlineWidth,
             backgroundColor: '#FFFFFF',
-            paddingTop: 2,
+            paddingTop: 0,
             paddingBottom: bottomPadding,
-            height: 40 + bottomPadding,
+            height: 38 + bottomPadding,
           },
           tabBarLabelStyle: {
             fontSize: 10,
@@ -9997,12 +9996,12 @@ const styles = StyleSheet.create({
   homeMetricValue: { fontSize: 12, fontWeight: '700', color: themeColors.text },
   homeMetricLabel: { marginTop: 2, fontSize: 11, color: themeColors.textMuted },
   statCard: { paddingVertical: themeSpacing.xs, paddingHorizontal: themeSpacing.sm, gap: themeSpacing.xs, flex: 1, justifyContent: 'space-between' },
-  statCardPrimary: { borderWidth: 1, borderColor: themeColors.primary },
-  homePrimaryTile: { borderWidth: 1 },
-  homePrimaryTileScan: { backgroundColor: '#EEF2FF', borderColor: '#C7D2FE' },
-  homePrimaryTileBills: { backgroundColor: '#F0FDFA', borderColor: '#99F6E4' },
-  homePrimaryTilePay: { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' },
-  statIconWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
+  statCardPrimary: { borderWidth: 1, borderColor: themeColors.border },
+  homePrimaryTile: { borderWidth: 1, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
+  homePrimaryTileScan: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
+  homePrimaryTileBills: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
+  homePrimaryTilePay: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
+  statIconWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },
   statLabel: { fontSize: 13, fontWeight: '600', color: themeColors.text },
   statValue: { fontSize: 11, color: themeColors.textMuted },
 

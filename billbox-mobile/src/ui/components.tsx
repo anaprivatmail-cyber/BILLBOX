@@ -34,17 +34,19 @@ export function Screen({
 }) {
   const insets = useSafeAreaInsets()
   const colors = useThemeColors()
-  const topPad = Math.max(8, layout.screenPadding - 4)
+  // SafeAreaView already accounts for the top inset; keep extra padding minimal.
+  const topPad = 4
+  const bottomPad = Math.max(4, Math.min(8, insets.bottom))
 
   if (!scroll) {
     return (
-      <SafeAreaView style={[{ flex: 1, backgroundColor: colors.background }, style]}>
+      <SafeAreaView edges={['top']} style={[{ flex: 1, backgroundColor: colors.background }, style]}>
         <View
           style={{
             flex: 1,
             paddingHorizontal: layout.screenPadding,
             paddingTop: topPad,
-            paddingBottom: Math.max(insets.bottom, layout.screenPadding),
+            paddingBottom: bottomPad,
             position: 'relative',
           }}
         >
@@ -55,13 +57,13 @@ export function Screen({
   }
 
   return (
-    <SafeAreaView style={[{ flex: 1, backgroundColor: colors.background }, style]}>
+    <SafeAreaView edges={['top']} style={[{ flex: 1, backgroundColor: colors.background }, style]}>
       <ScrollView
         contentContainerStyle={{
           flexGrow: 1,
           paddingHorizontal: layout.screenPadding,
           paddingTop: topPad,
-          paddingBottom: Math.max(insets.bottom, layout.screenPadding),
+          paddingBottom: bottomPad,
         }}
         keyboardShouldPersistTaps="handled"
       >

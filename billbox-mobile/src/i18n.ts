@@ -230,7 +230,7 @@ const dict: DictByLang = {
     'Start date': 'Začetni datum',
     'End date': 'Končni datum',
     'Unpaid only': 'Samo neplačani',
-    Overdue: 'Zapadli',
+    Overdue: 'Zapadlo',
     'Has attachment': 'Ima prilogo',
     'Include archived': 'Vključi arhivirane',
     'Tap "Filters" to adjust date, supplier, amount, status, and attachments.': 'Tapni "Filtri" za datum, dobavitelja, znesek, status in priloge.',
