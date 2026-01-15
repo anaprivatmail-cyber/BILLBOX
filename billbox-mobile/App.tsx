@@ -549,8 +549,24 @@ function parseEPC(text: string): EPCResult | null {
       const parsed = Number(num.replace(',', '.'))
       if (!Number.isNaN(parsed)) amount = parsed
     }
-    const purpose = lines[8] || ''
-    const reference = lines[9] || ''
+    // EPC QR payload is line-based, but some providers omit the 4-char purpose code line.
+    const l8 = lines[8] || ''
+    const hasPurposeCode = /^[A-Z0-9]{4}$/.test(l8)
+    const remittance = (hasPurposeCode ? (lines[9] || '') : l8).trim()
+    const info = (hasPurposeCode ? (lines[10] || '') : (lines[9] || '')).trim()
+    const combined = [remittance, info].filter(Boolean).join('\n')
+
+    const refMatch = combined.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,})/i)
+    const reference = refMatch ? String(refMatch[1] || '').replace(/\s+/g, '').toUpperCase() : ''
+    let purpose = combined
+    if (reference) {
+      // Remove the reference token from the purpose if it's embedded in the remittance.
+      purpose = purpose
+        .replace(refMatch ? refMatch[1] : '', '')
+        .replace(/\s{2,}/g, ' ')
+        .trim()
+    }
+    if (!purpose) purpose = combined
     const result: EPCResult = {
       iban: iban || undefined,
       creditor_name: name || undefined,
@@ -571,7 +587,8 @@ function parseUPN(text: string): EPCResult | null {
     const lines = normalized.split(/\n+/).map((l) => l.trim()).filter(Boolean)
     const joined = lines.join('\n')
     if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
-    const ibanMatch = joined.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
+    const compactJoined = joined.replace(/\s+/g, '')
+    const ibanMatch = compactJoined.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
     const iban = ibanMatch ? ibanMatch[0].replace(/\s+/g, '') : undefined
     let amount: number | undefined
     let currency: string | undefined
@@ -620,7 +637,7 @@ function parseUPN(text: string): EPCResult | null {
     }
     let reference: string | undefined
     for (const l of lines) {
-      const m = l.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
+      const m = l.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
       if (m) {
         reference = (m[1] || m[2] || '').replace(/\s+/g, '')
         if (reference) break
@@ -2807,17 +2824,17 @@ function ScanBillScreen() {
     if (supplierName) setSupplier(supplierName)
     const cred = pickNameCandidate(p.creditor_name, supplierName)
     if (cred) setCreditorName(cred)
-    setIban(p.iban || '')
-    setReference(p.reference || '')
-    setPurpose(p.purpose || '')
-    setPaymentDetails(p.payment_details ? String(p.payment_details) : '')
+    if (p.iban) setIban(p.iban || '')
+    if (p.reference) setReference(p.reference || '')
+    if (p.purpose) setPurpose(p.purpose || '')
+    if (p.payment_details) setPaymentDetails(p.payment_details ? String(p.payment_details) : '')
     if (typeof p.amount === 'number') setAmountStr(String(p.amount))
     if (p.currency) setCurrency(p.currency)
     if (p.due_date) setDueDate(p.due_date)
 
-    // If we parsed the QR but still don't have a usable name, ask AI to classify fields from the raw text.
-    const missingName = !supplierName && !cred
-    if (missingName && entitlements.canUseOCR) {
+    // If QR parsing is incomplete, ask AI to classify and fill the missing fields from the raw payload.
+    const missingCritical = !p.iban || !p.reference || !p.purpose || !p.creditor_name
+    if (missingCritical && entitlements.canUseOCR) {
       ;(async () => {
         try {
           setOcrError(null)
@@ -2855,14 +2872,19 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary } = await performOCR(uri)
+      const { fields: f, summary, rawText: ocrText } = await performOCR(uri)
+      if (typeof ocrText === 'string' && ocrText.trim()) {
+        setRawText(ocrText)
+        setFormat('OCR')
+        setParsed(f)
+      }
       const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
       if (supplierName) setSupplier(supplierName)
       const cred = pickNameCandidate(f.creditor_name, supplierName)
       if (cred) setCreditorName(cred)
-      setIban(f.iban || '')
-      setReference(f.reference || '')
-      setPurpose(f.purpose || '')
+      if (f.iban) setIban(f.iban || '')
+      if (f.reference) setReference(f.reference || '')
+      if (f.purpose) setPurpose(f.purpose || '')
       if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
       if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
       if (typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -2871,10 +2893,14 @@ function ScanBillScreen() {
       setUseDataActive(true)
       setCameraVisible(false)
       setTorch('off')
-      Alert.alert(tr('OCR extracted'), `${summary}\n\n${tr('The selected image will be attached on save.')}`)
+      // Keep UX non-technical; the draft is already filled and still editable.
+      if (summary && summary !== 'No fields found') {
+        // Optional: leave silent, but keep summary available via rawText.
+      }
     } catch (e: any) {
       const msg = e?.message || 'OCR failed'
-      setOcrError(msg)
+      // Avoid leaking technical errors into UI.
+      setOcrError(tr('OCR failed'))
       if (/quota/i.test(msg) || /ocr_quota_exceeded/i.test(msg)) {
         showUpgradeAlert('ocr')
       }

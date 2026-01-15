@@ -237,24 +237,37 @@ export function EmptyState({
 
 export function InlineInfo({
   tone,
+  title,
   message,
   iconName,
   translate = true,
+  style,
 }: {
   tone: 'info' | 'warning' | 'danger' | 'success'
+  title?: string
   message: string
   iconName?: keyof typeof Ionicons.glyphMap
   translate?: boolean
+  style?: StyleProp<ViewStyle>
 }) {
   const colors = useThemeColors()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const bg = tone === 'info' ? '#EFF6FF' : tone === 'warning' ? '#FFFBEB' : tone === 'danger' ? '#FEF2F2' : '#F0FDF4'
   const fg = tone === 'info' ? '#1D4ED8' : tone === 'warning' ? '#92400E' : tone === 'danger' ? '#991B1B' : '#166534'
+  const border = tone === 'info' ? '#BFDBFE' : tone === 'warning' ? '#FDE68A' : tone === 'danger' ? '#FECACA' : '#BBF7D0'
   const text = translate ? tr(message) : message
   return (
-    <View style={[styles.inlineInfo, { backgroundColor: bg }]}> 
-      {iconName ? <Ionicons name={iconName} size={16} color={fg} /> : null}
-      <Text style={[styles.inlineInfoText, { color: fg }]}>{text}</Text>
+    <View style={[styles.inlineInfo, { backgroundColor: bg, borderColor: border }, style]}>
+      <View style={[styles.inlineInfoAccent, { backgroundColor: fg }]} />
+      {iconName ? (
+        <View style={[styles.inlineInfoIconWrap, { borderColor: border }]}>
+          <Ionicons name={iconName} size={16} color={fg} />
+        </View>
+      ) : null}
+      <View style={{ flex: 1, gap: 2 }}>
+        {title ? <Text style={[styles.inlineInfoTitle, { color: fg }]}>{translate ? tr(title) : title}</Text> : null}
+        <Text style={[styles.inlineInfoText, { color: fg }]}>{text}</Text>
+      </View>
     </View>
   )
 }
@@ -313,6 +326,39 @@ export function Divider({ style }: { style?: StyleProp<ViewStyle> }) {
 
 function makeStyles(colors: ReturnType<typeof useThemeColors>) {
   return StyleSheet.create({
+    inlineInfo: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 10,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+    },
+    inlineInfoAccent: {
+      width: 4,
+      borderRadius: 999,
+      alignSelf: 'stretch',
+      opacity: 0.9,
+    },
+    inlineInfoIconWrap: {
+      width: 28,
+      height: 28,
+      borderRadius: 999,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: StyleSheet.hairlineWidth,
+      backgroundColor: '#FFFFFFAA',
+    },
+    inlineInfoTitle: {
+      fontSize: 12,
+      fontWeight: '800',
+    },
+    inlineInfoText: {
+      fontSize: 12,
+      fontWeight: '600',
+      lineHeight: 16,
+    },
   surface: {
     backgroundColor: colors.surface,
     borderRadius: layout.radius,
@@ -413,19 +459,6 @@ function makeStyles(colors: ReturnType<typeof useThemeColors>) {
     fontSize: 13,
     color: colors.textMuted,
     textAlign: 'center',
-  },
-  inlineInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-  },
-  inlineInfoText: {
-    flex: 1,
-    fontSize: 13,
-    fontWeight: '600',
   },
   disclosureWrap: {
     borderWidth: 1,

@@ -153,7 +153,7 @@ function scoreIbanContext(rawText, iban) {
 }
 
 function pickBestIbanFromText(rawText) {
-  const compact = String(rawText || '').toUpperCase()
+  const compact = String(rawText || '').toUpperCase().replace(/\s+/g, '')
   const found = compact.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/g) || []
   const unique = [...new Set(found.map(normalizeIban).filter(isValidIbanChecksum))]
   if (unique.length === 0) return { iban: null, reason: 'none' }
@@ -330,7 +330,8 @@ function extractFields(rawText) {
   }
 
   // IBAN
-  const ibanMatch = text.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
+  const compactText = text.toUpperCase().replace(/\s+/g, '')
+  const ibanMatch = compactText.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
   if (ibanMatch) out.iban = ibanMatch[0].replace(/\s+/g, '')
 
   // Amount + currency
@@ -373,7 +374,7 @@ function extractFields(rawText) {
   }
 
   // Reference / sklic
-  const ref = text.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
+  const ref = text.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
   if (ref) out.reference = (ref[1] || ref[2] || '').replace(/\s+/g, '')
 
   // Purpose / namen
