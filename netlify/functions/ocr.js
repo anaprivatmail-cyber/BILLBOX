@@ -317,6 +317,10 @@ function extractFields(rawText) {
   const text = (rawText || '').replace(/\r/g, '')
   const out = { supplier: null, creditor_name: null, invoice_number: null, amount: null, currency: null, due_date: null, iban: null, reference: null, purpose: null, payment_details: null }
 
+  function isPayerLine(line) {
+    return /\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b\s*:?/i.test(String(line || ''))
+  }
+
   function parseMoneyAmount(input) {
     const raw = String(input || '').trim()
     if (!raw) return null
@@ -434,7 +438,8 @@ function extractFields(rawText) {
 
     const candidate =
       labeledSupplier ||
-      lines.find((l) => hasLetters(l) && !isLikelyNoiseLine(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
+      lines.find((l) => !isPayerLine(l) && hasLetters(l) && !isLikelyNoiseLine(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
+      lines.find((l) => !isPayerLine(l) && hasLetters(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
       lines.find((l) => hasLetters(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
       lines[0]
     out.supplier = looksLikeMisassignedName(candidate) ? null : candidate
@@ -574,7 +579,7 @@ function extractFields(rawText) {
   const cred = text.match(/(prejemnik|recipient|payee|beneficiary|creditor|to\s*:|upravi[^\s:]*)\s*:?\s*(.+)/i)
   if (cred) {
     const v = String(cred[2] || '').trim()
-    if (v && /[A-Za-zÀ-žČŠŽčšž]/.test(v) && v.length >= 2 && !looksLikeMisassignedName(v)) out.creditor_name = v
+    if (v && !isPayerLine(v) && /[A-Za-zÀ-žČŠŽčšž]/.test(v) && v.length >= 2 && !looksLikeMisassignedName(v)) out.creditor_name = v
   }
   if (!out.creditor_name && out.supplier && !looksLikeMisassignedName(out.supplier)) out.creditor_name = out.supplier
 
@@ -584,6 +589,9 @@ function extractFields(rawText) {
     const v = String(inv[4] || '').trim()
     if (v) out.invoice_number = v
   }
+
+  // If purpose isn't explicitly present, invoice/document number is a common, safe fallback.
+  if (!out.purpose && out.invoice_number) out.purpose = out.invoice_number
 
   // Payment details (non-IBAN systems): collect labeled lines verbatim-ish from OCR.
   // This is displayed as notes and can be used when IBAN/reference are not applicable (e.g. USA/UK/AU).

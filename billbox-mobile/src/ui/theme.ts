@@ -104,8 +104,8 @@ export const spacing = {
 }
 
 export const layout = {
-  screenPadding: 16,
-  cardPadding: 14,
-  radius: 14,
+  screenPadding: 18,
+  cardPadding: 16,
+  radius: 18,
   gap: 12,
 }

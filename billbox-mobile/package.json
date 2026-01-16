@@ -1,6 +1,6 @@
 {
   "name": "billbox-mobile",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "main": "index.ts",
   "scripts": {
     "i18n:sync": "node tools/i18n-sync.js",

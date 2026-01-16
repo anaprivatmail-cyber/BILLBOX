@@ -2646,6 +2646,9 @@ function ScanBillScreen() {
   const [purpose, setPurpose] = useState('')
   const [paymentDetails, setPaymentDetails] = useState('')
 
+  const [ibanHint, setIbanHint] = useState<string | null>(null)
+  const [referenceHint, setReferenceHint] = useState<string | null>(null)
+
   const [lastQR, setLastQR] = useState('')
   const [torch, setTorch] = useState<'on' | 'off'>('off')
 
@@ -2709,7 +2712,213 @@ function ScanBillScreen() {
   }
 
   function normalizeIban(input: string): string {
-    return String(input || '').toUpperCase().replace(/\s+/g, '')
+    // Keep only A-Z0-9; IBAN max length is 34.
+    return String(input || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+  }
+
+  function looksLikeIban(input: string): boolean {
+    return /^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(normalizeIban(input))
+  }
+
+  function extractFirstValidIban(text: string): string | null {
+    const raw = String(text || '')
+    const matches = raw.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
+    for (const m of matches) {
+      const cand = normalizeIban(m)
+      if (isValidIbanChecksum(cand)) return cand
+    }
+    return null
+  }
+
+  function normalizeReference(input: string): string {
+    // Keep it strict-ish: uppercase + alnum only.
+    return String(input || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+  }
+
+  function extractReferenceCandidate(text: string): string | null {
+    const raw = String(text || '')
+    const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    for (const l of lines) {
+      const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
+      if (!labeled) continue
+      const cand = normalizeReference(labeled[2])
+      if (cand.length >= 4) return cand
+    }
+    const si = raw.match(/\bSI\s*\d{2}\s*\d{3,}\b/gi)
+    if (si?.[0]) return normalizeReference(si[0])
+    const rf = raw.match(/\bRF\s*\d{2}\s*[A-Z0-9]{4,}\b/gi)
+    if (rf?.[0]) return normalizeReference(rf[0])
+    return null
+  }
+
+  function isPayerLabelLine(line: string): boolean {
+    return /\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b\s*:?/i.test(String(line || ''))
+  }
+
+  function extractLabeledValueFromText(rawText: string, labels: RegExp[]): string | null {
+    const lines = String(rawText || '')
+      .replace(/\r/g, '')
+      .split(/\n+/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i]
+      for (const re of labels) {
+        const m = l.match(re)
+        if (!m) continue
+        const direct = String(m[1] || '').trim()
+        if (direct) return direct
+        const next = String(lines[i + 1] || '').trim()
+        if (next) return next
+      }
+    }
+    return null
+  }
+
+  function extractCreditorNameFromText(rawText: string): string | null {
+    const cand = extractLabeledValueFromText(rawText, [
+    /^(?:prejemnik|recipient|payee|beneficiary|creditor|upravi\S*)\s*:?\s*(.+)$/i,
+    /^(?:to)\s*:?\s*(.+)$/i,
+    ])
+    if (!cand) return null
+    if (isPayerLabelLine(cand)) return null
+    const cleaned = cand.replace(/\s+/g, ' ').trim()
+    if (!cleaned) return null
+    if (looksLikeMisassignedName(cleaned)) return null
+    return cleaned
+  }
+
+  function extractInvoiceNumberFromText(rawText: string): string | null {
+    const m = String(rawText || '').match(
+      /(ra\u010dun\s*(\u0161t\.|st\.|stevilka)?|\binvoice\b\s*(no\.|number)?|\b\u0161t\.?\s*ra\u010duna|\bdokument\b\s*(\u0161t\.|no\.)?)\s*[:#]?\s*([A-Z0-9\-\/]{3,})/i,
+    )
+    const v = String(m?.[5] || '').trim()
+    return v || null
+  }
+
+  function extractPurposeFromText(rawText: string): string | null {
+    const cand = extractLabeledValueFromText(rawText, [
+      /^(?:namen|purpose|opis|description|memo|payment\s*for)\s*:?\s*(.+)$/i,
+    ])
+    const cleaned = String(cand || '').replace(/\s+/g, ' ').trim()
+    return cleaned || null
+  }
+
+  function applyExtractedPaymentFields(fields: any) {
+    const warnings: string[] = []
+    const rawCreditor = fields?.creditor_name ? String(fields.creditor_name) : ''
+    const rawSupplier = fields?.supplier ? String(fields.supplier) : ''
+    const rawInvoice = fields?.invoice_number ? String(fields.invoice_number) : ''
+    const rawIban = fields?.iban ? String(fields.iban) : ''
+    const rawRef = fields?.reference ? String(fields.reference) : ''
+    const rawPurpose = fields?.purpose ? String(fields.purpose) : ''
+    const rawPaymentDetails = fields?.payment_details ? String(fields.payment_details) : ''
+    const rawText = fields?.rawText ? String(fields.rawText) : ''
+
+    // Names: prefer explicit creditor labels from text; never take payer labels.
+    const creditorFromText = extractCreditorNameFromText(rawText)
+    const nameCandidate = pickNameCandidate(rawCreditor, rawSupplier, creditorFromText)
+    if (nameCandidate) {
+      if (!supplier.trim() || looksLikeMisassignedName(supplier)) setSupplier(nameCandidate)
+      if (!creditorName.trim() || looksLikeMisassignedName(creditorName)) setCreditorName(nameCandidate)
+    }
+
+    // Invoice number (used as a fallback for purpose when purpose isn't explicit).
+    const invCandidate = (rawInvoice || '').trim() || extractInvoiceNumberFromText(rawText) || ''
+    if (invCandidate) {
+      if (!invoiceNumber.trim()) setInvoiceNumber(invCandidate)
+    }
+
+    const foundIban = extractFirstValidIban(rawIban) || extractFirstValidIban(rawPaymentDetails) || extractFirstValidIban(rawText) || extractFirstValidIban(rawRef)
+    if (foundIban) {
+      setIban(foundIban)
+    } else if (rawIban) {
+      // Never shove arbitrary OCR/QR junk into the IBAN field.
+      warnings.push(tr('IBAN could not be validated. Please check it.'))
+    }
+
+    let ref = normalizeReference(rawRef)
+    if (!ref) {
+      const extracted = extractReferenceCandidate(rawPaymentDetails) || extractReferenceCandidate(rawText)
+      if (extracted) ref = extracted
+    }
+    // Guardrails: reference must not be a valid IBAN.
+    if (ref) {
+      if (looksLikeIban(ref) && isValidIbanChecksum(ref)) {
+        warnings.push(tr('Reference looked like an IBAN; it was ignored.'))
+        ref = ''
+      }
+      if (foundIban && ref === foundIban) {
+        warnings.push(tr('Reference matched the IBAN; it was ignored.'))
+        ref = ''
+      }
+    }
+    if (ref) setReference(ref)
+
+    const purposeClean = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
+    const purposeFromText = extractPurposeFromText(rawText)
+    const purposeFinal = purposeClean || purposeFromText || ''
+    if (purposeFinal) {
+      setPurpose(purposeFinal)
+    } else if (!purpose.trim() && invCandidate) {
+      // If purpose isn't explicitly present, using the invoice/document number is a safe, common fallback.
+      setPurpose(invCandidate)
+    }
+
+    // Only fill paymentDetails if it looks like actual routing/SWIFT/account info (not random OCR garbage).
+    if (rawPaymentDetails && rawPaymentDetails.trim().length >= 8) {
+      setPaymentDetails(rawPaymentDetails.trim())
+    }
+
+    setIbanHint(null)
+    setReferenceHint(null)
+    if (warnings.length) {
+      // Keep hints lightweight and actionable.
+      setIbanHint(warnings[0] || null)
+      if (warnings.length > 1) setReferenceHint(warnings[1] || null)
+    }
+  }
+
+  function handleIbanChange(next: string) {
+    const raw = String(next || '')
+    const extracted = extractFirstValidIban(raw)
+    if (extracted) {
+      setIban(extracted)
+      setIbanHint(null)
+      return
+    }
+    const norm = normalizeIban(raw)
+    if (norm.length > 34) {
+      setIban(norm.slice(0, 34))
+      setIbanHint(tr('IBAN was too long — extra characters were ignored.'))
+      return
+    }
+    setIban(norm)
+    setIbanHint(null)
+  }
+
+  function handleReferenceChange(next: string) {
+    const norm = normalizeReference(next)
+    setReference(norm)
+    if (norm && looksLikeIban(norm) && isValidIbanChecksum(norm)) {
+      setReferenceHint(tr('This looks like an IBAN, not a reference.'))
+    } else {
+      setReferenceHint(null)
+    }
+  }
+
+  function handlePaymentDetailsChange(next: string) {
+    setPaymentDetails(next)
+    // If user pasted bank details, try to extract IBAN/reference automatically (only if fields are empty).
+    if (!iban.trim()) {
+      const extracted = extractFirstValidIban(next)
+      if (extracted) setIban(extracted)
+    }
+    if (!reference.trim()) {
+      const extractedRef = extractReferenceCandidate(next)
+      if (extractedRef && !(looksLikeIban(extractedRef) && isValidIbanChecksum(extractedRef))) setReference(extractedRef)
+    }
   }
 
   function isValidIbanChecksum(ibanInput: string): boolean {
@@ -2777,9 +2986,7 @@ function ScanBillScreen() {
       if (supplierName) setSupplier(supplierName)
       const cred = pickNameCandidate(f.creditor_name, supplierName)
       if (cred) setCreditorName(cred)
-      setIban(f.iban || '')
-      setReference(f.reference || '')
-      setPurpose(f.purpose || '')
+      applyExtractedPaymentFields(f)
       if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
       if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
       if (typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -2870,9 +3077,7 @@ function ScanBillScreen() {
             if (supplierName) setSupplier(supplierName)
             const cred = pickNameCandidate(f.creditor_name, supplierName)
             if (cred) setCreditorName(cred)
-            if (f.iban) setIban(f.iban || '')
-            if (f.reference) setReference(f.reference || '')
-            if (f.purpose) setPurpose(f.purpose || '')
+            applyExtractedPaymentFields({ ...f, rawText: t })
             if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
             if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
             if (typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -2898,9 +3103,7 @@ function ScanBillScreen() {
     if (supplierName) setSupplier(supplierName)
     const cred = pickNameCandidate(p.creditor_name, supplierName)
     if (cred) setCreditorName(cred)
-    if (p.iban) setIban(p.iban || '')
-    if (p.reference) setReference(p.reference || '')
-    if (p.purpose) setPurpose(p.purpose || '')
+    applyExtractedPaymentFields({ ...p, rawText: t })
     if (p.payment_details) setPaymentDetails(p.payment_details ? String(p.payment_details) : '')
     if (typeof p.amount === 'number') setAmountStr(String(p.amount))
     if (p.currency) setCurrency(p.currency)
@@ -2918,9 +3121,7 @@ function ScanBillScreen() {
           if (s2) setSupplier(s2)
           const c2 = pickNameCandidate(f.creditor_name, s2)
           if (c2) setCreditorName(c2)
-          if (!p.iban && f.iban) setIban(f.iban || '')
-          if (!p.reference && f.reference) setReference(f.reference || '')
-          if (!p.purpose && f.purpose) setPurpose(f.purpose || '')
+          if (!p.iban || !p.reference || !p.purpose) applyExtractedPaymentFields({ ...f, rawText: t })
           if (!p.payment_details && f.payment_details) setPaymentDetails(String(f.payment_details || ''))
           if (!p.invoice_number && f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
           if (typeof p.amount !== 'number' && typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -2956,9 +3157,7 @@ function ScanBillScreen() {
       if (supplierName) setSupplier(supplierName)
       const cred = pickNameCandidate(f.creditor_name, supplierName)
       if (cred) setCreditorName(cred)
-      if (f.iban) setIban(f.iban || '')
-      if (f.reference) setReference(f.reference || '')
-      if (f.purpose) setPurpose(f.purpose || '')
+      applyExtractedPaymentFields({ ...f, rawText: ocrText })
       if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
       if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
       if (typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -3055,6 +3254,15 @@ function ScanBillScreen() {
         }
         if (!reference.trim()) {
           Alert.alert(tr('Reference required'), tr('Enter the payment reference.'))
+          return
+        }
+        const refNorm = normalizeReference(reference)
+        if (looksLikeIban(refNorm) && isValidIbanChecksum(refNorm)) {
+          Alert.alert(tr('Invalid reference'), tr('Reference looks like an IBAN. Please move it to the IBAN field.'))
+          return
+        }
+        if (refNorm === ibanNorm) {
+          Alert.alert(tr('Invalid reference'), tr('Reference must not be the same as IBAN.'))
           return
         }
       } else {
@@ -3446,20 +3654,40 @@ function ScanBillScreen() {
                 <Text style={styles.fieldLabel}>
                   {tr('IBAN')}
                 </Text>
-                <AppInput placeholder={tr('IBAN')} value={iban} onChangeText={setIban} />
+                <AppInput
+                  placeholder={tr('IBAN')}
+                  value={iban}
+                  onChangeText={handleIbanChange}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  keyboardType="default"
+                />
+                {ibanHint ? (
+                  <InlineInfo tone="warning" iconName="alert-circle-outline" message={ibanHint} style={styles.formNotice} />
+                ) : null}
               </View>
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>
                   {tr('Reference')}
                 </Text>
-                <AppInput placeholder={tr('Reference')} value={reference} onChangeText={setReference} />
+                <AppInput
+                  placeholder={tr('Reference')}
+                  value={reference}
+                  onChangeText={handleReferenceChange}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  keyboardType="default"
+                />
+                {referenceHint ? (
+                  <InlineInfo tone="info" iconName="information-circle-outline" message={referenceHint} style={styles.formNotice} />
+                ) : null}
               </View>
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>{tr('Payment details (routing/SWIFT/account)')}</Text>
                 <AppInput
                   placeholder={tr('Paste bank details here if you do not have IBAN/reference.')}
                   value={paymentDetails}
-                  onChangeText={setPaymentDetails}
+                  onChangeText={handlePaymentDetailsChange}
                   multiline
                 />
               </View>

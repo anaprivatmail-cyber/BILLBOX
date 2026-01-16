@@ -139,6 +139,7 @@ export function AppButton({
       style={[
         styles.button,
         { backgroundColor: palette.bg, borderColor: palette.border, opacity: disabled ? 0.6 : 1 },
+        variant === 'primary' && !disabled ? styles.buttonPrimaryShadow : null,
         style,
       ]}
     >
@@ -152,7 +153,15 @@ export function AppInput({ style, ...props }: TextInputProps) {
   const colors = useThemeColors()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const placeholder = typeof props.placeholder === 'string' ? tr(props.placeholder) : props.placeholder
-  return <TextInput {...props} placeholder={placeholder} style={[styles.input, style]} placeholderTextColor={colors.textMuted} />
+  return (
+    <TextInput
+      {...props}
+      placeholder={placeholder}
+      style={[styles.input, style]}
+      placeholderTextColor={colors.textMuted}
+      selectionColor={colors.primary}
+    />
+  )
 }
 
 type SegmentedOption = { value: string; label: string }
@@ -359,54 +368,74 @@ function makeStyles(colors: ReturnType<typeof useThemeColors>) {
       fontWeight: '600',
       lineHeight: 16,
     },
-  surface: {
-    backgroundColor: colors.surface,
-    borderRadius: layout.radius,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-  },
-  surfaceElevated: {
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 2,
-  },
-  sectionTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: colors.text,
-    marginBottom: spacing.xs,
-  },
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-  },
-  buttonLabel: {
-    fontWeight: '700',
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    backgroundColor: colors.surface,
-    color: colors.text,
-  },
-  segment: {
-    flexDirection: 'row',
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 12,
-    overflow: 'hidden',
-    backgroundColor: colors.surface,
-  },
+    surface: {
+      backgroundColor: colors.surface,
+      borderRadius: layout.radius,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.border,
+      shadowColor: '#000',
+      shadowOpacity: 0.04,
+      shadowRadius: 10,
+      shadowOffset: { width: 0, height: 6 },
+      elevation: 1,
+    },
+    surfaceElevated: {
+      shadowColor: '#000',
+      shadowOpacity: 0.10,
+      shadowRadius: 16,
+      shadowOffset: { width: 0, height: 10 },
+      elevation: 4,
+    },
+    sectionTitle: {
+      fontSize: 13,
+      fontWeight: '800',
+      letterSpacing: 0.2,
+      color: colors.text,
+      marginBottom: spacing.sm,
+    },
+    button: {
+      minHeight: 46,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      paddingVertical: 12,
+      paddingHorizontal: 16,
+      borderRadius: 14,
+      borderWidth: 1,
+    },
+    buttonPrimaryShadow: {
+      shadowColor: colors.primary,
+      shadowOpacity: 0.20,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 8 },
+      elevation: 3,
+    },
+    buttonLabel: {
+      fontWeight: '800',
+      fontSize: 15,
+      letterSpacing: 0.15,
+    },
+    input: {
+      minHeight: 46,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 14,
+      paddingVertical: 12,
+      paddingHorizontal: 14,
+      backgroundColor: colors.surface,
+      color: colors.text,
+      fontSize: 15,
+      fontWeight: '600',
+    },
+    segment: {
+      flexDirection: 'row',
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 14,
+      overflow: 'hidden',
+      backgroundColor: colors.surface,
+    },
   segmentItem: {
     flex: 1,
     paddingVertical: 10,

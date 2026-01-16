@@ -109,6 +109,25 @@ describe('parsePaymentQR (EPC/UPN)', () => {
     expect(res?.due_date).toBe('2026-03-12')
   })
 
+  it('does not treat a valid IBAN as a reference', () => {
+    const iban = makeIban('SI', '999900001111222')
+    const upn = [
+      'UPNQR',
+      'Prejemnik: Test d.o.o.',
+      // IBAN appears, but the reference line is incorrectly an IBAN (some OCR/exports do this).
+      `IBAN: ${spacedIban(iban)}`,
+      `Sklic: ${iban}`,
+      'Namen: Test',
+      'EUR 1,00',
+    ].join('\n')
+
+    const res = parsePaymentQR(upn)
+    expect(res).not.toBeNull()
+    expect(res?.iban).toBe(iban)
+    // Parser should refuse IBAN-as-reference.
+    expect(res?.reference).toBeUndefined()
+  })
+
   it('heuristically extracts payee name near UPN header when unlabeled', () => {
     const iban = makeIban('SI', '222233334444555')
     const upn = [
