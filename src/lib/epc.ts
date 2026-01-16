@@ -22,6 +22,25 @@ function looksLikeIban(s: string) {
   return /^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(s)
 }
 
+function isValidIbanChecksum(ibanRaw: string): boolean {
+  const s = normalizeIban(ibanRaw)
+  if (!s) return false
+  if (!looksLikeIban(s)) return false
+  const rearranged = s.slice(4) + s.slice(0, 4)
+  let remainder = 0
+  for (let i = 0; i < rearranged.length; i++) {
+    const ch = rearranged[i]
+    const code = ch.charCodeAt(0)
+    if (code >= 48 && code <= 57) {
+      remainder = (remainder * 10 + (code - 48)) % 97
+    } else {
+      const val = code - 55 // A->10..Z->35
+      remainder = (remainder * 100 + val) % 97
+    }
+  }
+  return remainder === 1
+}
+
 function parseIsoDateFromText(s: string): string | undefined {
   const t = String(s || '').trim()
   // YYYY-MM-DD
@@ -53,7 +72,8 @@ export function parseEPC(text: string): EPCResult | null {
     const serviceTag = lines[3]
     if (serviceTag !== 'SCT') return null
     const name = lines[5] || ''
-    const iban = normalizeIban(lines[6] || '')
+    const ibanRaw = normalizeIban(lines[6] || '')
+    const iban = ibanRaw && isValidIbanChecksum(ibanRaw) ? ibanRaw : undefined
     const amountLine = lines[7] || ''
     let amount: number | undefined
     if (amountLine.startsWith('EUR')) {
@@ -88,9 +108,12 @@ export function parseUPN(text: string): EPCResult | null {
     // Detect presence
     if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
     // IBAN
-    const ibanMatch = joined.match(/\b([A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34})\b/)
-    const iban = normalizeIban(ibanMatch ? ibanMatch[1] : undefined)
-    const hasIban = Boolean(iban && looksLikeIban(iban))
+    const ibanCandidates = joined.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
+    const iban = (ibanCandidates
+      .map((c) => normalizeIban(c))
+      .filter((c): c is string => Boolean(c))
+      .find((c) => isValidIbanChecksum(c)))
+    const hasIban = Boolean(iban)
     // Amount: prefer explicit EUR or comma/decimal
     let amount: number | undefined
     let currency: string | undefined
@@ -116,7 +139,11 @@ export function parseUPN(text: string): EPCResult | null {
     for (const l of lines) {
       const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
       if (!labeled) continue
-      reference = normalizeReference(labeled[2])
+      const cand = normalizeReference(labeled[2])
+      if (!cand) continue
+      if (iban && cand === iban) continue
+      if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
+      reference = cand
       if (reference) break
     }
     if (!reference) {
@@ -124,7 +151,11 @@ export function parseUPN(text: string): EPCResult | null {
         if (/\biban\b/i.test(l)) continue
         const m = l.match(/\bSI\d{2}\s*[0-9A-Z\-\/]{4,}\b/i)
         if (!m) continue
-        reference = normalizeReference(m[0])
+        const cand = normalizeReference(m[0])
+        if (!cand) continue
+        if (iban && cand === iban) continue
+        if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
+        reference = cand
         if (reference) break
       }
     }

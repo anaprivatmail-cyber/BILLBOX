@@ -2,8 +2,36 @@ import { describe, expect, it } from 'vitest'
 import { parsePaymentQR } from './epc'
 import { parsePaymentQR as parsePaymentQRShared } from '../../packages/shared/src/epc'
 
+function makeIban(country: string, bban: string): string {
+  const cc = country.toUpperCase()
+  const bb = String(bban).replace(/\s+/g, '').toUpperCase()
+  const prepared = `${bb}${cc}00`
+  const toDigits = (s: string) =>
+    s
+      .split('')
+      .map((ch) => {
+        const code = ch.charCodeAt(0)
+        if (code >= 48 && code <= 57) return ch
+        return String(code - 55)
+      })
+      .join('')
+
+  const digits = toDigits(prepared)
+  let remainder = 0
+  for (let i = 0; i < digits.length; i++) {
+    remainder = (remainder * 10 + Number(digits[i])) % 97
+  }
+  const check = String(98 - remainder).padStart(2, '0')
+  return `${cc}${check}${bb}`
+}
+
+function spacedIban(iban: string): string {
+  return iban.replace(/(.{4})/g, '$1 ').trim()
+}
+
 describe('parsePaymentQR (EPC/UPN)', () => {
   it('parses EPC/SEPA (BCD/SCT) payload', () => {
+    const iban = makeIban('SI', '123456789012345')
     const epc = [
       'BCD',
       '001',
@@ -11,7 +39,7 @@ describe('parsePaymentQR (EPC/UPN)', () => {
       'SCT',
       'GIBASI2X',
       'ACME d.o.o.',
-      'SI56 1234 5678 9012 345',
+      spacedIban(iban),
       'EUR12.34',
       'INV',
       'SI12 1234-56',
@@ -21,7 +49,7 @@ describe('parsePaymentQR (EPC/UPN)', () => {
     const res = parsePaymentQR(epc)
     expect(res).not.toBeNull()
     expect(res?.creditor_name).toBe('ACME d.o.o.')
-    expect(res?.iban).toBe('SI56123456789012345')
+    expect(res?.iban).toBe(iban)
     expect(res?.amount).toBe(12.34)
     expect(res?.currency).toBe('EUR')
     expect(res?.purpose).toBe('INV')
@@ -29,21 +57,23 @@ describe('parsePaymentQR (EPC/UPN)', () => {
   })
 
   it('parses EPC even when encoded as a single line with | separators', () => {
+    const iban = makeIban('SI', '123456789012345')
     const epcPipe =
-      'BCD|001|1|SCT|GIBASI2X|ACME d.o.o.|SI56 1234 5678 9012 345|EUR12,34|INV|SI12 1234-56|Invoice 2026-001'
+      `BCD|001|1|SCT|GIBASI2X|ACME d.o.o.|${spacedIban(iban)}|EUR12,34|INV|SI12 1234-56|Invoice 2026-001`
 
     const res = parsePaymentQR(epcPipe)
     expect(res).not.toBeNull()
-    expect(res?.iban).toBe('SI56123456789012345')
+    expect(res?.iban).toBe(iban)
     expect(res?.amount).toBe(12.34)
     expect(res?.reference).toBe('SI121234-56')
   })
 
   it('parses UPN with labeled fields and extracts due_date', () => {
+    const iban = makeIban('SI', '111122223333444')
     const upn = [
       'UPNQR',
       'Prejemnik: Komunalno podjetje d.o.o.',
-      'IBAN: SI56 1111 2222 3333 444',
+      `IBAN: ${spacedIban(iban)}`,
       'Sklic: SI99 1234567890',
       'Namen: Voda januar',
       'EUR 10,55',
@@ -53,7 +83,7 @@ describe('parsePaymentQR (EPC/UPN)', () => {
     const res = parsePaymentQR(upn)
     expect(res).not.toBeNull()
     expect(res?.creditor_name).toBe('Komunalno podjetje d.o.o.')
-    expect(res?.iban).toBe('SI56111122223333444')
+    expect(res?.iban).toBe(iban)
     expect(res?.reference).toBe('SI991234567890')
     expect(res?.purpose).toBe('Voda januar')
     expect(res?.currency).toBe('EUR')
@@ -62,10 +92,11 @@ describe('parsePaymentQR (EPC/UPN)', () => {
   })
 
   it('parses UPN when due date is on the next line', () => {
+    const iban = makeIban('SI', '111122223333444')
     const upn = [
       'UPNQR',
       'Prejemnik: Komunalno podjetje d.o.o.',
-      'IBAN: SI56 1111 2222 3333 444',
+      `IBAN: ${spacedIban(iban)}`,
       'Sklic: SI99 1234567890',
       'Namen: Voda januar',
       'EUR 10,55',
@@ -79,10 +110,11 @@ describe('parsePaymentQR (EPC/UPN)', () => {
   })
 
   it('heuristically extracts payee name near UPN header when unlabeled', () => {
+    const iban = makeIban('SI', '222233334444555')
     const upn = [
       'UPNQR',
       'ELEKTRO TEST d.d.',
-      'SI56 1111 2222 3333 444',
+      spacedIban(iban),
       'EUR 99.99',
       'Sklic: SI12 1234',
     ].join('\n')
@@ -93,6 +125,8 @@ describe('parsePaymentQR (EPC/UPN)', () => {
   })
 
   it('shared parser matches web parser outputs', () => {
+    const iban1 = makeIban('SI', '123456789012345')
+    const iban2 = makeIban('SI', '111122223333444')
     const samples = [
       [
         'BCD',
@@ -101,7 +135,7 @@ describe('parsePaymentQR (EPC/UPN)', () => {
         'SCT',
         'GIBASI2X',
         'ACME d.o.o.',
-        'SI56 1234 5678 9012 345',
+        spacedIban(iban1),
         'EUR12.34',
         'INV',
         'SI12 1234-56',
@@ -109,7 +143,7 @@ describe('parsePaymentQR (EPC/UPN)', () => {
       [
         'UPNQR',
         'Prejemnik: Komunalno podjetje d.o.o.',
-        'IBAN: SI56 1111 2222 3333 444',
+        `IBAN: ${spacedIban(iban2)}`,
         'Sklic: SI99 1234567890',
         'Namen: Voda januar',
         'EUR 10,55',

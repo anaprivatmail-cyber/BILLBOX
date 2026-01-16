@@ -533,6 +533,39 @@ function normalizeQrText(input: string): string {
   return out
 }
 
+function normalizeIban(input: string | undefined): string | undefined {
+  const s = String(input || '').toUpperCase().replace(/\s+/g, '')
+  return s || undefined
+}
+
+function normalizeReference(input: string | undefined): string | undefined {
+  const s = String(input || '').toUpperCase().replace(/\s+/g, '')
+  return s || undefined
+}
+
+function looksLikeIban(s: string) {
+  return /^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(s)
+}
+
+function isValidIbanChecksum(ibanRaw: string): boolean {
+  const s = normalizeIban(ibanRaw)
+  if (!s) return false
+  if (!looksLikeIban(s)) return false
+  const rearranged = s.slice(4) + s.slice(0, 4)
+  let remainder = 0
+  for (let i = 0; i < rearranged.length; i++) {
+    const ch = rearranged[i]
+    const code = ch.charCodeAt(0)
+    if (code >= 48 && code <= 57) {
+      remainder = (remainder * 10 + (code - 48)) % 97
+    } else {
+      const val = code - 55
+      remainder = (remainder * 100 + val) % 97
+    }
+  }
+  return remainder === 1
+}
+
 function parseEPC(text: string): EPCResult | null {
   try {
     const lines = normalizeQrText(text).split(/\n+/).map((l) => l.trim())
@@ -541,7 +574,8 @@ function parseEPC(text: string): EPCResult | null {
     const serviceTag = lines[3]
     if (serviceTag !== 'SCT') return null
     const name = lines[5] || ''
-    const iban = (lines[6] || '').replace(/\s+/g, '')
+    const ibanRaw = normalizeIban(lines[6] || '')
+    const iban = ibanRaw && isValidIbanChecksum(ibanRaw) ? ibanRaw : undefined
     const amountLine = lines[7] || ''
     let amount: number | undefined
     if (amountLine.startsWith('EUR')) {
@@ -587,9 +621,11 @@ function parseUPN(text: string): EPCResult | null {
     const lines = normalized.split(/\n+/).map((l) => l.trim()).filter(Boolean)
     const joined = lines.join('\n')
     if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
-    const compactJoined = joined.replace(/\s+/g, '')
-    const ibanMatch = compactJoined.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
-    const iban = ibanMatch ? ibanMatch[0].replace(/\s+/g, '') : undefined
+    const ibanCandidates = joined.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
+    const iban = (ibanCandidates
+      .map((c) => normalizeIban(c))
+      .filter((c): c is string => Boolean(c))
+      .find((c) => isValidIbanChecksum(c)))
     let amount: number | undefined
     let currency: string | undefined
 
@@ -636,11 +672,38 @@ function parseUPN(text: string): EPCResult | null {
       }
     }
     let reference: string | undefined
+    // Prefer labeled reference lines; never accept a value that is (or equals) a valid IBAN.
     for (const l of lines) {
-      const m = l.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
-      if (m) {
-        reference = (m[1] || m[2] || '').replace(/\s+/g, '')
-        if (reference) break
+      const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
+      if (!labeled) continue
+      const cand = normalizeReference(labeled[2])
+      if (!cand) continue
+      if (iban && cand === iban) continue
+      if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
+      reference = cand
+      break
+    }
+    if (!reference) {
+      for (const l of lines) {
+        const m = l.match(/\bRF\d{2}[0-9A-Z]{4,}\b/i)
+        if (!m) continue
+        const cand = normalizeReference(m[0])
+        if (!cand) continue
+        reference = cand
+        break
+      }
+    }
+    if (!reference) {
+      for (const l of lines) {
+        if (/\biban\b/i.test(l)) continue
+        const m = l.match(/\bSI\d{2}\s*[0-9A-Z\-\/]{4,}\b/i)
+        if (!m) continue
+        const cand = normalizeReference(m[0])
+        if (!cand) continue
+        if (iban && cand === iban) continue
+        if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
+        reference = cand
+        break
       }
     }
     let purpose: string | undefined
@@ -659,8 +722,15 @@ function parseUPN(text: string): EPCResult | null {
         .filter((l) => !/^\d{11}$/.test(l))
         .filter((l) => !/\bEUR\b/i.test(l))
         .filter((l) => l.length >= 3 && l.length <= 60)
-      // Prefer a line that is not mostly digits/punctuation.
-      purpose = candidates.find((l) => !/^[0-9\s.,:\-\/]+$/.test(l))
+      const looksLikeAllCapsName = (s: string) => {
+        const t = String(s || '').trim()
+        if (!t) return false
+        if (/\d/.test(t)) return false
+        return /^[A-ZÀ-ŽČŠŽ]{2,}(?:\s+[A-ZÀ-ŽČŠŽ]{2,}){0,4}$/.test(t)
+      }
+      // Avoid accidentally using payer names (often ALL CAPS) as purpose.
+      purpose = candidates.find((l) => !/^[0-9\s.,:\-\/]+$/.test(l) && !looksLikeAllCapsName(l))
+      if (!purpose) purpose = candidates.find((l) => !/^[0-9\s.,:\-\/]+$/.test(l))
     }
     let creditor_name: string | undefined
     for (const l of lines) {
@@ -1475,7 +1545,11 @@ async function performOCR(uri: string): Promise<{ fields: any; summary: string; 
   })
   const data = await resp.json().catch(() => null as any)
   if (!resp.ok || !data?.ok) {
-    throw new Error(data?.error || `OCR failed (${resp.status})`)
+    const message = data?.message || data?.error || `OCR failed (${resp.status})`
+    const err: any = new Error(message)
+    err.status = resp.status
+    err.code = data?.error || null
+    throw err
   }
   const f = data.fields || {}
   const rawText = typeof data.rawText === 'string' ? data.rawText : ''
@@ -2898,12 +2972,20 @@ function ScanBillScreen() {
         // Optional: leave silent, but keep summary available via rawText.
       }
     } catch (e: any) {
-      const msg = e?.message || 'OCR failed'
-      // Avoid leaking technical errors into UI.
-      setOcrError(tr('OCR failed'))
-      if (/quota/i.test(msg) || /ocr_quota_exceeded/i.test(msg)) {
-        showUpgradeAlert('ocr')
-      }
+        const msg = e?.message || 'OCR failed'
+        const status = (e as any)?.status
+        const code = (e as any)?.code
+        console.warn('OCR failed:', { status, code, msg })
+        if (status === 401 || code === 'auth_required' || /sign in/i.test(msg)) {
+          setOcrError(tr('Please sign in again.'))
+          Alert.alert(tr('OCR unavailable'), tr('Please sign in again.'))
+          return
+        }
+        // Avoid leaking technical errors into UI.
+        setOcrError(tr('OCR failed'))
+        if (/quota/i.test(msg) || /ocr_quota_exceeded/i.test(msg)) {
+          showUpgradeAlert('ocr')
+        }
     } finally {
       setOcrBusy(false)
     }
