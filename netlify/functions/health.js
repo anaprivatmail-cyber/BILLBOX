@@ -1,9 +1,83 @@
+import { createClient } from '@supabase/supabase-js'
+
 function json(statusCode, payload) {
   return {
     statusCode,
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
   };
+}
+
+async function checkSupabase() {
+  const url = process.env.SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) {
+    return {
+      configured: false,
+      dbOk: false,
+      billsTableOk: false,
+      billsColumnsOk: false,
+      error: 'supabase_admin_not_configured',
+    }
+  }
+
+  const supabase = createClient(url, serviceKey, { auth: { persistSession: false } })
+
+  // Use HEAD selects so we don't return any user data.
+  try {
+    const probe = await supabase.from('bills').select('id', { head: true, count: 'exact' }).limit(1)
+    if (probe.error) {
+      return {
+        configured: true,
+        dbOk: false,
+        billsTableOk: false,
+        billsColumnsOk: false,
+        error: `bills_probe_failed:${probe.error.code || probe.error.message}`,
+      }
+    }
+  } catch (e) {
+    return {
+      configured: true,
+      dbOk: false,
+      billsTableOk: false,
+      billsColumnsOk: false,
+      error: `bills_probe_failed:${(e && e.message) || 'unknown'}`,
+    }
+  }
+
+  try {
+    const columns = ['creditor_name', 'iban', 'reference', 'purpose', 'payment_details', 'invoice_number']
+    const colProbe = await supabase
+      .from('bills')
+      .select(columns.join(','), { head: true })
+      .limit(1)
+
+    if (colProbe.error) {
+      return {
+        configured: true,
+        dbOk: true,
+        billsTableOk: true,
+        billsColumnsOk: false,
+        error: `bills_columns_probe_failed:${colProbe.error.code || colProbe.error.message}`,
+      }
+    }
+  } catch (e) {
+    return {
+      configured: true,
+      dbOk: true,
+      billsTableOk: true,
+      billsColumnsOk: false,
+      error: `bills_columns_probe_failed:${(e && e.message) || 'unknown'}`,
+    }
+  }
+
+  return {
+    configured: true,
+    dbOk: true,
+    billsTableOk: true,
+    billsColumnsOk: true,
+    error: null,
+  }
 }
 
 export async function handler(event) {
@@ -13,6 +87,8 @@ export async function handler(event) {
 
   // Do not return secret values — only presence booleans.
   const env = process.env;
+
+  const supabaseCheck = await checkSupabase()
 
   return json(200, {
     ok: true,
@@ -26,6 +102,9 @@ export async function handler(event) {
     has: {
       supabaseUrl: Boolean(env.SUPABASE_URL),
       supabaseServiceRoleKey: Boolean(env.SUPABASE_SERVICE_ROLE_KEY),
+      supabaseDbOk: Boolean(supabaseCheck.dbOk),
+      billsTableOk: Boolean(supabaseCheck.billsTableOk),
+      billsColumnsOk: Boolean(supabaseCheck.billsColumnsOk),
       stripeSecretKey: Boolean(env.STRIPE_SECRET_KEY),
       stripeWebhookSecret: Boolean(env.STRIPE_WEBHOOK_SECRET),
       stripeBasicMonthlyPriceId: Boolean(env.STRIPE_BASIC_MONTHLY_PRICE_ID),
@@ -38,6 +117,9 @@ export async function handler(event) {
       i18nTranslateToken: Boolean(env.I18N_TRANSLATE_TOKEN),
       googleCredentialsJson: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON || env.GOOGLE_APPLICATION_CREDENTIALS_JSON),
       ocrAiEnabled: String(env.ENABLE_OCR_AI || '').toLowerCase() === 'true',
+    },
+    checks: {
+      supabase: supabaseCheck,
     },
   });
 }

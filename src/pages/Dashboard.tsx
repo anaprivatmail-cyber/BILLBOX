@@ -49,7 +49,7 @@ export default function DashboardPage() {
     <div className="mx-auto max-w-5xl">
       <div className="mb-5">
         <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
-        <p className="text-sm text-neutral-400">Overview of your bills and upcoming dues</p>
+        <p className="text-sm text-neutral-600">Overview of your bills and upcoming dues</p>
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
@@ -58,32 +58,32 @@ export default function DashboardPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           {/* Hero: Total unpaid */}
-          <Card className="p-5 sm:col-span-2 border-brand-600/40 ring-1 ring-brand-600/20 bg-neutral-900/70">
+          <Card className="p-5 sm:col-span-2 border-brand-200 bg-gradient-to-br from-brand-700 via-brand-600 to-[#0b3cff] text-white overflow-hidden">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="text-xs text-neutral-400">Total unpaid</div>
+                <div className="text-xs text-white/80">Total unpaid</div>
                 <div className="mt-1 flex items-baseline gap-3">
                   <span className="text-4xl font-bold tracking-tight">{fmt(stats.unpaidTotal)}</span>
-                  <span className="text-sm text-neutral-300">{stats.currency || 'EUR'}</span>
+                  <span className="text-sm text-white/85">{stats.currency || 'EUR'}</span>
                   <Badge variant={stats.unpaidTotal > 0 ? 'warning' : 'success'}>{stats.unpaidCount} items</Badge>
                 </div>
               </div>
             </div>
             <div className="mt-4 flex flex-col sm:flex-row gap-2">
               <Button variant="primary" className="px-4 py-2" onClick={() => navigate('/app/bills?add=1')}>Add bill</Button>
-              <Button variant="secondary" className="px-4 py-2" onClick={() => navigate('/app/payments')}>Go to Payments</Button>
+              <Button variant="secondary" className="px-4 py-2 bg-white/95 hover:bg-white text-neutral-900 border-white/40" onClick={() => navigate('/app/payments')}>Go to Payments</Button>
             </div>
           </Card>
 
           {/* Overdue */}
-          <Card className="p-5 border-red-200 bg-red-50">
+          <Card className="p-5 border-red-200 bg-white">
             <div className="flex items-start justify-between">
               <div>
-                <div className="text-xs text-neutral-400">Overdue</div>
+                <div className="text-xs text-neutral-600">Overdue</div>
                 <div className="mt-1 flex items-baseline gap-3">
-                  <span className="text-2xl font-semibold text-red-300">{stats.overdueCount}</span>
-                  <span className="text-sm text-neutral-300">/ {fmt(stats.overdueTotal)}</span>
-                  <span className="text-xs text-neutral-400">{stats.currency || 'EUR'}</span>
+                  <span className="text-2xl font-semibold text-red-700">{stats.overdueCount}</span>
+                  <span className="text-sm text-neutral-700">/ {fmt(stats.overdueTotal)}</span>
+                  <span className="text-xs text-neutral-600">{stats.currency || 'EUR'}</span>
                 </div>
               </div>
             </div>
@@ -93,21 +93,21 @@ export default function DashboardPage() {
           </Card>
 
           {/* Next due */}
-          <Card className="p-5 border-amber-200 bg-amber-50">
-            <div className="text-xs text-neutral-400">Next due</div>
-            <div className="mt-2 text-sm text-neutral-300">
+          <Card className="p-5 border-neutral-200 bg-white">
+            <div className="text-xs text-neutral-600">Next due</div>
+            <div className="mt-2 text-sm text-neutral-800">
               {stats.nextDue ? (
                 <div className="flex items-center gap-2">
                   {/* calendar icon */}
-                  <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-neutral-800 text-neutral-300">📅</span>
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-brand-50 text-brand-700 border border-brand-100">📅</span>
                   <span className="font-medium">{stats.nextDue.supplier}</span>
                   <span>• {stats.nextDue.due_date}</span>
                   <span>• {fmt(Number(stats.nextDue.amount))}</span>
-                  <span className="text-xs">{stats.nextDue.currency || 'EUR'}</span>
+                  <span className="text-xs text-neutral-600">{stats.nextDue.currency || 'EUR'}</span>
                 </div>
               ) : (
-                <div className="flex items-center gap-2 text-neutral-400">
-                  <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-neutral-800">🗓️</span>
+                <div className="flex items-center gap-2 text-neutral-600">
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-neutral-100 border border-neutral-200">🗓️</span>
                   <span>No upcoming dues — you’re all set.</span>
                 </div>
               )}
@@ -117,10 +117,10 @@ export default function DashboardPage() {
           {/* Paid total */}
           <Card className="p-4 sm:col-span-2">
             <div>
-              <div className="text-xs text-neutral-400">Paid total</div>
-              <div className="mt-1 text-lg font-semibold text-neutral-200">{fmt(stats.paidTotal)} <span className="text-xs text-neutral-400">{stats.currency || 'EUR'}</span></div>
+              <div className="text-xs text-neutral-600">Paid total</div>
+              <div className="mt-1 text-lg font-semibold text-neutral-900">{fmt(stats.paidTotal)} <span className="text-xs text-neutral-600">{stats.currency || 'EUR'}</span></div>
             </div>
-            <div className="mt-3 h-10 rounded-md bg-neutral-900/60 border border-neutral-800 flex items-center justify-center text-xs text-neutral-500">Monthly spend chart unavailable</div>
+            <div className="mt-3 h-10 rounded-xl bg-neutral-50 border border-neutral-200 flex items-center justify-center text-xs text-neutral-500">Monthly spend chart unavailable</div>
           </Card>
         </div>
       )}

@@ -2,11 +2,16 @@
 
 /* Custom utility for soft shadow (Tailwind v4) */
 @utility shadow-soft {
-  box-shadow: 0 1px 2px 0 rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.12);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 10px 24px rgba(16, 24, 40, 0.10);
+}
+
+@utility ring-soft {
+  box-shadow: 0 0 0 1px rgba(16, 24, 40, 0.08);
 }
 
 /* Brand color tokens (Tailwind v4 @theme) */
 @theme {
+  /* Fintech-indigo (intentionally not matching any bank branding) */
   --color-brand-50: #eef2ff;
   --color-brand-100: #e0e7ff;
   --color-brand-200: #c7d2fe;
@@ -27,27 +32,30 @@ html, body, #root {
   height: 100%;
 }
 body {
-  @apply bg-[#F7F8FA] text-neutral-800 antialiased;
+  @apply bg-gradient-to-b from-[#F3F6FF] via-[#F7F8FA] to-[#F7F8FA] text-neutral-900 antialiased;
 }
 
 /* Reusable tokens */
 .card {
-  @apply bg-white border border-neutral-200 rounded-lg shadow-soft;
+  @apply bg-white/90 border border-neutral-200/80 rounded-2xl shadow-soft ring-soft;
 }
 .btn {
-  @apply inline-flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium transition-colors;
+  @apply inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold transition-colors;
 }
 .btn-primary {
-  @apply bg-brand-600 hover:bg-brand-500 text-white shadow-soft ring-1 ring-brand-600/30;
+  @apply text-white shadow-soft ring-1 ring-brand-700/25;
+  @apply bg-gradient-to-b from-brand-600 to-brand-700;
+  @apply hover:from-brand-500 hover:to-brand-700;
 }
 .btn-secondary {
-  @apply bg-white hover:bg-neutral-100 text-neutral-800 border border-neutral-300;
+  @apply bg-white hover:bg-neutral-50 text-neutral-900 border border-neutral-300/80;
 }
 .btn-danger {
   @apply bg-red-600 hover:bg-red-500 text-white;
 }
 .input {
-  @apply w-full rounded-md bg-white border border-neutral-300 px-3 py-2 text-sm placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-600;
+  @apply w-full rounded-xl bg-white border border-neutral-300/80 px-3 py-2.5 text-sm placeholder-neutral-400;
+  @apply focus:outline-none focus:ring-2 focus:ring-brand-600/35 focus:border-brand-400;
 }
 .label {
   @apply block text-sm text-neutral-700 mb-1;

@@ -5,6 +5,32 @@ export type EPCResult = {
   purpose?: string
   reference?: string
   currency?: string
+  due_date?: string
+}
+
+function normalizeIban(input: string | undefined): string | undefined {
+  const s = String(input || '').toUpperCase().replace(/\s+/g, '')
+  return s || undefined
+}
+
+function normalizeReference(input: string | undefined): string | undefined {
+  const s = String(input || '').toUpperCase().replace(/\s+/g, '')
+  return s || undefined
+}
+
+function looksLikeIban(s: string) {
+  return /^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(s)
+}
+
+function parseIsoDateFromText(s: string): string | undefined {
+  const t = String(s || '').trim()
+  // YYYY-MM-DD
+  const iso = t.match(/\b(\d{4}-\d{2}-\d{2})\b/)
+  if (iso) return iso[1]
+  // DD.MM.YYYY or DD/MM/YYYY
+  const dmY = t.match(/\b(\d{2})[.\/](\d{2})[.\/](\d{4})\b/)
+  if (dmY) return `${dmY[3]}-${dmY[2]}-${dmY[1]}`
+  return undefined
 }
 
 function normalizeQrText(input: string): string {
@@ -27,7 +53,7 @@ export function parseEPC(text: string): EPCResult | null {
     const serviceTag = lines[3]
     if (serviceTag !== 'SCT') return null
     const name = lines[5] || ''
-    const iban = (lines[6] || '').replace(/\s+/g, '')
+    const iban = normalizeIban(lines[6] || '')
     const amountLine = lines[7] || ''
     let amount: number | undefined
     if (amountLine.startsWith('EUR')) {
@@ -42,9 +68,10 @@ export function parseEPC(text: string): EPCResult | null {
       creditor_name: name || undefined,
       amount,
       purpose: purpose || undefined,
-      reference: reference || undefined,
+      reference: normalizeReference(reference) || undefined,
       currency: amountLine.startsWith('EUR') ? 'EUR' : undefined,
     }
+    // EPC QR does not normally include a due date; keep undefined.
     return result
   } catch {
     return null
@@ -61,8 +88,9 @@ export function parseUPN(text: string): EPCResult | null {
     // Detect presence
     if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
     // IBAN
-    const ibanMatch = joined.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
-    const iban = ibanMatch ? ibanMatch[0].replace(/\s+/g, '') : undefined
+    const ibanMatch = joined.match(/\b([A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34})\b/)
+    const iban = normalizeIban(ibanMatch ? ibanMatch[1] : undefined)
+    const hasIban = Boolean(iban && looksLikeIban(iban))
     // Amount: prefer explicit EUR or comma/decimal
     let amount: number | undefined
     let currency: string | undefined
@@ -83,11 +111,22 @@ export function parseUPN(text: string): EPCResult | null {
         if (!Number.isNaN(val) && val > 0) amount = val
       }
     }
-    // Reference (sklic)
+    // Reference (sklic) — must not confuse IBAN lines for SIxx references.
     let reference: string | undefined
     for (const l of lines) {
-      const m = l.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
-      if (m) { reference = (m[1] || m[2] || '').replace(/\s+/g, ''); if (reference) break }
+      const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
+      if (!labeled) continue
+      reference = normalizeReference(labeled[2])
+      if (reference) break
+    }
+    if (!reference) {
+      for (const l of lines) {
+        if (/\biban\b/i.test(l)) continue
+        const m = l.match(/\bSI\d{2}\s*[0-9A-Z\-\/]{4,}\b/i)
+        if (!m) continue
+        reference = normalizeReference(m[0])
+        if (reference) break
+      }
     }
     // Purpose (namen)
     let purpose: string | undefined
@@ -98,12 +137,53 @@ export function parseUPN(text: string): EPCResult | null {
     // Creditor name
     let creditor_name: string | undefined
     for (const l of lines) {
-      const m = l.match(/prejemnik|recipient|name:?\s*(.+)/i)
-      if (m) { const n = (m[1] || '').trim(); if (n) { creditor_name = n; break } }
+      const m = l.match(/\b(prejemnik|recipient|payee|upravi\w*|name)\b\s*:?\s*(.+)/i)
+      if (m) {
+        const n = String(m[2] || '').trim()
+        if (n) { creditor_name = n; break }
+      }
     }
+
+    // UPN/Invoices often include an explicit due date (rok / zapade). Only accept if labeled.
+    let due_date: string | undefined
+    for (const l of lines) {
+      if (!/\b(rok|zapade|zapadl|due|pay\s*by|payment\s*due)\b/i.test(l)) continue
+      const d = parseIsoDateFromText(l)
+      if (d) { due_date = d; break }
+    }
+    // If not on same line, check the next line after a label-only marker.
+    if (!due_date) {
+      for (let i = 0; i < lines.length - 1; i++) {
+        const l = lines[i]
+        if (!/\b(rok|zapade|zapadl|due|pay\s*by|payment\s*due)\b/i.test(l)) continue
+        const d = parseIsoDateFromText(lines[i + 1])
+        if (d) { due_date = d; break }
+      }
+    }
+
+    // If creditor name wasn't found via labels, pick a plausible line (after UPNQR) as payee.
+    if (!creditor_name) {
+      const upnIdx = lines.findIndex((l) => /UPNQR/i.test(l))
+      const start = upnIdx >= 0 ? upnIdx + 1 : 0
+      for (let i = start; i < Math.min(lines.length, start + 6); i++) {
+        const cand = lines[i]
+        if (!cand) continue
+        if (/^[0-9\s.,:\-\/]+$/.test(cand)) continue
+        if (parseIsoDateFromText(cand)) continue
+        const c = cand.replace(/\s+/g, '')
+        if (looksLikeIban(c)) continue
+        if (/\b(EUR|USD|GBP)\b/i.test(cand) || /€/.test(cand)) continue
+        if (cand.length < 3 || cand.length > 70) continue
+        if (!/[A-Za-zÀ-žČŠŽčšž]/.test(cand)) continue
+        creditor_name = cand
+        break
+      }
+    }
+
     const result: EPCResult = { iban, amount, purpose, reference, creditor_name, currency }
     // At least IBAN or amount must be present to consider valid
-    if (result.iban || typeof result.amount === 'number') return result
+    if (due_date) result.due_date = due_date
+    if (hasIban || typeof result.amount === 'number') return result
     return null
   } catch {
     return null

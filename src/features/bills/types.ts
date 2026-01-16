@@ -14,6 +14,7 @@ export interface Bill {
   iban?: string | null
   reference?: string | null
   purpose?: string | null
+  payment_details?: string | null
   invoice_number?: string | null
 }
 
@@ -27,6 +28,7 @@ export interface CreateBillInput {
   iban?: string | null
   reference?: string | null
   purpose?: string | null
+  payment_details?: string | null
   invoice_number?: string | null
 }
 
@@ -40,5 +42,6 @@ export interface UpdateBillInput {
   iban?: string | null
   reference?: string | null
   purpose?: string | null
+  payment_details?: string | null
   invoice_number?: string | null
 }

@@ -153,8 +153,11 @@ function scoreIbanContext(rawText, iban) {
 }
 
 function pickBestIbanFromText(rawText) {
-  const compact = String(rawText || '').toUpperCase().replace(/\s+/g, '')
-  const found = compact.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/g) || []
+  // Extract IBAN-like sequences without merging across newlines.
+  // IMPORTANT: do not remove all whitespace before matching, otherwise we may
+  // accidentally glue the IBAN to the next line label (e.g. "...67892SKLIC").
+  const upper = String(rawText || '').toUpperCase()
+  const found = upper.match(/\b[A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,34}\b/g) || []
   const unique = [...new Set(found.map(normalizeIban).filter(isValidIbanChecksum))]
   if (unique.length === 0) return { iban: null, reason: 'none' }
   if (unique.length === 1) return { iban: unique[0], reason: 'single' }
@@ -212,6 +215,21 @@ function sanitizeFields(rawText, fields) {
     const s = out.supplier.trim()
     if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) out.supplier = null
     else out.supplier = s
+  }
+  if (out.creditor_name && typeof out.creditor_name === 'string') {
+    const s = out.creditor_name.trim()
+    if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) out.creditor_name = null
+    else out.creditor_name = s
+  }
+  if (out.creditor_name && looksLikeMisassignedName(out.creditor_name)) out.creditor_name = null
+  if (out.supplier && looksLikeMisassignedName(out.supplier)) out.supplier = null
+
+  // App rule: supplier and payee are the same entity.
+  // Prefer creditor_name if available (it tends to come from explicit "Prejemnik" labels).
+  const sameName = out.creditor_name || out.supplier || null
+  if (sameName) {
+    out.creditor_name = sameName
+    out.supplier = sameName
   }
   if (out.purpose && typeof out.purpose === 'string') out.purpose = out.purpose.trim() || null
   if (out.payment_details && typeof out.payment_details === 'string') {
@@ -299,6 +317,84 @@ function extractFields(rawText) {
   const text = (rawText || '').replace(/\r/g, '')
   const out = { supplier: null, creditor_name: null, invoice_number: null, amount: null, currency: null, due_date: null, iban: null, reference: null, purpose: null, payment_details: null }
 
+  function parseMoneyAmount(input) {
+    const raw = String(input || '').trim()
+    if (!raw) return null
+    // Keep only digits, separators and an optional leading minus.
+    const cleaned = raw.replace(/[^0-9.,\-\s]/g, '').trim()
+    if (!/[0-9]/.test(cleaned)) return null
+    const s = cleaned.replace(/\s+/g, '')
+
+    const lastComma = s.lastIndexOf(',')
+    const lastDot = s.lastIndexOf('.')
+    let decimalSep = null
+    if (lastComma >= 0 && lastDot >= 0) decimalSep = lastComma > lastDot ? ',' : '.'
+    else if (lastComma >= 0) decimalSep = ','
+    else if (lastDot >= 0) decimalSep = '.'
+
+    let normalized = s
+    if (decimalSep === ',') {
+      // 1.234,56 -> 1234.56
+      normalized = s.replace(/\./g, '').replace(',', '.')
+    } else if (decimalSep === '.') {
+      // 1,234.56 -> 1234.56
+      normalized = s.replace(/,/g, '')
+    }
+    // Keep only a single leading '-'
+    normalized = normalized.replace(/(?!^)-/g, '')
+    const num = Number(normalized)
+    return Number.isFinite(num) ? num : null
+  }
+
+  function parseDateToken(token, hintIsEnglish) {
+    const t = String(token || '').trim()
+    if (!t) return null
+    const compact = t.replace(/\s/g, '')
+    if (/^\d{4}-\d{2}-\d{2}$/.test(compact)) return compact
+    if (/^\d{4}\/\d{2}\/\d{2}$/.test(compact)) return compact.replace(/\//g, '-')
+
+    const m = compact.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/)
+    if (!m) return null
+    let a = Number(m[1])
+    let b = Number(m[2])
+    let y = Number(m[3])
+    if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(y)) return null
+    if (y < 100) y = y >= 70 ? 1900 + y : 2000 + y
+
+    const delim = compact.includes('/') ? '/' : (compact.includes('.') ? '.' : '-')
+
+    // Heuristics:
+    // - If one side > 12, it must be the day.
+    // - If ambiguous (<=12 both), assume MM/DD for English labels when delimiter is '/', else DD/MM.
+    const aIsDay = a > 12 && a <= 31
+    const bIsDay = b > 12 && b <= 31
+
+    let day
+    let month
+    if (aIsDay && !bIsDay) {
+      day = a
+      month = b
+    } else if (bIsDay && !aIsDay) {
+      // MM/DD
+      day = b
+      month = a
+    } else {
+      const assumeMonthFirst = hintIsEnglish && delim === '/'
+      if (assumeMonthFirst) {
+        month = a
+        day = b
+      } else {
+        day = a
+        month = b
+      }
+    }
+
+    if (!(month >= 1 && month <= 12 && day >= 1 && day <= 31)) return null
+    const mm = String(month).padStart(2, '0')
+    const dd = String(day).padStart(2, '0')
+    return `${y}-${mm}-${dd}`
+  }
+
   function hasLetters(s) {
     return /[A-Za-zÀ-žČŠŽčšž]/.test(String(s || ''))
   }
@@ -322,7 +418,22 @@ function extractFields(rawText) {
   // Supplier: pick a line that actually looks like a name (letters), not a random number/header.
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean)
   if (lines.length) {
+    // Prefer explicit labels (works better internationally).
+    const supplierLabel = /\b(dobavitelj|supplier|vendor|seller|issuer|bill\s*from|from)\b\s*:?\s*(.+)$/i
+    let labeledSupplier = null
+    for (const l of lines) {
+      const m = String(l).match(supplierLabel)
+      if (!m) continue
+      const v = String(m[2] || '').trim()
+      if (!v) continue
+      if (hasLetters(v) && !looksLikeMisassignedName(v) && v.length >= 2) {
+        labeledSupplier = v
+        break
+      }
+    }
+
     const candidate =
+      labeledSupplier ||
       lines.find((l) => hasLetters(l) && !isLikelyNoiseLine(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
       lines.find((l) => hasLetters(l) && !looksLikeMisassignedName(l) && l.length >= 3) ||
       lines[0]
@@ -330,59 +441,137 @@ function extractFields(rawText) {
   }
 
   // IBAN
-  const compactText = text.toUpperCase().replace(/\s+/g, '')
-  const ibanMatch = compactText.match(/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/)
-  if (ibanMatch) out.iban = ibanMatch[0].replace(/\s+/g, '')
+  try {
+    const ibanCandidates = []
+    const ibanRe = /\b[A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,34}\b/g
+    for (const line of text.toUpperCase().split(/\n+/)) {
+      const matches = line.match(ibanRe)
+      if (!matches) continue
+      for (const m of matches) {
+        const normalized = normalizeIban(m)
+        if (normalized) ibanCandidates.push(normalized)
+      }
+    }
+    if (ibanCandidates.length) out.iban = ibanCandidates[0]
+  } catch {}
 
   // Amount + currency
-  let currency = null
-  let amount = null
-  const eur = text.match(/EUR\s*([0-9]+(?:[\.,][0-9]{1,2})?)/i)
-  if (eur) { currency = 'EUR'; amount = eur[1] }
-  if (!amount) {
-    // 12,34 EUR / 12.34 EUR
-    const eurAfter = text.match(/([0-9]+(?:[\.,][0-9]{1,2})?)\s*EUR\b/i)
-    if (eurAfter) { currency = 'EUR'; amount = eurAfter[1] }
-  }
-  if (!amount) {
-    // 12,34€ / 12.34 €
-    const euroSign = text.match(/([0-9]+(?:[\.,][0-9]{1,2})?)\s*€/) 
-    if (euroSign) { currency = 'EUR'; amount = euroSign[1] }
-  }
-  if (!amount) {
-    const anyAmt = text.match(/([0-9]+(?:[\.,][0-9]{1,2})?)\s*(EUR|USD|GBP)/i)
-    if (anyAmt) { amount = anyAmt[1]; currency = anyAmt[2].toUpperCase() }
-  }
-  if (amount) {
-    const num = Number(String(amount).replace(',', '.'))
-    if (!Number.isNaN(num)) out.amount = num
-  }
-  if (currency) out.currency = currency
-
-  // Due date
-  const date1 = text.match(/(\d{4}-\d{2}-\d{2})/) // YYYY-MM-DD
-  const date2 = text.match(/(\d{2}[\.\/]-?\d{2}[\.\/]\d{4})/) // DD.MM.YYYY or DD/MM/YYYY
-  const date3 = text.match(/(\d{2}[\.\/]\d{2}[\.\/]\d{2,4})/)
-  const date = (date1?.[1] || date2?.[1] || date3?.[1] || '').replace(/[\s]/g, '')
-  if (date) {
-    // normalize to YYYY-MM-DD if possible
-    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) out.due_date = date
-    else if (/^\d{2}[\.\/]\d{2}[\.\/]\d{4}$/.test(date)) {
-      const [d, m, y] = date.replace(/[\.\/]/g, '-').split('-')
-      out.due_date = `${y}-${m}-${d}`
+  try {
+    const currencyFromSymbol = (s) => {
+      if (/€/.test(s)) return 'EUR'
+      if (/[£]/.test(s)) return 'GBP'
+      if (/[¥]/.test(s)) return 'JPY'
+      if (/\$/.test(s)) return 'USD'
+      return null
     }
-  }
 
-  // Reference / sklic
-  const ref = text.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,}|sklic:?\s*([A-Z0-9\-\/]+))/i)
-  if (ref) out.reference = (ref[1] || ref[2] || '').replace(/\s+/g, '')
+    const amountLabels = /(total\s*due|amount\s*due|balance\s*due|total|grand\s*total|za\s*pla\S*|znesek|skupaj|za\s*pla\S*)/i
 
-  // Purpose / namen
-  const purp = text.match(/namen:?\s*(.+)|purpose:?\s*(.+)/i)
-  if (purp) out.purpose = (purp[1] || purp[2] || '').trim()
+    const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    const candidates = []
+
+    const pushFromLine = (line, labelBoost) => {
+      const sym = currencyFromSymbol(line)
+      const codePrefix = line.match(/\b([A-Z]{3})\b\s*([0-9][0-9.,\s-]{0,20})/i)
+      if (codePrefix) {
+        const cur = String(codePrefix[1]).toUpperCase()
+        const val = parseMoneyAmount(codePrefix[2])
+        if (val != null) candidates.push({ currency: cur, amount: val, score: 2 + labelBoost })
+      }
+      const codeSuffix = line.match(/([0-9][0-9.,\s-]{0,20})\s*\b([A-Z]{3})\b/i)
+      if (codeSuffix) {
+        const cur = String(codeSuffix[2]).toUpperCase()
+        const val = parseMoneyAmount(codeSuffix[1])
+        if (val != null) candidates.push({ currency: cur, amount: val, score: 2 + labelBoost })
+      }
+      if (sym) {
+        const m = line.match(/([0-9][0-9.,\s-]{0,20})\s*[$€£¥]/)
+        if (m) {
+          const val = parseMoneyAmount(m[1])
+          if (val != null) candidates.push({ currency: sym, amount: val, score: 1 + labelBoost })
+        }
+      }
+    }
+
+    for (const l of lines) pushFromLine(l, amountLabels.test(l) ? 3 : 0)
+    // Fallback: search whole text for prefix/suffix codes.
+    if (!candidates.length) {
+      const all = text.match(/\b[A-Z]{3}\b\s*[0-9][0-9.,\s-]{0,20}|[0-9][0-9.,\s-]{0,20}\s*\b[A-Z]{3}\b/g) || []
+      for (const chunk of all) pushFromLine(chunk, 0)
+    }
+
+    if (candidates.length) {
+      candidates.sort((a, b) => b.score - a.score)
+      out.currency = candidates[0].currency
+      out.amount = candidates[0].amount
+    }
+  } catch {}
+
+  // Due date: prefer labeled due dates; avoid picking random issue dates.
+  try {
+    // NOTE: don't use \w here; it doesn't match diacritics (e.g. "plačila").
+    const dueLabel = /(rok\s*pla[^\s:]*|zapad[^\s:]*|due\s*date|date\s*due|payment\s*due|pay\s*by|payable\s*by|f[äa]llig[^\s:]*|zahlbar\s*bis|scadenza|scad\.?\b|[ée]ch[ée]ance|vencim\S*|vencimiento)/i
+    const dateToken = /(\d{4}[-\/]\d{2}[-\/]\d{2}|\d{1,2}[\.\/-]\d{1,2}[\.\/-]\d{2,4})/
+
+    const dueLabelEnglish = /(due\s*date|date\s*due|payment\s*due|pay\s*by|payable\s*by)/i
+
+    let picked = null
+    let hintEnglish = false
+    const inline = text.match(new RegExp(`${dueLabel.source}\\s*:?\\s*${dateToken.source}`, 'i'))
+    if (inline) {
+      picked = inline[2]
+      hintEnglish = dueLabelEnglish.test(inline[1] || '')
+    }
+
+    if (!picked) {
+      for (let i = 0; i < lines.length - 1; i++) {
+        const l = lines[i]
+        if (!dueLabel.test(l)) continue
+        hintEnglish = dueLabelEnglish.test(l)
+        const next = lines[i + 1]
+        const m = next && String(next).match(dateToken)
+        if (m) { picked = m[1]; break }
+      }
+    }
+
+    if (!picked) {
+      const all = [...new Set((text.match(/\b\d{4}-\d{2}-\d{2}\b|\b\d{2}[\.\/]\d{2}[\.\/]\d{2,4}\b/g) || []).map((d) => String(d).trim()))]
+      if (all.length === 1) picked = all[0]
+    }
+
+    if (picked) out.due_date = parseDateToken(picked, hintEnglish)
+  } catch {}
+
+  // Reference / sklic (avoid confusing IBAN lines for SIxx references)
+  try {
+    let refVal = null
+    for (const l of lines) {
+      const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
+      if (!labeled) continue
+      const v = String(labeled[2] || '').trim()
+      if (!v) continue
+      const m = v.match(/\b(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,})\b/i)
+      refVal = m ? m[1] : v
+      break
+    }
+    if (!refVal) {
+      for (const l of lines) {
+        if (/\biban\b/i.test(l)) continue
+        const m = l.match(/\b(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,})\b/i)
+        if (!m) continue
+        refVal = m[1]
+        break
+      }
+    }
+    if (refVal) out.reference = String(refVal).replace(/\s+/g, '')
+  } catch {}
+
+  // Purpose / memo / description
+  const purp = text.match(/(?:namen|purpose|memo|description|payment\s*for)\s*:?\s*(.+)/i)
+  if (purp) out.purpose = String(purp[1] || '').trim()
 
   // Creditor/payee name (often same as supplier)
-  const cred = text.match(/(prejemnik|recipient|payee|upravi\w*):?\s*(.+)/i)
+  const cred = text.match(/(prejemnik|recipient|payee|beneficiary|creditor|to\s*:|upravi[^\s:]*)\s*:?\s*(.+)/i)
   if (cred) {
     const v = String(cred[2] || '').trim()
     if (v && /[A-Za-zÀ-žČŠŽčšž]/.test(v) && v.length >= 2 && !looksLikeMisassignedName(v)) out.creditor_name = v
@@ -804,3 +993,6 @@ export async function handler(event) {
     return jsonResponse(500, { ok: false, step: 'catch', error: 'unhandled_exception', detail: safeDetailFromError(err) })
   }
 }
+
+// Exported for unit tests (pure helpers; safe to import without invoking handler).
+export { extractFields, sanitizeFields }

@@ -57,7 +57,7 @@ export default function Login() {
     <div className="min-h-[70vh] flex items-center justify-center px-3 py-6">
       <Card className="w-full max-w-md p-5">
         <h2 className="text-xl font-semibold tracking-tight">{isSignUp ? 'Sign Up' : 'Login'}</h2>
-        <p className="mt-1 text-xs text-neutral-400">Access your BillBox account</p>
+        <p className="mt-1 text-xs text-neutral-600">Access your BillBox account</p>
         <form onSubmit={handleSubmit} className="mt-4 space-y-3">
           <div>
             <label className="label">Email</label>

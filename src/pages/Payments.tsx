@@ -103,19 +103,19 @@ export default function PaymentsPage() {
 
   return (
     <div className="mx-auto max-w-4xl">
-      <div className="sticky top-16 z-10 bg-white backdrop-blur border-b border-neutral-200">
+      <div className="sticky top-16 z-10 bg-white/85 backdrop-blur supports-[backdrop-filter]:bg-white/70 border-b border-neutral-200/70 shadow-sm">
         <div className="px-3 sm:px-4 py-3 flex items-center justify-between">
           <h2 className="text-xl font-semibold">Payments</h2>
           <div className="flex items-center gap-6 text-sm">
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-neutral-400">Unpaid</span>
+              <span className="text-xs text-neutral-600">Unpaid</span>
               <span className="text-lg font-semibold">{totals.unpaidTotal.toFixed(2)}</span>
-              <span className="text-xs text-neutral-400">EUR</span>
+              <span className="text-xs text-neutral-600">EUR</span>
             </div>
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-neutral-400">Overdue</span>
-              <span className="text-lg font-semibold text-red-300">{totals.overdueTotal.toFixed(2)}</span>
-              <span className="text-xs text-neutral-400">EUR</span>
+              <span className="text-xs text-neutral-600">Overdue</span>
+              <span className="text-lg font-semibold text-red-700">{totals.overdueTotal.toFixed(2)}</span>
+              <span className="text-xs text-neutral-600">EUR</span>
             </div>
             <Button onClick={() => navigator.clipboard.writeText(toPay.map(fallbackPayload).join('\n\n'))}>Copy all</Button>
           </div>
@@ -127,8 +127,8 @@ export default function PaymentsPage() {
           <p className="text-sm">Loading…</p>
         ) : toPay.length === 0 ? (
           <Card className="p-6 text-center">
-            <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-neutral-800 flex items-center justify-center text-neutral-400">💳</div>
-            <p className="text-sm text-neutral-300">No unpaid or overdue bills.</p>
+            <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-brand-50 border border-brand-100 flex items-center justify-center text-brand-700">💳</div>
+            <p className="text-sm text-neutral-700">No unpaid or overdue bills.</p>
             <div className="mt-3">
               <Link to="/app/bills" className="btn btn-primary">Add bill</Link>
             </div>
@@ -139,20 +139,20 @@ export default function PaymentsPage() {
               <li key={b.id} className="card p-4">
                 <div className="flex items-center justify-between">
                   <div className="min-w-0">
-                    <div className="text-sm text-neutral-400">{b.creditor_name || 'Supplier'}</div>
+                    <div className="text-sm text-neutral-500">{b.creditor_name || 'Supplier'}</div>
                     <div className="truncate font-semibold">{b.supplier}</div>
-                    <div className="mt-1 text-xs text-neutral-400">Due {b.due_date}</div>
+                    <div className="mt-1 text-xs text-neutral-500">Due {b.due_date}</div>
                     <div className="mt-1">
                       {isOverdue(b) ? <Badge variant="danger">Overdue</Badge> : <Badge>Unpaid</Badge>}
                     </div>
                   </div>
                   <div className="text-right">
                     <div className="text-xl font-bold">{Number(b.amount).toFixed(2)}</div>
-                    <div className="text-xs text-neutral-400">{b.currency}</div>
+                    <div className="text-xs text-neutral-500">{b.currency}</div>
                   </div>
                 </div>
                 {(b.creditor_name || b.iban || b.reference || b.purpose) && (
-                  <div className="mt-2 text-xs text-neutral-300">
+                  <div className="mt-2 text-xs text-neutral-600">
                     <div className="flex flex-wrap gap-3">
                       {b.creditor_name && <span>Creditor: {b.creditor_name}</span>}
                       {b.iban && <span>IBAN: {b.iban}</span>}

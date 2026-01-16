@@ -11,7 +11,15 @@ interface Props {
   onSave: (input: CreateBillInput, id?: string) => Promise<void>
 }
 
-const currencies = ['EUR', 'USD', 'GBP']
+const commonCurrencies = [
+  'EUR', 'USD', 'GBP',
+  'CHF', 'CAD', 'AUD', 'NZD',
+  'JPY', 'CNY', 'HKD', 'SGD',
+  'SEK', 'NOK', 'DKK',
+  'PLN', 'CZK', 'HUF', 'RON', 'BGN',
+  'TRY', 'AED', 'SAR',
+  'INR', 'BRL', 'ZAR',
+]
 
 export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [supplier, setSupplier] = useState('')
@@ -22,6 +30,8 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   const [iban, setIban] = useState<string>('')
   const [reference, setReference] = useState<string>('')
   const [purpose, setPurpose] = useState<string>('')
+  const [paymentDetails, setPaymentDetails] = useState<string>('')
+  const [showPaymentDetails, setShowPaymentDetails] = useState(false)
   const [invoiceNumber, setInvoiceNumber] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -48,6 +58,8 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       setIban(initial.iban || '')
       setReference(initial.reference || '')
       setPurpose(initial.purpose || '')
+      setPaymentDetails((initial as any).payment_details || '')
+      setShowPaymentDetails(!!(initial as any).payment_details)
       setInvoiceNumber((initial as any).invoice_number || '')
     } else {
       setSupplier('')
@@ -58,6 +70,8 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       setIban('')
       setReference('')
       setPurpose('')
+      setPaymentDetails('')
+      setShowPaymentDetails(false)
       setInvoiceNumber('')
     }
   }, [initial])
@@ -105,9 +119,13 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
       setDecodedText(text)
       const res = parsePaymentQR(text)
       if (res) {
-        if (res.creditor_name) setCreditorName(res.creditor_name)
+        if (res.creditor_name) {
+          setCreditorName(res.creditor_name)
+          setSupplier((prev) => prev || res.creditor_name || '')
+        }
         if (res.iban) setIban(res.iban)
         if (typeof res.amount === 'number') setAmount(res.amount)
+        if (res.due_date) setDueDate(res.due_date)
         if (res.purpose) setPurpose(res.purpose)
         if (res.reference) setReference(res.reference)
         if (res.currency) setCurrency(res.currency)
@@ -146,14 +164,23 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         throw new Error(data?.error || `OCR failed (${resp.status})`)
       }
       const f = data.fields || {}
+      const extractedName = (f.creditor_name || f.supplier || '') as string
       if (f.creditor_name) setCreditorName(f.creditor_name)
-      if (f.supplier) setSupplier((prev)=> prev || f.supplier)
+      if (f.supplier) setSupplier((prev) => prev || f.supplier)
+      if (extractedName) {
+        setSupplier((prev) => prev || extractedName)
+        setCreditorName((prev) => prev || extractedName)
+      }
       if (typeof f.amount === 'number') setAmount(f.amount)
       if (f.currency) setCurrency(f.currency)
       if (f.due_date) setDueDate(f.due_date)
       if (f.iban) setIban(f.iban)
       if (f.reference) setReference(f.reference)
       if (f.purpose) setPurpose(f.purpose)
+      if (f.payment_details) {
+        setPaymentDetails(f.payment_details)
+        setShowPaymentDetails(true)
+      }
       setFlashFilled(true)
       setTimeout(() => {
         paymentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -171,9 +198,13 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
     setDecodedText(text)
     const res = parsePaymentQR(text)
     if (res) {
-      if (res.creditor_name) setCreditorName(res.creditor_name)
+      if (res.creditor_name) {
+        setCreditorName(res.creditor_name)
+        setSupplier((prev) => prev || res.creditor_name || '')
+      }
       if (res.iban) setIban(res.iban)
       if (typeof res.amount === 'number') setAmount(res.amount)
+      if (res.due_date) setDueDate(res.due_date)
       if (res.purpose) setPurpose(res.purpose)
       if (res.reference) setReference(res.reference)
       if (res.currency) setCurrency(res.currency)
@@ -193,21 +224,35 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
-    if (!supplier || !dueDate) {
+    const supplierTrimmed = supplier.trim()
+    const creditorTrimmed = creditorName.trim()
+    const amountNumber = Number(amount)
+    const resolvedName = (supplierTrimmed || creditorTrimmed).trim()
+
+    if (!resolvedName || !dueDate) {
       setError('Supplier and due date are required.')
+      return
+    }
+    if (!Number.isFinite(amountNumber) || amountNumber <= 0) {
+      setError('Amount must be greater than 0.')
+      return
+    }
+    if (supplierTrimmed && creditorTrimmed && supplierTrimmed !== creditorTrimmed) {
+      setError('Supplier and creditor must be the same name.')
       return
     }
     setLoading(true)
     try {
       await onSave({
-        supplier,
-        amount: Number(amount),
+        supplier: resolvedName,
+        amount: amountNumber,
         currency,
         due_date: dueDate,
-        creditor_name: creditorName || null,
+        creditor_name: (creditorTrimmed || resolvedName) || null,
         iban: iban || null,
         reference: reference || null,
         purpose: purpose || null,
+        payment_details: paymentDetails.trim() || null,
         invoice_number: invoiceNumber || null,
       }, initial?.id)
     } catch (err: any) {
@@ -275,14 +320,18 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
         </div>
         {/* Basics */}
         <div>
-          <div className="text-xs text-neutral-400 mb-2">Basics</div>
+          <div className="text-xs text-neutral-600 mb-2">Basics</div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label className="label">Supplier</label>
               <input
                 type="text"
                 value={supplier}
-                onChange={(e) => setSupplier(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setSupplier(v)
+                  setCreditorName((prev) => prev || v)
+                }}
                 required
                 className="input"
               />
@@ -312,7 +361,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
 
         {/* Payment details */}
         <div ref={paymentRef} className={flashFilled ? 'ring-2 ring-green-300 rounded' : ''}>
-          <div className="text-xs text-neutral-400 mb-2">Payment details</div>
+          <div className="text-xs text-neutral-600 mb-2">Payment details</div>
           <div className="grid gap-3 sm:grid-cols-3">
             <div>
               <label className="label">Amount</label>
@@ -327,18 +376,34 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
             </div>
             <div>
               <label className="label">Currency</label>
-              <select value={currency} onChange={(e) => setCurrency(e.target.value)} className="input">
-                {currencies.map((c) => (
-                  <option key={c} value={c}>{c}</option>
+              <input
+                type="text"
+                inputMode="latin"
+                list="currency-list"
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value.toUpperCase())}
+                onBlur={() => setCurrency((c) => c.trim().toUpperCase().slice(0, 3) || 'EUR')}
+                className="input"
+                placeholder="EUR"
+                pattern="[A-Za-z]{3}"
+                title="3-letter currency code (ISO 4217), e.g. EUR, USD"
+              />
+              <datalist id="currency-list">
+                {commonCurrencies.map((c) => (
+                  <option key={c} value={c} />
                 ))}
-              </select>
+              </datalist>
             </div>
             <div>
               <label className="label">Creditor name</label>
               <input
                 type="text"
                 value={creditorName}
-                onChange={(e) => setCreditorName(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setCreditorName(v)
+                  setSupplier((prev) => prev || v)
+                }}
                 className="input"
               />
               <div className="helper mt-1">Name of the account holder receiving the payment.</div>
@@ -348,7 +413,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
 
         {/* Optional */}
         <div>
-          <div className="text-xs text-neutral-400 mb-2">Optional</div>
+          <div className="text-xs text-neutral-600 mb-2">Optional</div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label className="label">IBAN</label>
@@ -358,7 +423,7 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
                 onChange={(e) => setIban(e.target.value)}
                 className="input"
               />
-              <div className="helper mt-1">International Bank Account Number, no spaces.</div>
+              <div className="helper mt-1">International Bank Account Number. If none, use Bank details below.</div>
             </div>
             <div>
               <label className="label">Reference</label>
@@ -379,6 +444,30 @@ export default function BillForm({ initial, onCancel, onSave }: Props) {
                 className="input"
               />
               <div className="helper mt-1">Short description of the payment (optional).</div>
+            </div>
+
+            <div className="sm:col-span-2">
+              <details
+                open={showPaymentDetails}
+                onToggle={(e) => setShowPaymentDetails((e.currentTarget as HTMLDetailsElement).open)}
+                className="rounded-lg border border-neutral-200 bg-white"
+              >
+                <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-neutral-900">
+                  Bank details (international / non-IBAN)
+                </summary>
+                <div className="px-3 pb-3">
+                  <textarea
+                    value={paymentDetails}
+                    onChange={(e) => setPaymentDetails(e.target.value)}
+                    rows={4}
+                    className="input min-h-[96px]"
+                    placeholder="SWIFT/BIC: ...\nRouting: ...\nSort code: ...\nAccount: ..."
+                  />
+                  <div className="helper mt-1">
+                    Optional. Use for countries without IBAN or when the invoice provides routing/sort-code style details.
+                  </div>
+                </div>
+              </details>
             </div>
           </div>
         </div>

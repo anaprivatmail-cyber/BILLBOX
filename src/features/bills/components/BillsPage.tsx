@@ -91,6 +91,7 @@ export default function BillsPage() {
       b.iban ? `IBAN: ${b.iban}` : '',
       b.reference ? `Reference: ${b.reference}` : '',
       b.purpose ? `Purpose: ${b.purpose}` : '',
+      b.payment_details ? `Bank details:\n${b.payment_details}` : '',
       `Due: ${b.due_date}`,
     ].filter(Boolean)
     return lines.join('\n')
@@ -173,31 +174,31 @@ export default function BillsPage() {
     <div className="mx-auto max-w-4xl">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-2xl font-semibold tracking-tight">Bills</h2>
-        <div className="hidden sm:flex items-center gap-2 text-sm text-neutral-400">
-          <Link to="/app" className="hover:text-neutral-200">Bills</Link>
+        <div className="hidden sm:flex items-center gap-2 text-sm text-neutral-500">
+          <Link to="/app" className="hover:text-neutral-900">Bills</Link>
           <span>·</span>
-          <Link to="/app/warranties" className="hover:text-neutral-200">Warranties</Link>
+          <Link to="/app/warranties" className="hover:text-neutral-900">Warranties</Link>
         </div>
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <Card className="p-4">
-          <div className="text-xs text-neutral-400">Unpaid</div>
+          <div className="text-xs text-neutral-600">Unpaid</div>
           <div className="mt-1 flex items-baseline gap-2">
             <span className="text-lg font-semibold">{analytics.unpaidCount}</span>
-            <span className="text-sm text-neutral-300">/ {analytics.unpaidTotal.toFixed(2)}</span>
+            <span className="text-sm text-neutral-700">/ {analytics.unpaidTotal.toFixed(2)}</span>
             <Badge variant={analytics.unpaidCount > 0 ? 'warning' : 'success'}>{analytics.unpaidCount > 0 ? 'Pending' : 'Clear'}</Badge>
           </div>
         </Card>
         <Card className="p-4">
-          <div className="text-xs text-neutral-400">Overdue</div>
+          <div className="text-xs text-neutral-600">Overdue</div>
           <div className="mt-1 flex items-baseline gap-2">
-            <span className="text-lg font-semibold text-red-300">{analytics.overdueCount}</span>
-            <span className="text-sm text-neutral-300">/ {analytics.overdueTotal.toFixed(2)}</span>
+            <span className="text-lg font-semibold text-red-700">{analytics.overdueCount}</span>
+            <span className="text-sm text-neutral-700">/ {analytics.overdueTotal.toFixed(2)}</span>
           </div>
         </Card>
         <Card className="p-4">
-          <div className="text-xs text-neutral-400">Next due</div>
-          <div className="mt-1 text-sm text-neutral-300">
+          <div className="text-xs text-neutral-600">Next due</div>
+          <div className="mt-1 text-sm text-neutral-800">
             {analytics.nextDue ? (
               <span>
                 {analytics.nextDue.supplier} on {analytics.nextDue.due_date} ({Number(analytics.nextDue.amount).toFixed(2)} {analytics.nextDue.currency})
@@ -237,8 +238,8 @@ export default function BillsPage() {
         <p className="mt-3 text-sm">Loading…</p>
       ) : filtered.length === 0 ? (
         <Card className="mt-3 p-6 text-center">
-          <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-neutral-800 flex items-center justify-center text-neutral-400">🧾</div>
-          <p className="text-sm text-neutral-300">No bills found. Add your first bill to start tracking.</p>
+          <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-brand-50 border border-brand-100 flex items-center justify-center text-brand-700">🧾</div>
+          <p className="text-sm text-neutral-700">No bills found. Add your first bill to start tracking.</p>
           <div className="mt-3">
             <Button variant="primary" onClick={() => { setFormOpen(true); setEditing(null) }}>Add bill</Button>
           </div>
@@ -251,16 +252,16 @@ export default function BillsPage() {
               <li key={b.id} className="card p-4">
                 <div className="flex items-center justify-between">
                   <div className="min-w-0">
-                    <div className="text-sm text-neutral-400">{b.creditor_name || 'Supplier'}</div>
-                    <div className="truncate font-semibold text-neutral-100">{b.supplier}</div>
+                    <div className="text-sm text-neutral-500">{b.creditor_name || 'Supplier'}</div>
+                    <div className="truncate font-semibold text-neutral-900">{b.supplier}</div>
                   </div>
                   <div className="text-right">
                     <div className="text-xl font-bold tracking-tight">{Number(b.amount).toFixed(2)}</div>
-                    <div className="text-xs text-neutral-400">{b.currency}</div>
+                    <div className="text-xs text-neutral-500">{b.currency}</div>
                   </div>
                 </div>
                 <div className="mt-2 flex items-center justify-between">
-                  <div className="text-xs text-neutral-400">Due {b.due_date}</div>
+                  <div className="text-xs text-neutral-500">Due {b.due_date}</div>
                   <div>
                     {overdue ? <Badge variant="danger">Overdue</Badge> : b.status === 'paid' ? <Badge variant="success">Paid</Badge> : <Badge>Unpaid</Badge>}
                   </div>
@@ -285,22 +286,26 @@ export default function BillsPage() {
                   <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(b.reference || '')}>Copy Reference</Button>
                   <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(String(b.amount))}>Copy Amount</Button>
                   <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(b.purpose || '')}>Copy Purpose</Button>
+                  {b.payment_details && (
+                    <Button className="px-2 py-1 text-xs" onClick={() => copyToClipboard(b.payment_details || '')}>Copy Bank details</Button>
+                  )}
                 </div>
-                {(b.creditor_name || b.iban || b.reference || b.purpose) && (
-                  <div className="mt-2 text-xs text-neutral-300">
+                {(b.creditor_name || b.iban || b.reference || b.purpose || b.payment_details) && (
+                  <div className="mt-2 text-xs text-neutral-600">
                     <div className="flex flex-wrap gap-3">
                       {b.creditor_name && <span>Creditor: {b.creditor_name}</span>}
                       {b.iban && <span>IBAN: {b.iban}</span>}
                       {b.reference && <span>Ref: {b.reference}</span>}
                       {b.purpose && <span>Purpose: {b.purpose}</span>}
+                      {b.payment_details && <span>Bank details: {b.payment_details}</span>}
                     </div>
                   </div>
                 )}
                 {openAttachmentsFor === b.id && (
-                  <div className="mt-3 border-t border-dashed border-neutral-800 pt-3">
+                  <div className="mt-3 border-t border-dashed border-neutral-200 pt-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <Input type="file" multiple accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(e: ChangeEvent<HTMLInputElement>) => handleUploadFiles(b.id, e.target.files)} />
-                      <span className="text-xs text-neutral-400">Upload PDF or images</span>
+                      <span className="text-xs text-neutral-500">Upload PDF or images</span>
                       {attachments[b.id]?.uploading && <span className="text-xs">Uploading…</span>}
                     </div>
                     <div className="mt-2">
@@ -309,7 +314,7 @@ export default function BillsPage() {
                       ) : attachments[b.id]?.error ? (
                         <div className="text-xs text-red-400">{attachments[b.id]?.error}</div>
                       ) : (attachments[b.id]?.items || []).length === 0 ? (
-                        <div className="text-xs text-neutral-400">No attachments yet.</div>
+                        <div className="text-xs text-neutral-500">No attachments yet.</div>
                       ) : (
                         <ul className="grid gap-2">
                           {(attachments[b.id]?.items || []).map((f) => (

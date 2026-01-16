@@ -11,6 +11,7 @@
     "dev": "npm --workspace apps/web run dev",
     "build": "npm --workspace apps/web run build",
     "lint": "eslint .",
+    "test": "vitest run",
     "preview": "npm --workspace apps/web run preview",
     "mobile:start": "npm --prefix billbox-mobile run start",
     "mobile:tunnel": "npm --prefix billbox-mobile run start -- --tunnel"
@@ -53,6 +54,7 @@
     "typescript-eslint": "^8.46.4",
     "vite": "^7.2.4",
     "vite-plugin-pwa": "^1.2.0",
+    "vitest": "^3.2.4",
     "eas-cli": "^10.0.0"
   }
 }

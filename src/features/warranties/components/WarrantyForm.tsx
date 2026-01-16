@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Warranty, CreateWarrantyInput } from '../types'
 import { Tabs } from '../../../components/ui/Tabs'
 import QRScanner from '../../../components/QRScanner'
-import { parseEPC } from '../../../lib/epc'
+import { parsePaymentQR } from '../../../lib/epc'
 import { uploadAttachments as uploadWarrantyAttachments } from '../attachments'
 import { BrowserQRCodeReader } from '@zxing/browser'
 
@@ -107,9 +107,9 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
       const text = typeof result?.getText === 'function' ? result.getText() : String(result)
       if (!text) throw new Error('No QR text decoded')
       setDecodedText(text)
-      const epc = parseEPC(text)
-      if (epc) {
-        if (epc.creditor_name) setSupplier(epc.creditor_name)
+      const res = parsePaymentQR(text)
+      if (res) {
+        if (res.creditor_name) setSupplier(res.creditor_name)
       }
     } catch (err: any) {
       const name = err?.name || 'Error'
@@ -136,10 +136,10 @@ export default function WarrantyForm({ initial, onCancel, onSave }: Props) {
 
   function onQrDecode(text: string) {
     setDecodedText(text)
-    const epc = parseEPC(text)
-    if (epc) {
-      if (epc.creditor_name) setSupplier(epc.creditor_name)
-      if (typeof epc.amount === 'number' && !expiresAt) {
+    const res = parsePaymentQR(text)
+    if (res) {
+      if (res.creditor_name) setSupplier(res.creditor_name)
+      if (typeof res.amount === 'number' && !expiresAt) {
         // No direct mapping for amount here; keep text available to user.
       }
     }

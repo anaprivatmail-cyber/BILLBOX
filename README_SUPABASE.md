@@ -14,6 +14,8 @@ The client is initialized in `src/lib/supabase.ts` and expects the environment v
 ## Database Schema
 Apply `supabase/schema.sql` in the Supabase SQL editor (or via CLI).
 
+Then apply `supabase/payments.sql` to add optional payment fields (IBAN/reference/purpose and international bank details).
+
 Tables:
 - `public.bills`: user-specific bills
 - `public.warranties`: user-specific warranties
@@ -25,5 +27,5 @@ Apply `supabase/policies.sql` to enable RLS and ensure users only access their o
 Apply `supabase/storage.sql` to create the private `attachments` bucket and per-user access policies. Store files under a folder named by the user's UUID, e.g. `user_id/filename.pdf`.
 
 ## Deployment Notes
-- Run SQL files in order: `schema.sql`, `policies.sql`, `storage.sql`.
+- Run SQL files in order: `schema.sql`, `payments.sql`, `policies.sql`, `storage.sql`.
 - Ensure authentication is enabled for your project and that `auth.uid()` resolves to the signed-in user's UUID.
