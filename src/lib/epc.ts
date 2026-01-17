@@ -14,7 +14,7 @@ function normalizeIban(input: string | undefined): string | undefined {
 }
 
 function normalizeReference(input: string | undefined): string | undefined {
-  const s = String(input || '').toUpperCase().replace(/\s+/g, '')
+  const s = String(input || '').toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/g, '')
   return s || undefined
 }
 
@@ -81,14 +81,27 @@ export function parseEPC(text: string): EPCResult | null {
       const parsed = Number(num.replace(',', '.'))
       if (!Number.isNaN(parsed)) amount = parsed
     }
-    const purpose = lines[8] || ''
-    const reference = lines[9] || ''
+    // EPC QR payload is line-based, but some providers omit the 4-char purpose code line.
+    const l8 = lines[8] || ''
+    const nextLooksLikeReference = /\b(?:SI\d{2}|RF\d{2})\b/i.test(String(lines[9] || ''))
+    const hasPurposeCode = /^[A-Z0-9]{4}$/.test(l8) || (nextLooksLikeReference && /^[A-Z0-9]{1,4}$/.test(l8))
+    const remittance = (hasPurposeCode ? (lines[9] || '') : l8).trim()
+    const info = (hasPurposeCode ? (lines[10] || '') : (lines[9] || '')).trim()
+    const combined = [remittance, info].filter(Boolean).join('\n')
+
+    const refMatch = combined.match(/(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,})/i)
+    const reference = refMatch ? String(refMatch[1] || '').replace(/\s+/g, '').toUpperCase() : ''
+    let purpose = combined
+    if (reference && refMatch) {
+      purpose = purpose.replace(refMatch[1], '').replace(/\s{2,}/g, ' ').trim()
+    }
+    if (!purpose) purpose = ''
     const result: EPCResult = {
       iban: iban || undefined,
       creditor_name: name || undefined,
       amount,
       purpose: purpose || undefined,
-      reference: normalizeReference(reference) || undefined,
+      reference: reference ? (normalizeReference(reference) || undefined) : undefined,
       currency: amountLine.startsWith('EUR') ? 'EUR' : undefined,
     }
     // EPC QR does not normally include a due date; keep undefined.
@@ -106,7 +119,7 @@ export function parseUPN(text: string): EPCResult | null {
     const lines = normalized.split(/\n+/).map((l) => l.trim()).filter(Boolean)
     const joined = lines.join('\n')
     // Detect presence
-    if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
+    if (!/UPNQR|\bUPN\b/i.test(joined) && !/\bSI\s*\d{2}\s*[0-9A-Z\-\/]{4,}\b/i.test(joined)) return null
     const findValidIbanInText = (t: string): string | undefined => {
       const matches = String(t || '').match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
       for (const m of matches) {

@@ -51,9 +51,53 @@ function normalizeIban(input) {
   return String(input || '').toUpperCase().replace(/\s+/g, '')
 }
 
+const IBAN_LENGTHS = {
+  // Common SEPA / EU
+  AL: 28,
+  AD: 24,
+  AT: 20,
+  BE: 16,
+  BG: 22,
+  CH: 21,
+  CY: 28,
+  CZ: 24,
+  DE: 22,
+  DK: 18,
+  EE: 20,
+  ES: 24,
+  FI: 18,
+  FR: 27,
+  GB: 22,
+  GR: 27,
+  HR: 21,
+  HU: 28,
+  IE: 22,
+  IS: 26,
+  IT: 27,
+  LI: 21,
+  LT: 20,
+  LU: 20,
+  LV: 21,
+  MC: 27,
+  MT: 31,
+  NL: 18,
+  NO: 15,
+  PL: 28,
+  PT: 25,
+  RO: 24,
+  SE: 24,
+  SI: 19,
+  SK: 24,
+  SM: 27,
+  TR: 26,
+}
+
 function isValidIbanChecksum(iban) {
   const s = normalizeIban(iban)
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(s)) return false
+  const cc = s.slice(0, 2)
+  const expected = IBAN_LENGTHS[cc]
+  if (expected && s.length !== expected) return false
   // Move first 4 chars to end, convert letters to numbers (A=10..Z=35), mod 97 must be 1.
   const rearranged = s.slice(4) + s.slice(0, 4)
   let remainder = 0
@@ -103,18 +147,41 @@ function extractIbanCandidates(rawText) {
 
 function extractReferenceCandidates(rawText) {
   const text = String(rawText || '').replace(/\r/g, '')
-  const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean).filter(line => line.length > 0)
+  // IMPORTANT: Do NOT treat every "SI\d\d..." token as IBAN-like.
+  // Slovenian references also start with SI\d\d, and a broad IBAN-like scan would
+  // incorrectly reject legitimate references. Only consider:
+  // - checksum-valid IBANs
+  // - IBAN-like tokens on lines explicitly labeled as IBAN/account/TRR
+  const labeledIbanLike = []
+  for (const l of lines) {
+    if (!/\b(iban|trr|ra\u010dun|racun|account)\b/i.test(l)) continue
+    const matches = String(l || '').toUpperCase().match(/\b[A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){8,34}\b/g) || []
+    for (const m of matches) {
+      const cand = normalizeIban(m)
+      if (cand) labeledIbanLike.push(cand)
+    }
+  }
+  const validIbans = extractIbanCandidates(text).map((x) => x.iban)
+  const ibanLike = [...new Set([...validIbans, ...labeledIbanLike].filter(Boolean))]
   // Allow spaces inside the token so we can capture whole strings like:
   // "SI56 0292 1503 0596 1290" (IBAN) and then exclude it by checksum.
   const refTokenRe = /\b(SI\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,}|RF\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,})\b/gi
 
-  const normalizeRef = (s) => {
+  const normalizeRef = (s, mode = 'fallback') => {
     const upper = String(s || '').toUpperCase()
     const m = upper.match(/\b(SI\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,}|RF\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,})\b/i)
     const picked = m ? m[1] : upper
     const compact = picked.replace(/\s+/g, '')
     // If it is actually an IBAN (checksum-valid), it must not be considered a payment reference.
     if (isValidIbanChecksum(compact)) return null
+    // Also reject any candidate that is a prefix/substring of an IBAN-like token (checksum may fail due to OCR).
+    if (compact && /^(SI|RF)\d{2}/i.test(compact)) {
+      for (const ib of ibanLike) {
+        if (!ib) continue
+        if (ib.includes(compact) || ib.startsWith(compact) || compact.startsWith(ib)) return null
+      }
+    }
     // Keep only plausible references.
     if (/^SI\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return compact
     if (/^RF\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return compact
@@ -126,18 +193,22 @@ function extractReferenceCandidates(rawText) {
 
   // Prefer explicitly labeled lines.
   for (const l of lines) {
-    const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
+    const labeled = l.match(/\b(sklic|referenca|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
     if (!labeled) continue
-    const cand = normalizeRef(labeled[2])
+    const cand = normalizeRef(labeled[2], 'labeled')
     if (!cand) continue
+    // For labeled refs, allow slightly shorter; for unlabeled, keep conservative.
+    if (/^SI\d{2}/i.test(cand) && cand.length < 7) continue
     if (!seen.has(cand)) { seen.add(cand); out.push(cand) }
   }
 
   // Fallback: scan all text, but exclude IBANs.
   const matches = text.match(refTokenRe) || []
   for (const m of matches) {
-    const cand = normalizeRef(m)
+    const cand = normalizeRef(m, 'fallback')
     if (!cand) continue
+    // Fallback needs to be strict: reject short SI prefixes that are common IBAN fragments.
+    if (/^SI\d{2}/i.test(cand) && cand.length < 10) continue
     if (!seen.has(cand)) { seen.add(cand); out.push(cand) }
   }
   return out
@@ -145,7 +216,7 @@ function extractReferenceCandidates(rawText) {
 
 function extractLabeledAmountCandidates(rawText) {
   const text = String(rawText || '').replace(/\r/g, '')
-  const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean).filter(line => line.length > 0)
   // Prefer payable/amount-due lines; avoid VAT/tax/subtotals.
   const payableLabels = /(total\s*due|amount\s*due|balance\s*due|grand\s*total|za\s*pla\S*|za\s*pla\u010dat\S*|za\s*pla\u010dilo|za\s*pla\u010dati|payable|to\s*pay|pay\s*now)/i
   const totalLabels = /(grand\s*total|\btotal\b|\bskupaj\b)/i
@@ -170,22 +241,42 @@ function extractLabeledAmountCandidates(rawText) {
     return 0
   }
 
-  for (const line of lines) {
-    const score = labelScore(line)
-    if (score <= 0) continue
-    const codePrefix = line.match(/\b([A-Z]{3})\b\s*([0-9][0-9.,\s-]{0,20})/i)
+  const tryParseAmountFromLine = (line) => {
+    const s = String(line || '')
+    const codePrefix = s.match(/\b([A-Z]{3})\b\s*([0-9][0-9.,\s-]{0,24})/i)
     if (codePrefix) {
       const cur = String(codePrefix[1]).toUpperCase()
       const val = parseMoneyAmountLoose(codePrefix[2])
-      if (val != null && val > 0) out.push({ currency: cur, amount: val, line, score })
-      continue
+      if (val != null && val > 0) return { currency: cur, amount: val }
     }
-    const sym = currencyFromSymbol(line)
+    const sym = currencyFromSymbol(s)
     if (sym) {
-      const m = line.match(/([0-9][0-9.,\s-]{0,20})\s*[$€£¥]/)
-      const val = m ? parseMoneyAmountLoose(m[1]) : null
-      if (val != null && val > 0) out.push({ currency: sym, amount: val, line, score })
+      // Support both "63,26 €" and "€ 63,26"
+      const m1 = s.match(/([0-9][0-9.,\s-]{0,24})\s*[$€£¥]/)
+      const m2 = s.match(/[$€£¥]\s*([0-9][0-9.,\s-]{0,24})/)
+      const picked = m1?.[1] || m2?.[1]
+      const val = picked ? parseMoneyAmountLoose(picked) : null
+      if (val != null && val > 0) return { currency: sym, amount: val }
     }
+    return null
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const score = labelScore(line)
+    if (score <= 0) continue
+
+    // 1) Same line
+    const direct = tryParseAmountFromLine(line)
+    if (direct) { out.push({ ...direct, line, score }); continue }
+
+    // 2) Adjacent lines (labels and amounts are often separated into different OCR lines)
+    const next = lines[i + 1]
+    const prev = lines[i - 1]
+    const fromNext = tryParseAmountFromLine(next)
+    if (fromNext) { out.push({ ...fromNext, line: `${line} | ${next}`, score: Math.max(1, score - 1) }); continue }
+    const fromPrev = tryParseAmountFromLine(prev)
+    if (fromPrev) { out.push({ ...fromPrev, line: `${prev} | ${line}`, score: Math.max(1, score - 2) }); continue }
   }
   // Dedupe by currency+amount
   const uniq = []
@@ -220,8 +311,21 @@ function buildExtractionMeta(rawText, sanitizedFields) {
     amount: (sanitizedFields?.amount == null || !sanitizedFields?.currency) && candidates.amounts.length > 1,
   }
 
+  const required = ['supplier', 'invoice_number', 'amount', 'currency', 'due_date', 'iban', 'reference', 'purpose']
+  const not_found = []
+  for (const k of required) {
+    if (k === 'amount') {
+      const ok = typeof sanitizedFields?.amount === 'number' && Number.isFinite(sanitizedFields.amount) && sanitizedFields.amount > 0
+      if (!ok) not_found.push('amount')
+      continue
+    }
+    const v = sanitizedFields?.[k]
+    if (v == null) { not_found.push(k); continue }
+    if (typeof v === 'string' && !String(v).trim()) not_found.push(k)
+  }
+
   const any = Boolean(doubt.iban || doubt.reference || doubt.amount)
-  return { any, doubt, candidates }
+  return { any, doubt, candidates, not_found }
 }
 
 function textContainsLabeledIban(rawText, iban) {
@@ -533,20 +637,34 @@ async function parsePdfText(pdfBuffer) {
   const mod = await import('pdf-parse/lib/pdf-parse.js')
   const pdfParse = mod?.default || mod
   const parsed = await pdfParse(pdfBuffer)
-  return (parsed?.text || '').trim()
+  const text = (parsed?.text || '').trim()
+  const numpages = typeof parsed?.numpages === 'number' && Number.isFinite(parsed.numpages) && parsed.numpages > 0 ? parsed.numpages : null
+  return { text, numpages }
 }
 
-async function visionAnnotatePdf({ accessToken, pdfBuffer, timeoutMs = 20000 }) {
+function buildPageBatches(totalPages, batchSize = 5) {
+  const n = typeof totalPages === 'number' && Number.isFinite(totalPages) && totalPages > 0 ? Math.floor(totalPages) : 0
+  if (!n) return [[1, 2]]
+  const pages = []
+  for (let i = 1; i <= n; i++) pages.push(i)
+  const batches = []
+  for (let i = 0; i < pages.length; i += batchSize) batches.push(pages.slice(i, i + batchSize))
+  return batches.length ? batches : [[1]]
+}
+
+async function visionAnnotatePdf({ accessToken, pdfBuffer, pages, timeoutMs = 20000 }) {
   // Google Vision supports PDF OCR via files:annotate.
   // This is critical for scanned PDFs where pdf-parse yields no text.
   const base64Pdf = Buffer.from(pdfBuffer || '').toString('base64')
   if (!base64Pdf || base64Pdf.length < 32) throw new Error('empty_pdf')
+  const requestedPages = Array.isArray(pages) && pages.length ? pages : [1]
+
   const payload = {
     requests: [
       {
         inputConfig: { content: base64Pdf, mimeType: 'application/pdf' },
         features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-        pages: [1, 2],
+        pages: requestedPages,
         imageContext: { languageHints: ['sl', 'en', 'de', 'it'] },
       },
     ],
@@ -578,6 +696,18 @@ async function visionAnnotatePdf({ accessToken, pdfBuffer, timeoutMs = 20000 }) 
   } finally {
     clearTimeout(timeout)
   }
+}
+
+async function visionAnnotatePdfAllPages({ accessToken, pdfBuffer, numpages, timeoutMs = 25000 }) {
+  const batches = buildPageBatches(numpages, 5)
+  const parts = []
+  let scannedPages = 0
+  for (const batch of batches) {
+    const t = await visionAnnotatePdf({ accessToken, pdfBuffer, pages: batch, timeoutMs })
+    if (t) parts.push(t)
+    scannedPages += Array.isArray(batch) ? batch.length : 0
+  }
+  return { text: parts.join('\n\n').trim(), scannedPages: scannedPages || null, requestedPages: batches.flat() }
 }
 
 function extractFields(rawText) {
@@ -702,37 +832,82 @@ function extractFields(rawText) {
     return false
   }
 
+  function isLikelyServicePeriodLine(s) {
+    const t = String(s || '').replace(/\s+/g, ' ').trim()
+    if (!t) return false
+    const monthSl = /(januar|februar|marec|april|maj|junij|julij|avgust|september|oktober|november|december)\s+20\d{2}/i
+    const monthEn = /(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+20\d{2}/i
+    const service = /(elektri\S*\s*energija|electric\S*\s*energy|electricity|power\b|plin\b|gas\b|heating|ogrevanj\S*)/i
+    return service.test(t) && (monthSl.test(t) || monthEn.test(t))
+  }
+
+  function isLikelyAddressLine(s) {
+    const t = String(s || '').replace(/\s+/g, ' ').trim()
+    if (!t) return false
+    // Street/address keywords + a number, or a postal code-like token.
+    if (/\b(ulica|cesta|street|st\.?|road|rd\.?|avenue|ave\.?|strasse|stra\u00dfe|via|trg|naselje|posta|po\u0161t\S*|zip)\b/i.test(t) && /\d{1,4}\b/.test(t)) return true
+    if (/\b\d{4}\b/.test(t) && /\b(ljubljana|maribor|celje|koper|kranj|novo\s*mesto|ptuj|murska\s*sobota)\b/i.test(t)) return true
+    return false
+  }
+
+  function looksLikePersonNameLine(name) {
+    const t = String(name || '').replace(/\s+/g, ' ').trim()
+    if (!t) return false
+    if (/[0-9]/.test(t)) return false
+    if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(t)) return false
+    const parts = t.split(' ').filter(Boolean)
+    if (parts.length < 2 || parts.length > 3) return false
+    const cap = (w) => /^[A-ZČŠŽ][a-zà-žčšž]+$/.test(w)
+    return parts.every(cap) && t.length <= 32
+  }
+
   function pickSupplierHeuristic(lines) {
-    const head = Array.isArray(lines) ? lines.slice(0, 12) : []
+    const all = Array.isArray(lines) ? lines : []
     let best = null
     let bestScore = -1
 
-    for (const l of head) {
-      const s = String(l || '').trim()
+    const supplierLabelRe = /\b(dobavitelj|supplier|vendor|seller|issuer|bill\s*from|izdajatelj(?:\s+ra\u010duna)?|prodajalec|izdal)\b/i
+
+    for (let i = 0; i < all.length; i++) {
+      const s = String(all[i] || '').trim()
       if (!s) continue
       if (!hasLetters(s)) continue
+      if (isLikelyServicePeriodLine(s)) continue
+      if (isLikelyAddressLine(s)) continue
+      if (/\bheader\b/i.test(s)) continue
       if (looksLikeMisassignedName(s)) continue
       if (isLikelyNoiseLine(s)) continue
       if (isPayerLine(s)) continue
       if (isLikelyDocumentHeader(s)) continue
+      if (looksLikePersonNameLine(s)) continue
+
+      // Skip label lines themselves.
+      if (supplierLabelRe.test(s)) continue
 
       // Guard against accidentally picking payment identifiers.
       const compact = s.replace(/\s+/g, '')
       if (/[A-Z]{2}\d{2}[A-Z0-9]{11,34}/.test(compact)) continue // IBAN-like
-      if (/\bSI\d{2}\b/i.test(compact)) continue // reference-ish
+      if (/\b(?:SI|RF)\d{2}\b/i.test(compact)) continue // reference-ish
 
       const { digits, letters } = digitsToLettersRatio(s)
       if (letters === 0) continue
       if (digits >= 8 && digits > letters) continue
-      if (s.length < 3 || s.length > 60) continue
+      if (s.length < 3 || s.length > 70) continue
 
       let score = 0
-      // Legal entity suffixes / company markers.
-      if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(s)) score += 3
+      // Prefer earlier lines a bit, but allow anywhere.
+      score += Math.max(0, 6 - Math.floor(i / 12))
+      // Prefer company markers.
+      if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(s)) score += 5
       // Short-ish lines are more likely names.
-      if (s.length >= 4 && s.length <= 40) score += 2
+      if (s.length >= 4 && s.length <= 50) score += 2
       // Many letters vs digits.
-      if (letters >= 6 && digits <= 2) score += 2
+      if (letters >= 8 && digits <= 2) score += 3
+
+      // Boost if adjacent to a supplier label line.
+      const prev = String(all[i - 1] || '')
+      const next = String(all[i + 1] || '')
+      if (supplierLabelRe.test(prev) || supplierLabelRe.test(next)) score += 6
 
       if (score > bestScore) {
         bestScore = score
@@ -740,22 +915,22 @@ function extractFields(rawText) {
       }
     }
 
-    // Only accept when confidence is decent.
-    return bestScore >= 3 ? best : null
+    return bestScore >= 4 ? best : null
   }
 
   // Supplier: pick a line that actually looks like a name (letters), not a random number/header.
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean)
   if (lines.length) {
     // Prefer explicit labels (works better internationally).
-    const supplierLabel = /\b(dobavitelj|supplier|vendor|seller|issuer|bill\s*from|from)\b\s*:?\s*(.+)$/i
+    const supplierLabel = /^(?:dobavitelj|supplier|vendor|seller|issuer|bill\s*from)\b\s*[:#\-]\s*(.+)$/i
     let labeledSupplier = null
     for (const l of lines) {
+      if (isPayerLine(l)) continue
       const m = String(l).match(supplierLabel)
       if (!m) continue
-      const v = String(m[2] || '').trim()
+      const v = String(m[1] || '').trim()
       if (!v) continue
-      if (hasLetters(v) && !looksLikeMisassignedName(v) && v.length >= 2) {
+      if (hasLetters(v) && !looksLikeMisassignedName(v) && !looksLikePersonNameLine(v) && v.length >= 2) {
         labeledSupplier = v
         break
       }
@@ -917,14 +1092,63 @@ function extractFields(rawText) {
         break
       }
     }
+    // Extra pass for split-box layouts: SI / model / number separated by whitespace/newlines.
+    if (!refVal) {
+      const m = text.match(/\b(SI\s*\d{2}\s*(?:[0-9A-Z\-\/]\s*){4,}|RF\s*\d{2}\s*(?:[0-9A-Z\-\/]\s*){4,})\b/i)
+      if (m) {
+        const compact = String(m[1] || '').replace(/\s+/g, '').toUpperCase()
+        if (!isValidIbanChecksum(compact)) refVal = m[1]
+      }
+    }
     if (refVal) out.reference = String(refVal).replace(/\s+/g, '')
   } catch {}
 
-  // Purpose / memo / description (only when explicitly labeled)
+  // Purpose / memo / description
+  // 1) Labeled extraction first (deterministic)
   try {
     const purp = text.match(/(?:namen(?:\s+pla\S*)?|opis(?:\s+pla\S*)?|purpose|memo|description|payment\s*for)\s*:?\s*(.+)/i)
     if (purp) out.purpose = String(purp[1] || '').trim()
   } catch {}
+
+  // 2) Unlabeled fallback (evidence-based): find a line that looks like service + billing period.
+  // This is intentionally narrow to avoid “hallucinating” a purpose.
+  if (!out.purpose) {
+    try {
+      const monthSl = /(januar|februar|marec|april|maj|junij|julij|avgust|september|oktober|november|december)\s+20\d{2}/i
+      const monthEn = /(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+20\d{2}/i
+      const service = /(elektri\S*\s*energija|electric\S*\s*energy|electricity|power\b|plin\b|gas\b|heating|ogrevanj\S*)/i
+      const ignore = /(iban|trr|sklic|referenca|rok\s*pla\S*|zapade|znesek|ddv|vat|subtotal|grand\s*total|\btotal\b)/i
+      const lines2 = String(text || '').split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+
+      let best = null
+      let bestScore = -1
+      for (let i = 0; i < lines2.length; i++) {
+        const l = lines2[i]
+        if (!l || l.length < 6 || l.length > 90) continue
+        if (ignore.test(l)) continue
+
+        const hasSvc = service.test(l)
+        const hasPeriod = monthSl.test(l) || monthEn.test(l)
+
+        let candidate = l
+        if ((!hasSvc || !hasPeriod) && lines2[i + 1] && (lines2[i + 1].length <= 60)) {
+          const combo = `${l} – ${lines2[i + 1]}`
+          if (!ignore.test(combo) && service.test(combo) && (monthSl.test(combo) || monthEn.test(combo))) candidate = combo
+        }
+
+        const c = String(candidate || '').replace(/\s+/g, ' ').trim()
+        if (!c || c.length < 6 || c.length > 90) continue
+        if (ignore.test(c)) continue
+
+        let score = 0
+        if (service.test(c)) score += 3
+        if (monthSl.test(c) || monthEn.test(c)) score += 3
+        if (score > bestScore) { bestScore = score; best = c }
+      }
+
+      if (bestScore >= 6 && best) out.purpose = best
+    } catch {}
+  }
 
   // Creditor/payee name (often same as supplier)
   const cred = text.match(/(prejemnik|recipient|payee|beneficiary|creditor|to\s*:|upravi[^\s:]*)\s*:?\s*(.+)/i)
@@ -932,6 +1156,45 @@ function extractFields(rawText) {
     const v = String(cred[2] || '').trim()
     if (v && !isPayerLine(v) && /[A-Za-zÀ-žČŠŽčšž]/.test(v) && v.length >= 2 && !looksLikeMisassignedName(v)) out.creditor_name = v
   }
+
+  // If not explicitly labeled, try to infer the payee name from the context around the IBAN.
+  // This helps when PDFs/images contain the payment instruction block without a clear label.
+  if (!out.creditor_name && out.iban) {
+    try {
+      const iban = normalizeIban(out.iban)
+      const idx = lines.findIndex((l) => {
+        const compact = String(l || '').toUpperCase().replace(/\s+/g, '')
+        return iban && compact.includes(iban)
+      })
+      if (idx >= 0) {
+        let best = null
+        let bestScore = -1
+        for (let j = Math.max(0, idx - 4); j <= Math.min(lines.length - 1, idx + 4); j++) {
+          const s = String(lines[j] || '').trim()
+          if (!s) continue
+          if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) continue
+          if (isPayerLine(s)) continue
+          if (looksLikeMisassignedName(s)) continue
+          if (isLikelyNoiseLine(s)) continue
+          if (isLikelyDocumentHeader(s)) continue
+          if (isLikelyServicePeriodLine(s)) continue
+          if (isLikelyAddressLine(s)) continue
+          if (/\biban\b/i.test(s)) continue
+          let score = 0
+          // Prefer lines close to the IBAN line, especially above it.
+          const dist = Math.abs(j - idx)
+          score += (4 - Math.min(4, dist))
+          if (j < idx) score += 1
+          // Prefer company markers.
+          if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(s)) score += 2
+          if (s.length >= 4 && s.length <= 50) score += 1
+          if (score > bestScore) { bestScore = score; best = s }
+        }
+        if (bestScore >= 3 && best && !looksLikeMisassignedName(best)) out.creditor_name = best
+      }
+    } catch {}
+  }
+
   // For this app, supplier and payee are the same entity; if only one is present, keep it.
   if (!out.creditor_name && out.supplier) out.creditor_name = out.supplier
 
@@ -952,7 +1215,7 @@ function extractFields(rawText) {
     const invLabel = /(ra\u010dun|faktura|invoice|document|dokument|\bno\b|number|\bšt\b|st\.|št\.|stevilka|\bref\b|reference)/i
 
     // Inline pattern: "Račun št: 2026-001", "Invoice No: INV-1001" etc.
-    const inline = text.match(/(ra\u010dun|faktura|invoice|dokument|document)\s*(št\.|st\.|no\.|nr\.|number)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})/i)
+    const inline = text.match(/(ra\u010dun|faktura|invoice|dokument|document)\s*(št\.|st\.|no\.?|nr\.?|number)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,})/i)
     if (inline && looksLikeInvoiceId(inline[3])) out.invoice_number = String(inline[3]).trim()
 
     // Next-line pattern: label line followed by id.
@@ -962,11 +1225,24 @@ function extractFields(rawText) {
         if (!invLabel.test(l)) continue
         if (!/[:#]?$/.test(l) && !/(ra\u010dun|invoice|faktura|dokument|document)/i.test(l)) continue
         const nxt = String(lines[i + 1] || '').trim()
-        const token = (nxt.match(/[A-Z0-9][A-Z0-9\-\/]{2,}/i) || [])[0]
+        const token = (nxt.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/i) || [])[0]
         if (token && looksLikeInvoiceId(token)) {
           out.invoice_number = token.trim()
           break
         }
+      }
+    }
+
+    // Purpose-based pattern: many Slovenian QR/payment slips put invoice id/period into Namen.
+    if (!out.invoice_number) {
+      for (const l of lines) {
+        if (!/\b(namen|purpose|opis|description|memo|payment\s*for)\b/i.test(l)) continue
+        const after = (l.split(/:\s*/, 2)[1] || '').trim()
+        const tokens = (after.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/gi) || []).slice(0, 6)
+        for (const tok of tokens) {
+          if (looksLikeInvoiceId(tok)) { out.invoice_number = String(tok).trim(); break }
+        }
+        if (out.invoice_number) break
       }
     }
   } catch {}
@@ -1112,12 +1388,68 @@ function mergeFields(base, ai, rawText) {
     return h.includes(n)
   }
 
+  const looksLikePersonName = (name) => {
+    const t = String(name || '').replace(/\s+/g, ' ').trim()
+    if (!t) return false
+    if (/[0-9]/.test(t)) return false
+    if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(t)) return false
+    const parts = t.split(' ').filter(Boolean)
+    if (parts.length < 2 || parts.length > 3) return false
+    const cap = (w) => /^[A-ZČŠŽ][a-zà-žčšž]+$/.test(w)
+    return parts.every(cap) && t.length <= 32
+  }
+
+  const appearsOnPayerLine = (text, value) => {
+    const v = String(value || '').toUpperCase().replace(/\s+/g, ' ').trim()
+    if (!v) return false
+    const lines = String(text || '').replace(/\r/g, '').split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    for (const l of lines) {
+      if (!/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(l)) continue
+      const ln = l.toUpperCase().replace(/\s+/g, ' ')
+      if (ln.includes(v)) return true
+    }
+    return false
+  }
+
+  const appearsOnLabeledLine = (text, value, labelRe) => {
+    const v = String(value || '').toUpperCase().replace(/\s+/g, ' ').trim()
+    if (!v) return false
+    const lines = String(text || '').replace(/\r/g, '').split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    for (const l of lines) {
+      if (!labelRe.test(l)) continue
+      const ln = l.toUpperCase().replace(/\s+/g, ' ')
+      if (ln.includes(v)) return true
+    }
+    return false
+  }
+
+  const supplierLabelRe = /\b(dobavitelj|supplier|vendor|seller|issuer|bill\s*from|izdajatelj(?:\s+ra\u010duna)?|prodajalec|izdal)\b/i
+  const creditorLabelRe = /\b(prejemnik|recipient|payee|beneficiary|creditor|upravi\S*|to)\b/i
+
   // AI is allowed to help with non-payment-critical fields.
   // Also allow AI to override clearly misassigned heuristic names.
-  if ((out.supplier == null || looksLikeMisassignedName(out.supplier)) && ai.supplier && !looksLikeMisassignedName(ai.supplier) && containsNorm(rawText, ai.supplier)) {
+  if (
+    (out.supplier == null || looksLikeMisassignedName(out.supplier)) &&
+    ai.supplier &&
+    !looksLikeMisassignedName(ai.supplier) &&
+    containsNorm(rawText, ai.supplier) &&
+    appearsOnLabeledLine(rawText, ai.supplier, supplierLabelRe) &&
+    !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(ai.supplier || '')) &&
+    !appearsOnPayerLine(rawText, ai.supplier) &&
+    !looksLikePersonName(ai.supplier)
+  ) {
     out.supplier = ai.supplier
   }
-  if ((out.creditor_name == null || looksLikeMisassignedName(out.creditor_name)) && ai.creditor_name && !looksLikeMisassignedName(ai.creditor_name) && containsNorm(rawText, ai.creditor_name)) {
+  if (
+    (out.creditor_name == null || looksLikeMisassignedName(out.creditor_name)) &&
+    ai.creditor_name &&
+    !looksLikeMisassignedName(ai.creditor_name) &&
+    containsNorm(rawText, ai.creditor_name) &&
+    appearsOnLabeledLine(rawText, ai.creditor_name, creditorLabelRe) &&
+    !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(ai.creditor_name || '')) &&
+    !appearsOnPayerLine(rawText, ai.creditor_name) &&
+    !looksLikePersonName(ai.creditor_name)
+  ) {
     out.creditor_name = ai.creditor_name
   }
   if (!out.invoice_number && ai.invoice_number && containsNorm(rawText, ai.invoice_number)) out.invoice_number = ai.invoice_number
@@ -1149,7 +1481,10 @@ function normalizeQrText(input) {
 }
 
 function normalizeReferenceSimple(input) {
-  const s = String(input || '').toUpperCase().replace(/\s+/g, '')
+  const s = String(input || '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[^A-Z0-9\-\/]/g, '')
   return s || undefined
 }
 
@@ -1172,7 +1507,8 @@ function parseEPC_QR(text) {
       if (!Number.isNaN(parsed) && parsed > 0) { amount = parsed; currency = 'EUR' }
     }
     const l8 = lines[8] || ''
-    const hasPurposeCode = /^[A-Z0-9]{4}$/.test(l8)
+    const nextLooksLikeReference = /\b(?:SI\d{2}|RF\d{2})\b/i.test(String(lines[9] || ''))
+    const hasPurposeCode = /^[A-Z0-9]{4}$/.test(l8) || (nextLooksLikeReference && /^[A-Z0-9]{1,4}$/.test(l8))
     const remittance = (hasPurposeCode ? (lines[9] || '') : l8).trim()
     const info = (hasPurposeCode ? (lines[10] || '') : (lines[9] || '')).trim()
     const combined = [remittance, info].filter(Boolean).join('\n')
@@ -1182,7 +1518,8 @@ function parseEPC_QR(text) {
     if (reference && refMatch) {
       purpose = purpose.replace(refMatch[1], '').replace(/\s{2,}/g, ' ').trim()
     }
-    if (!purpose) purpose = combined
+    // Do not re-introduce the reference into purpose.
+    if (!purpose) purpose = ''
     return {
       iban: iban || null,
       creditor_name: name || null,
@@ -1424,10 +1761,14 @@ export async function handler(event) {
       }
 
       let text = ''
+      let pdfPages = null
       try {
-        text = await parsePdfText(pdfBuffer)
+        const parsed = await parsePdfText(pdfBuffer)
+        text = String(parsed?.text || '').trim()
+        pdfPages = typeof parsed?.numpages === 'number' ? parsed.numpages : null
       } catch {
         text = ''
+        pdfPages = null
       }
 
       // If we got text, optionally parse deterministically first (EPC/UPN payloads sometimes live as text).
@@ -1467,7 +1808,7 @@ export async function handler(event) {
         const fields0 = extractFields(text)
         const aiFields = await extractFieldsWithAI(text)
         const fields = mergeFields(fields0, aiFields, text)
-        const meta = buildExtractionMeta(text, fields)
+        const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null } }
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, mode: 'pdf_text' })
       }
 
@@ -1498,8 +1839,14 @@ export async function handler(event) {
       if (!accessToken) return jsonResponse(500, { ok: false, step: 'token', error: 'no_access_token' })
 
       let ocrText = ''
+      let parsedPdf = { text: '', numpages: null }
+      let visionInfo = { scannedPages: null }
       try {
-        ocrText = await visionAnnotatePdf({ accessToken, pdfBuffer })
+        // Full-document scan: OCR all pages (in batches) so fields can be found anywhere.
+        parsedPdf = await parsePdfText(pdfBuffer).catch(() => ({ text: '', numpages: null }))
+        const all = await visionAnnotatePdfAllPages({ accessToken, pdfBuffer, numpages: parsedPdf?.numpages || null })
+        ocrText = String(all?.text || '').trim()
+        visionInfo = { scannedPages: all?.scannedPages || null }
       } catch (e) {
         return jsonResponse(500, { ok: false, step: 'vision', error: 'vision_pdf_call_failed', detail: safeDetailFromError(e) })
       }
@@ -1532,7 +1879,7 @@ export async function handler(event) {
       const fields0 = extractFields(ocrText)
       const aiFields = await extractFieldsWithAI(ocrText)
       const fields = mergeFields(fields0, aiFields, ocrText)
-      const meta = buildExtractionMeta(ocrText, fields)
+      const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null } }
       return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, mode: 'pdf_vision' })
     }
 

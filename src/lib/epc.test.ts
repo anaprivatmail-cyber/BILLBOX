@@ -52,7 +52,7 @@ describe('parsePaymentQR (EPC/UPN)', () => {
     expect(res?.iban).toBe(iban)
     expect(res?.amount).toBe(12.34)
     expect(res?.currency).toBe('EUR')
-    expect(res?.purpose).toBe('INV')
+    expect(res?.purpose).toBe('Invoice 2026-001')
     expect(res?.reference).toBe('SI121234-56')
   })
 
@@ -65,6 +65,7 @@ describe('parsePaymentQR (EPC/UPN)', () => {
     expect(res).not.toBeNull()
     expect(res?.iban).toBe(iban)
     expect(res?.amount).toBe(12.34)
+    expect(res?.purpose).toBe('Invoice 2026-001')
     expect(res?.reference).toBe('SI121234-56')
   })
 

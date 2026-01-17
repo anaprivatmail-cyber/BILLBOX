@@ -539,7 +539,8 @@ function normalizeIban(input: string | undefined): string | undefined {
 }
 
 function normalizeReference(input: string | undefined): string | undefined {
-  const s = String(input || '').toUpperCase().replace(/\s+/g, '')
+  // Keep common reference separators used in QR payloads (e.g. SI12 1234-56).
+  const s = String(input || '').toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/g, '')
   return s || undefined
 }
 
@@ -547,10 +548,53 @@ function looksLikeIban(s: string) {
   return /^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(s)
 }
 
+const IBAN_LENGTHS: Record<string, number> = {
+  // Common SEPA / EU
+  AL: 28,
+  AD: 24,
+  AT: 20,
+  BE: 16,
+  BG: 22,
+  CH: 21,
+  CY: 28,
+  CZ: 24,
+  DE: 22,
+  DK: 18,
+  EE: 20,
+  ES: 24,
+  FI: 18,
+  FR: 27,
+  GB: 22,
+  GR: 27,
+  HR: 21,
+  HU: 28,
+  IE: 22,
+  IS: 26,
+  IT: 27,
+  LI: 21,
+  LT: 20,
+  LU: 20,
+  LV: 21,
+  MC: 27,
+  MT: 31,
+  NL: 18,
+  NO: 15,
+  PL: 28,
+  PT: 25,
+  RO: 24,
+  SE: 24,
+  SI: 19,
+  SK: 24,
+  SM: 27,
+  TR: 26,
+}
+
 function isValidIbanChecksum(ibanRaw: string): boolean {
   const s = normalizeIban(ibanRaw)
   if (!s) return false
   if (!looksLikeIban(s)) return false
+  const expected = IBAN_LENGTHS[s.slice(0, 2)]
+  if (expected && s.length !== expected) return false
   const rearranged = s.slice(4) + s.slice(0, 4)
   let remainder = 0
   for (let i = 0; i < rearranged.length; i++) {
@@ -585,7 +629,8 @@ function parseEPC(text: string): EPCResult | null {
     }
     // EPC QR payload is line-based, but some providers omit the 4-char purpose code line.
     const l8 = lines[8] || ''
-    const hasPurposeCode = /^[A-Z0-9]{4}$/.test(l8)
+    const nextLooksLikeReference = /\b(?:SI\d{2}|RF\d{2})\b/i.test(String(lines[9] || ''))
+    const hasPurposeCode = /^[A-Z0-9]{4}$/.test(l8) || (nextLooksLikeReference && /^[A-Z0-9]{1,4}$/.test(l8))
     const remittance = (hasPurposeCode ? (lines[9] || '') : l8).trim()
     const info = (hasPurposeCode ? (lines[10] || '') : (lines[9] || '')).trim()
     const combined = [remittance, info].filter(Boolean).join('\n')
@@ -600,7 +645,8 @@ function parseEPC(text: string): EPCResult | null {
         .replace(/\s{2,}/g, ' ')
         .trim()
     }
-    if (!purpose) purpose = combined
+    // Do not fallback to the raw combined text if it only contains the reference.
+    if (!purpose) purpose = ''
     const result: EPCResult = {
       iban: iban || undefined,
       creditor_name: name || undefined,
@@ -620,7 +666,7 @@ function parseUPN(text: string): EPCResult | null {
     const normalized = normalizeQrText(text)
     const lines = normalized.split(/\n+/).map((l) => l.trim()).filter(Boolean)
     const joined = lines.join('\n')
-    if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
+    if (!/UPNQR|\bUPN\b/i.test(joined) && !/\bSI\s*\d{2}\s*[0-9A-Z\-\/]{4,}\b/i.test(joined)) return null
     const findValidIbanInText = (t: string): string | undefined => {
       const matches = String(t || '').match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
       for (const m of matches) {
@@ -722,34 +768,13 @@ function parseUPN(text: string): EPCResult | null {
         break
       }
     }
+    // Purpose (Namen): only accept explicit labeled values. Never guess.
     let purpose: string | undefined
     for (const l of lines) {
       const m = l.match(/(?:namen|purpose)\s*:?\s*(.+)$/i)
-      if (m) {
-        purpose = String(m[1] || '').trim()
-        if (purpose) break
-      }
-    }
-
-    // UPNQR often contains unlabeled fields; pick a conservative purpose candidate.
-    if (!purpose) {
-      const ibanIdx = lines.findIndex((l) => /[A-Z]{2}\d{2}[A-Z0-9]{11,34}/.test(l.replace(/\s+/g, '')))
-      const candidates = (ibanIdx > 0 ? lines.slice(0, ibanIdx) : lines)
-        .filter((l) => !/UPNQR|\bUPN\b/i.test(l))
-        .filter((l) => /[A-Za-zÀ-žČŠŽčšž]/.test(l))
-        .filter((l) => !/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(l.replace(/\s+/g, '')))
-        .filter((l) => !/^\d{11}$/.test(l))
-        .filter((l) => !/\bEUR\b/i.test(l))
-        .filter((l) => l.length >= 3 && l.length <= 60)
-      const looksLikeAllCapsName = (s: string) => {
-        const t = String(s || '').trim()
-        if (!t) return false
-        if (/\d/.test(t)) return false
-        return /^[A-ZÀ-ŽČŠŽ]{2,}(?:\s+[A-ZÀ-ŽČŠŽ]{2,}){0,4}$/.test(t)
-      }
-      // Avoid accidentally using payer names (often ALL CAPS) as purpose.
-      purpose = candidates.find((l) => !/^[0-9\s.,:\-\/]+$/.test(l) && !looksLikeAllCapsName(l))
-      if (!purpose) purpose = candidates.find((l) => !/^[0-9\s.,:\-\/]+$/.test(l))
+      if (!m) continue
+      const v = String(m[1] || '').trim()
+      if (v) { purpose = v; break }
     }
     let creditor_name: string | undefined
     for (const l of lines) {
@@ -762,19 +787,24 @@ function parseUPN(text: string): EPCResult | null {
       break
     }
 
-    // UPNQR often contains unlabeled creditor name; choose the last reasonable text line before IBAN.
+    // UPNQR often contains unlabeled creditor name; choose a plausible line before IBAN.
     if (!creditor_name) {
       const ibanIdx = lines.findIndex((l) => /[A-Z]{2}\d{2}[A-Z0-9]{11,34}/.test(l.replace(/\s+/g, '')))
       const scope = ibanIdx > 0 ? lines.slice(0, ibanIdx) : lines
       for (let i = scope.length - 1; i >= 0; i--) {
         const l = scope[i]
         if (/UPNQR|\bUPN\b/i.test(l)) continue
+        if (/\b(sklic|reference|ref\.?|model|namen|purpose)\b/i.test(l)) continue
         if (/\b(rok|zapad|zapadl|valuta|datum|due|pay\s*by|payment\s*due)\b/i.test(l)) continue
+        if (/\b(ra\u010dun|invoice|faktura|dokument|document)\b/i.test(l)) continue
         if (/\b\d{4}-\d{2}-\d{2}\b/.test(l) || /\b\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}\b/.test(l)) continue
         if (!/[A-Za-zÀ-žČŠŽčšž]/.test(l)) continue
         if (l.length < 2 || l.length > 70) continue
         if (/\bEUR\b/i.test(l)) continue
+        const digitCount = (String(l).match(/\d/g) || []).length
+        if (digitCount >= 6) continue
         if (/^\d{11}$/.test(l) || /^[0-9\s.,:\-\/]+$/.test(l)) continue
+        if (/\bSI\s*\d{2}\b/i.test(l) || /\bRF\s*\d{2}\b/i.test(l)) continue
         creditor_name = l.trim()
         break
       }
@@ -828,10 +858,11 @@ function parseUrlPayment(input: string): EPCResult | null {
       return ''
     }
 
-    const iban = get('iban', 'IBAN', 'account', 'acct', 'accountNumber', 'account_number').replace(/\s+/g, '')
+    const ibanRaw = get('iban', 'IBAN', 'account', 'acct', 'accountNumber', 'account_number').replace(/\s+/g, '')
+    const iban = ibanRaw && isValidIbanChecksum(ibanRaw) ? ibanRaw : ''
     const name = get('name', 'recipient', 'payee', 'creditor', 'beneficiary', 'receiver')
     const purpose = get('purpose', 'message', 'remittance', 'note', 'reason', 'description')
-    const reference = get('reference', 'ref', 'paymentReference', 'payment_reference', 'variableSymbol', 'vs', 'sklic')
+    const reference = normalizeReference(get('reference', 'ref', 'paymentReference', 'payment_reference', 'variableSymbol', 'vs', 'sklic')) || ''
     const currency = get('currency', 'ccy').toUpperCase()
     const amountRaw = get('amount', 'amt', 'sum')
     const amountVal = amountRaw ? Number(amountRaw.replace(',', '.')) : NaN
@@ -854,7 +885,7 @@ function parseUrlPayment(input: string): EPCResult | null {
       iban: iban || undefined,
       creditor_name: name || undefined,
       purpose: purpose || undefined,
-      reference: reference ? reference.replace(/\s+/g, '') : undefined,
+      reference: reference || undefined,
       currency: /^[A-Z]{3}$/.test(currency) ? currency : undefined,
       amount: Number.isFinite(amountVal) && amountVal > 0 ? amountVal : undefined,
       due_date: due || undefined,
@@ -2845,6 +2876,26 @@ function ScanBillScreen() {
   const [purpose, setPurpose] = useState('')
   const [paymentDetails, setPaymentDetails] = useState('')
 
+  // Track manual edits so new scans can overwrite stale autofill,
+  // while still respecting fields the user actively changed.
+  const editedRef = useRef({
+    supplier: false,
+    purchaseItem: false,
+    invoiceNumber: false,
+    amount: false,
+    currency: false,
+    dueDate: false,
+    creditorName: false,
+    iban: false,
+    reference: false,
+    purpose: false,
+    paymentDetails: false,
+  })
+
+  // Per-field source precedence (lower is stronger):
+  // QR → PDF structured text → PDF vision OCR → Image vision OCR → AI
+  const fieldSourceRankRef = useRef<Record<string, number>>({})
+
   const [ibanHint, setIbanHint] = useState<string | null>(null)
   const [referenceHint, setReferenceHint] = useState<string | null>(null)
 
@@ -2856,10 +2907,6 @@ function ScanBillScreen() {
   const [inboxSourceId, setInboxSourceId] = useState<string | null>(null)
   const [cameraVisible, setCameraVisible] = useState(true)
   const [missingManualVisible, setMissingManualVisible] = useState(false)
-
-  const [reviewVisible, setReviewVisible] = useState(false)
-  const [reviewMeta, setReviewMeta] = useState<any | null>(null)
-  const [reviewPick, setReviewPick] = useState<{ iban?: string; reference?: string; amount?: number; currency?: string } | null>(null)
 
   function looksLikeMisassignedName(input: any): boolean {
     const s = (input ?? '').toString().trim()
@@ -2886,6 +2933,21 @@ function ScanBillScreen() {
       if (!s) continue
       if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) continue
       if (/^[0-9\s.,:\-\/]+$/.test(s)) continue
+      // Never pick payer/customer names as supplier/payee.
+      if (/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(s)) continue
+      // Avoid accidentally picking a consumer/person name as supplier.
+      // (Common failure mode: OCR/AI returns the payer name from the invoice header.)
+      const looksLikePersonName = (() => {
+        const t = s.replace(/\s+/g, ' ').trim()
+        if (!t) return false
+        if (/[0-9]/.test(t)) return false
+        if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(t)) return false
+        const parts = t.split(' ').filter(Boolean)
+        if (parts.length < 2 || parts.length > 3) return false
+        const cap = (w: string) => /^[A-ZČŠŽ][a-zà-žčšž]+$/.test(w)
+        return parts.every(cap) && t.length <= 32
+      })()
+      if (looksLikePersonName) continue
       if (looksLikeMisassignedName(s)) continue
       return s
     }
@@ -2952,24 +3014,128 @@ function ScanBillScreen() {
   }
 
   function normalizeReference(input: string): string {
-    // Keep it strict-ish: uppercase + alnum only.
-    return String(input || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+    // Bank-safe: uppercase, no whitespace, allow common separators from QR payloads.
+    return String(input || '').toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/g, '')
   }
 
   function extractReferenceCandidate(text: string): string | null {
     const raw = String(text || '')
     const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    // IMPORTANT: Do NOT treat every "SI\d\d..." token as IBAN-like.
+    // Slovenian references also start with SI\d\d, so only overlap against IBANs that are
+    // checksum-valid or appear on an IBAN-labeled line.
+    const ibanLike: string[] = []
+    const valid = extractFirstValidIban(raw)
+    if (valid) ibanLike.push(normalizeIban(valid))
     for (const l of lines) {
-      const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
+      if (!/\biban\b/i.test(l)) continue
+      const matches = String(l || '').match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){8,34}\b/g) || []
+      for (const m of matches) {
+        const cand = normalizeIban(m)
+        if (cand) ibanLike.push(cand)
+      }
+    }
+    const ibanLikeUniq = [...new Set(ibanLike.filter(Boolean))]
+    const isOverlappingIbanLike = (cand: string): boolean => {
+      const c = normalizeReference(cand)
+      if (!c) return false
+      if (!/^(SI|RF)\d{2}/i.test(c)) return false
+      for (const ib of ibanLikeUniq) {
+        if (!ib) continue
+        if (ib.includes(c) || ib.startsWith(c) || c.startsWith(ib)) return true
+      }
+      return false
+    }
+    for (const l of lines) {
+      const labeled = l.match(/\b(sklic|referenca|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
       if (!labeled) continue
       const cand = normalizeReference(labeled[2])
-      if (cand.length >= 4) return cand
+      if (cand.length >= 4 && !isOverlappingIbanLike(cand)) return cand
     }
     const si = raw.match(/\bSI\s*\d{2}\s*\d{3,}\b/gi)
-    if (si?.[0]) return normalizeReference(si[0])
+    if (si?.[0]) {
+      const cand = normalizeReference(si[0])
+      // Fallback must be strict: reject short SI prefixes commonly coming from IBAN fragments.
+      if (cand.length >= 10 && !isOverlappingIbanLike(cand)) return cand
+    }
     const rf = raw.match(/\bRF\s*\d{2}\s*[A-Z0-9]{4,}\b/gi)
-    if (rf?.[0]) return normalizeReference(rf[0])
+    if (rf?.[0]) {
+      const cand = normalizeReference(rf[0])
+      if (!isOverlappingIbanLike(cand)) return cand
+    }
     return null
+  }
+
+  function extractAmountFromText(rawText: string): { amount: number; currency: string } | null {
+    const text = String(rawText || '').replace(/\r/g, '')
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    if (!lines.length) return null
+
+    const payableLabels = /(total\s*due|amount\s*due|balance\s*due|grand\s*total|za\s*pla\S*|za\s*pla\u010dat\S*|za\s*pla\u010dilo|za\s*pla\u010dati|payable|to\s*pay|pay\s*now|za\s*pla\u010dilo\s*z\s*ddv|za\s*pla\u010dilo\s*z\s*ddv)/i
+    const ignoreContext = /(\bddv\b|\bvat\b|\btax\b|\bdavek\b|osnova|base\s*amount|\bsubtotal\b|sub\s*total|popust|discount|provizi\S*|fee\b|shipping|po\u0161tnina|delivery|surcharge)/i
+
+    const parseMoney = (s: string): number | null => {
+      const raw = String(s || '').trim()
+      const cleaned = raw.replace(/[^0-9.,\-\s]/g, '').trim()
+      if (!/[0-9]/.test(cleaned)) return null
+      const compact = cleaned.replace(/\s+/g, '')
+      const lastComma = compact.lastIndexOf(',')
+      const lastDot = compact.lastIndexOf('.')
+      let decimalSep: ',' | '.' | null = null
+      if (lastComma >= 0 && lastDot >= 0) decimalSep = lastComma > lastDot ? ',' : '.'
+      else if (lastComma >= 0) decimalSep = ','
+      else if (lastDot >= 0) decimalSep = '.'
+
+      let normalized = compact
+      if (decimalSep === ',') normalized = compact.replace(/\./g, '').replace(',', '.')
+      else if (decimalSep === '.') normalized = compact.replace(/,/g, '')
+      normalized = normalized.replace(/(?!^)-/g, '')
+      const num = Number(normalized)
+      return Number.isFinite(num) ? num : null
+    }
+
+    const tryLine = (line: string): { amount: number; currency: string } | null => {
+      const l = String(line || '')
+      const eurCode = l.match(/\bEUR\b\s*([0-9][0-9.,\s-]{0,24})/i)
+      if (eurCode) {
+        const val = parseMoney(eurCode[1])
+        if (val != null && val > 0) return { amount: val, currency: 'EUR' }
+      }
+      if (/€/.test(l)) {
+        const m1 = l.match(/([0-9][0-9.,\s-]{0,24})\s*€/)
+        const m2 = l.match(/€\s*([0-9][0-9.,\s-]{0,24})/)
+        const picked = m1?.[1] || m2?.[1]
+        const val = picked ? parseMoney(picked) : null
+        if (val != null && val > 0) return { amount: val, currency: 'EUR' }
+      }
+      return null
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      const hasPayable = payableLabels.test(line)
+      const hasIgnore = ignoreContext.test(line)
+      if (!hasPayable) continue
+      // Ignore VAT/subtotal-only lines unless they are payable (they are).
+      const direct = tryLine(line)
+      if (direct) return direct
+      const next = lines[i + 1]
+      const prev = lines[i - 1]
+      const fromNext = next ? tryLine(next) : null
+      if (fromNext) return fromNext
+      const fromPrev = prev ? tryLine(prev) : null
+      if (fromPrev && !hasIgnore) return fromPrev
+    }
+
+    // Fallback: any EUR/€ amount (very conservative: pick the largest under a reasonable cap)
+    let best: { amount: number; currency: string } | null = null
+    for (const l of lines) {
+      const cand = tryLine(l)
+      if (!cand) continue
+      if (cand.amount <= 0 || cand.amount > 1000000) continue
+      if (!best || cand.amount > best.amount) best = cand
+    }
+    return best
   }
 
   function isPayerLabelLine(line: string): boolean {
@@ -3010,12 +3176,125 @@ function ScanBillScreen() {
     return cleaned
   }
 
+  function extractSupplierNameFromText(rawText: string): string | null {
+    const cand = extractLabeledValueFromText(rawText, [
+      /^(?:dobavitelj|supplier|vendor|seller|issuer|bill\s*from|izdajatelj(?:\s+ra\u010duna)?|prodajalec|izdal)\s*:?\s*(.+)$/i,
+    ])
+    if (!cand) return null
+    if (isPayerLabelLine(cand)) return null
+    const cleaned = cand.replace(/\s+/g, ' ').trim()
+    if (!cleaned) return null
+    if (looksLikeMisassignedName(cleaned)) return null
+    return cleaned
+  }
+
+  function pickBestNameFromWholeText(rawText: string): string | null {
+    const text = String(rawText || '').replace(/\r/g, '')
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    if (!lines.length) return null
+
+    const isSupplierLabelLine = (l: string) => /\b(dobavitelj|supplier|vendor|seller|issuer|bill\s*from|izdajatelj(?:\s+ra\u010duna)?|prodajalec|izdal)\b/i.test(l)
+    const isPayeeLabelLine = (l: string) => /\b(prejemnik|recipient|payee|beneficiary|creditor|upravi\S*|to)\b/i.test(l)
+
+    const scoreLine = (line: string, idx: number): number => {
+      const s = String(line || '').trim()
+      if (!s) return -999
+      if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) return -999
+      if (/^[0-9\s.,:\-\/]+$/.test(s)) return -999
+      if (isPayerLabelLine(s)) return -999
+      if (looksLikeMisassignedName(s)) return -999
+      // Avoid reference/iban/purpose labels.
+      if (/\b(iban|sklic|reference|model|namen|purpose|znesek|rok\s*pla\S*|zapad)\b/i.test(s)) return -5
+
+      let score = 0
+      // Anywhere in doc is allowed; slight preference for earlier lines.
+      score += Math.max(0, 6 - Math.floor(idx / 12))
+
+      if (isSupplierLabelLine(s) || isPayeeLabelLine(s)) score -= 2 // label lines themselves aren't names
+
+      if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(s)) score += 5
+      const letters = (s.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
+      const digits = (s.match(/\d/g) || []).length
+      if (letters >= 8 && digits <= 2) score += 3
+      if (s.length >= 4 && s.length <= 50) score += 2
+      return score
+    }
+
+    const candidates: Array<{ v: string; score: number }> = []
+
+    // 1) Direct labeled values (same line after label)
+    const labeledSupplier = extractSupplierNameFromText(text)
+    if (labeledSupplier) candidates.push({ v: labeledSupplier, score: 100 })
+    const labeledPayee = extractCreditorNameFromText(text)
+    if (labeledPayee) candidates.push({ v: labeledPayee, score: 95 })
+
+    // 2) Next-line after a label
+    for (let i = 0; i < lines.length - 1; i++) {
+      const l = lines[i]
+      if (!isSupplierLabelLine(l) && !isPayeeLabelLine(l)) continue
+      const next = lines[i + 1]
+      const s = pickNameCandidate(next)
+      if (s) candidates.push({ v: s, score: 85 })
+    }
+
+    // 3) Whole-document heuristic
+    let best: { v: string; score: number } | null = null
+    for (let i = 0; i < lines.length; i++) {
+      const sc = scoreLine(lines[i], i)
+      if (sc <= 0) continue
+      const v = lines[i].replace(/\s+/g, ' ').trim()
+      if (!v) continue
+      if (!best || sc > best.score) best = { v, score: sc }
+    }
+    if (best) candidates.push(best)
+
+    candidates.sort((a, b) => b.score - a.score)
+    const picked = candidates[0]?.v
+    return picked ? picked : null
+  }
+
   function extractInvoiceNumberFromText(rawText: string): string | null {
-    const m = String(rawText || '').match(
-      /(ra\u010dun\s*(\u0161t\.|st\.|stevilka)?|\binvoice\b\s*(no\.|number)?|\b\u0161t\.?\s*ra\u010duna|\bdokument\b\s*(\u0161t\.|no\.)?)\s*[:#]?\s*([A-Z0-9\-\/]{3,})/i,
+    const text = String(rawText || '')
+
+    const looksLikeInvoiceId = (s: string): boolean => {
+      const v = String(s || '').trim()
+      if (!v) return false
+      if (v.length < 3 || v.length > 32) return false
+      if (!/\d/.test(v)) return false
+      const compact = v.toUpperCase().replace(/\s+/g, '')
+      if (/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(compact)) return false // IBAN
+      if (/^SI\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return false // reference
+      if (/^RF\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return false // reference
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return false // date
+      if (/^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}$/.test(v)) return false // date
+      return true
+    }
+
+    // 1) Explicit invoice label.
+    const labeled = text.match(
+      /(ra\u010dun\s*(\u0161t\.|st\.|stevilka)?|\binvoice\b\s*(no\.|nr\.|number)?|\b\u0161t\.?\s*ra\u010duna|\bdokument\b\s*(\u0161t\.|no\.|nr\.)?)\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,})/i,
     )
-    const v = String(m?.[5] || '').trim()
-    return v || null
+    const v1 = String(labeled?.[5] || '').trim()
+    if (looksLikeInvoiceId(v1)) return v1
+
+    // 2) If the invoice number is embedded in the payment purpose (Namen), extract a plausible token.
+    const lines = text.replace(/\r/g, '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    for (const l of lines) {
+      if (!/\b(namen|purpose|opis|description|memo|payment\s*for)\b/i.test(l)) continue
+      const after = l.split(/:\s*/, 2)[1] || ''
+      const tokens = (after.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/gi) || []).slice(0, 6)
+      for (const tok of tokens) {
+        if (looksLikeInvoiceId(tok)) return tok.toUpperCase()
+      }
+    }
+
+    // 3) Fallback: search for a plausible token anywhere, but stay conservative.
+    const all = (text.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/gi) || []).slice(0, 120)
+    for (const tok of all) {
+      if (looksLikeInvoiceId(tok)) return tok.toUpperCase()
+    }
+
+    return null
   }
 
   function extractPurposeFromText(rawText: string): string | null {
@@ -3026,7 +3305,23 @@ function ScanBillScreen() {
     return cleaned || null
   }
 
-  function applyExtractedPaymentFields(fields: any) {
+  function extractBillingPeriodFromText(rawText: string): string | null {
+    const text = String(rawText || '').replace(/\r/g, '')
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    for (const l of lines) {
+      if (!/\b(obdobje|za\s*obdobje|period)\b/i.test(l)) continue
+      // Prefer the part after ':' when present.
+      const after = (l.split(/:\s*/, 2)[1] || l).trim()
+      // Match common numeric periods like 01/2026, 1-2026, 2026-01.
+      const m1 = after.match(/\b(0?[1-9]|1[0-2])\s*[.\/-]\s*(20\d{2})\b/)
+      if (m1) return `${String(m1[1]).padStart(2, '0')}/${m1[2]}`
+      const m2 = after.match(/\b(20\d{2})\s*[.\/-]\s*(0?[1-9]|1[0-2])\b/)
+      if (m2) return `${m2[1]}-${String(m2[2]).padStart(2, '0')}`
+    }
+    return null
+  }
+
+  function applyExtractedPaymentFields(fields: any, source?: string) {
     const warnings: string[] = []
     const rawCreditor = fields?.creditor_name ? String(fields.creditor_name) : ''
     const rawSupplier = fields?.supplier ? String(fields.supplier) : ''
@@ -3035,23 +3330,66 @@ function ScanBillScreen() {
     const rawRef = fields?.reference ? String(fields.reference) : ''
     const rawPurpose = fields?.purpose ? String(fields.purpose) : ''
     const rawPaymentDetails = fields?.payment_details ? String(fields.payment_details) : ''
+    const rawDue = fields?.due_date ? String(fields.due_date) : ''
     const rawText = fields?.rawText ? String(fields.rawText) : ''
 
-    // Names: prefer explicit creditor labels from text; never take payer labels.
+    const sourceKey = String(source || fields?._source || fields?.mode || '').trim().toLowerCase()
+    const rankForSource = (s: string): number => {
+      if (!s) return 3
+      if (s === 'qr' || s === 'qr_text' || s === 'qr_barcode') return 0
+      if (s === 'pdf_text' || s === 'text') return 1
+      if (s === 'pdf_vision') return 2
+      if (s === 'vision_text') return 3
+      if (s === 'ai') return 4
+      return 3
+    }
+    const incomingRank = rankForSource(sourceKey)
+    const canSetField = (key: string, nextValue: string, edited: boolean, currentValue: string) => {
+      const v = String(nextValue || '').trim()
+      if (!v) return false
+      if (edited) return false
+      const cur = String(currentValue || '').trim()
+      if (!cur) return true
+      const prevRank = typeof fieldSourceRankRef.current[key] === 'number' ? fieldSourceRankRef.current[key] : 999
+      return incomingRank < prevRank
+    }
+    const markFieldSource = (key: string) => {
+      fieldSourceRankRef.current[key] = incomingRank
+    }
+
+    // Names: prefer evidence from OCR text first (labels anywhere in document), never payer.
     const creditorFromText = extractCreditorNameFromText(rawText)
-    const nameCandidate = pickNameCandidate(rawCreditor, rawSupplier, creditorFromText)
+    const supplierFromText = extractSupplierNameFromText(rawText)
+    const bestFromText = pickBestNameFromWholeText(rawText)
+    const nameCandidate = pickNameCandidate(creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
     if (nameCandidate) {
-      if (!supplier.trim() || looksLikeMisassignedName(supplier)) setSupplier(nameCandidate)
-      if (!creditorName.trim() || looksLikeMisassignedName(creditorName)) setCreditorName(nameCandidate)
+      const canOverwriteSupplier = !editedRef.current.supplier || !supplier.trim() || looksLikeMisassignedName(supplier)
+      const canOverwriteCreditor = !editedRef.current.creditorName || !creditorName.trim() || looksLikeMisassignedName(creditorName)
+      if (canOverwriteSupplier && canSetField('supplier', nameCandidate, editedRef.current.supplier, supplier)) {
+        setSupplier(nameCandidate)
+        markFieldSource('supplier')
+      }
+      if (canOverwriteCreditor && canSetField('creditor_name', nameCandidate, editedRef.current.creditorName, creditorName)) {
+        setCreditorName(nameCandidate)
+        markFieldSource('creditor_name')
+      }
     }
 
     // Invoice number (used as a fallback for purpose when purpose isn't explicit).
     const invCandidate = (rawInvoice || '').trim() || extractInvoiceNumberFromText(rawText) || ''
     if (invCandidate) {
-      if (!invoiceNumber.trim()) setInvoiceNumber(invCandidate)
+      if (canSetField('invoice_number', invCandidate, editedRef.current.invoiceNumber, invoiceNumber)) {
+        setInvoiceNumber(invCandidate)
+        markFieldSource('invoice_number')
+      }
       // Accounting rule: invoice number is mandatory, and can safely be used as default purpose.
       if (!purpose.trim() && !String(rawPurpose || '').trim()) {
-        setPurpose(`Plačilo ${invCandidate}`)
+        const period = extractBillingPeriodFromText(rawText)
+        const autoPurpose = period ? `Plačilo ${invCandidate} ${period}` : `Plačilo ${invCandidate}`
+        if (canSetField('purpose', autoPurpose, editedRef.current.purpose, purpose)) {
+          setPurpose(autoPurpose)
+          markFieldSource('purpose')
+        }
       }
     }
 
@@ -3059,7 +3397,10 @@ function ScanBillScreen() {
     // Only fill IBAN/reference/purpose when they are explicitly extracted.
     const foundIban = extractFirstValidIban(rawIban)
     if (foundIban) {
-      setIban(foundIban)
+      if (canSetField('iban', foundIban, editedRef.current.iban, iban)) {
+        setIban(foundIban)
+        markFieldSource('iban')
+      }
     } else if (rawIban) {
       warnings.push(tr('IBAN could not be validated. Please check it.'))
     }
@@ -3070,11 +3411,67 @@ function ScanBillScreen() {
         warnings.push(tr('Reference matched the IBAN; it was ignored.'))
         ref = ''
       }
+      if (foundIban && ref && ref.length < 10 && String(foundIban || '').startsWith(ref)) {
+        warnings.push(tr('Reference looked like an IBAN fragment; it was ignored.'))
+        ref = ''
+      }
     }
-    if (ref) setReference(ref)
+    if (ref && canSetField('reference', ref, editedRef.current.reference, reference)) {
+      setReference(ref)
+      markFieldSource('reference')
+    }
 
     const purposeClean = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
-    if (purposeClean) setPurpose(purposeClean)
+    if (purposeClean && canSetField('purpose', purposeClean, editedRef.current.purpose, purpose)) {
+      setPurpose(purposeClean)
+      markFieldSource('purpose')
+    }
+    // Purpose is mandatory for bank apps. If the QR/OCR did not include a purpose and
+    // we also did not derive one from invoice number, fill a safe generic default.
+    if (!purposeClean && !purpose.trim() && !editedRef.current.purpose) {
+      const hasSignal = Boolean(
+        invCandidate ||
+        foundIban ||
+        ref ||
+        (typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0)
+      )
+      if (hasSignal && canSetField('purpose', 'Plačilo', editedRef.current.purpose, purpose)) {
+        setPurpose('Plačilo')
+        markFieldSource('purpose')
+      }
+    }
+
+    // Amount: apply extracted amount, otherwise fallback to OCR text (label-first).
+    if (!editedRef.current.amount) {
+      const extractedAmount = typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0
+        ? { amount: fields.amount, currency: String(fields?.currency || 'EUR') }
+        : extractAmountFromText(rawText)
+      if (extractedAmount?.amount) {
+        const nextAmount = String(extractedAmount.amount)
+        if (canSetField('amount', nextAmount, editedRef.current.amount, amountStr)) {
+          setAmountStr(nextAmount)
+          markFieldSource('amount')
+        }
+        if (extractedAmount.currency && canSetField('currency', String(extractedAmount.currency), editedRef.current.currency, currency)) {
+          setCurrency(String(extractedAmount.currency))
+          markFieldSource('currency')
+        }
+      }
+    }
+
+    // Due date: only accept ISO YYYY-MM-DD.
+    const dueClean = String(rawDue || '').trim()
+    if (dueClean && /^\d{4}-\d{2}-\d{2}$/.test(dueClean) && canSetField('due_date', dueClean, editedRef.current.dueDate, dueDate)) {
+      setDueDate(dueClean)
+      markFieldSource('due_date')
+    }
+
+    // Payment details (non-IBAN systems): treat as informational; still respect precedence.
+    const detailsClean = String(rawPaymentDetails || '').trim()
+    if (detailsClean && canSetField('payment_details', detailsClean, editedRef.current.paymentDetails, paymentDetails)) {
+      setPaymentDetails(detailsClean)
+      markFieldSource('payment_details')
+    }
 
     setIbanHint(null)
     setReferenceHint(null)
@@ -3086,6 +3483,7 @@ function ScanBillScreen() {
   }
 
   function handleIbanChange(next: string) {
+    editedRef.current.iban = true
     const raw = String(next || '')
     const extracted = extractFirstValidIban(raw)
     if (extracted) {
@@ -3104,6 +3502,7 @@ function ScanBillScreen() {
   }
 
   function handleReferenceChange(next: string) {
+    editedRef.current.reference = true
     const norm = normalizeReference(next)
     setReference(norm)
     const currentIban = normalizeIban(iban)
@@ -3119,7 +3518,38 @@ function ScanBillScreen() {
     }
   }
 
+  function splitReferenceForUi(input: string): { country: string; model: string; number: string } {
+    const raw = normalizeReference(input)
+    const upper = String(raw || '').toUpperCase()
+    const country = (upper.match(/^[A-Z]{2}/)?.[0] || '').toUpperCase()
+    const rest = country ? upper.slice(2) : upper
+    const model = (rest.match(/^\d{2}/)?.[0] || '')
+    const number = model ? rest.slice(2) : rest
+    return { country, model, number }
+  }
+
+  function setReferenceFromParts(next: { country?: string; model?: string; number?: string }) {
+    const current = splitReferenceForUi(reference)
+
+    // If the user pastes a full reference into any field (most commonly the number field),
+    // accept it as-is instead of prefixing the currently selected country/model.
+    if (next.number != null) {
+      const pasted = normalizeReference(next.number)
+      if (/^[A-Z]{2}\d{2}[A-Z0-9\-\/]{1,}$/.test(pasted)) {
+        handleReferenceChange(pasted)
+        return
+      }
+    }
+
+    const country = String(next.country ?? current.country ?? '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2)
+    const model = String(next.model ?? current.model ?? '').replace(/[^0-9]/g, '').slice(0, 2)
+    const number = String(next.number ?? current.number ?? '').replace(/[^0-9A-Z\-\/]/gi, '').toUpperCase()
+    const composed = `${country}${model}${number}`
+    handleReferenceChange(composed)
+  }
+
   function handlePaymentDetailsChange(next: string) {
+    editedRef.current.paymentDetails = true
     setPaymentDetails(next)
     // If user pasted bank details, try to extract IBAN/reference automatically (only if fields are empty).
     if (!iban.trim()) {
@@ -3132,9 +3562,20 @@ function ScanBillScreen() {
     }
   }
 
+  const handleSupplierInput = (v: string) => { editedRef.current.supplier = true; setSupplier(v) }
+  const handlePurchaseItemInput = (v: string) => { editedRef.current.purchaseItem = true; setPurchaseItem(v) }
+  const handleInvoiceNumberInput = (v: string) => { editedRef.current.invoiceNumber = true; setInvoiceNumber(v) }
+  const handleAmountInput = (v: string) => { editedRef.current.amount = true; setAmountStr(v) }
+  const handleCurrencyInput = (v: string) => { editedRef.current.currency = true; setCurrency(v) }
+  const handleDueDateInput = (v: string) => { editedRef.current.dueDate = true; setDueDate(v) }
+  const handleCreditorNameInput = (v: string) => { editedRef.current.creditorName = true; setCreditorName(v) }
+  const handlePurposeInput = (v: string) => { editedRef.current.purpose = true; setPurpose(v) }
+
   function isValidIbanChecksum(ibanInput: string): boolean {
     const iban = normalizeIban(ibanInput)
     if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(iban)) return false
+    const expected = IBAN_LENGTHS[iban.slice(0, 2)]
+    if (expected && iban.length !== expected) return false
     const rearranged = iban.slice(4) + iban.slice(0, 4)
     let remainder = 0
     for (let i = 0; i < rearranged.length; i++) {
@@ -3188,16 +3629,31 @@ function ScanBillScreen() {
     setLastQR('')
     setCameraVisible(true)
     setTorch('off')
+    editedRef.current = {
+      supplier: false,
+      purchaseItem: false,
+      invoiceNumber: false,
+      amount: false,
+      currency: false,
+      dueDate: false,
+      creditorName: false,
+      iban: false,
+      reference: false,
+      purpose: false,
+      paymentDetails: false,
+    }
+    fieldSourceRankRef.current = {}
   }, [])
   useEffect(() => {
     const payload = route.params?.inboxPrefill
     if (payload && payload.fields) {
       const f = payload.fields as ExtractedFields
-      const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
+      const raw = String((f as any)?.rawText || '')
+      const supplierName = pickNameCandidate(f.creditor_name, f.supplier)
       if (supplierName) setSupplier(supplierName)
       const cred = pickNameCandidate(f.creditor_name, supplierName)
       if (cred) setCreditorName(cred)
-      applyExtractedPaymentFields(f)
+      applyExtractedPaymentFields({ ...f, rawText: raw })
       if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
       if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
       if (typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -3282,44 +3738,20 @@ function ScanBillScreen() {
       return
     }
     setFormat(epc ? 'EPC/SEPA SCT' : (upn ? 'UPN' : 'URL'))
-    setParsed(p)
-    const supplierName = pickNameCandidate(p.creditor_name, supplier)
-    if (supplierName) setSupplier(supplierName)
-    const cred = pickNameCandidate(p.creditor_name, supplierName)
-    if (cred) setCreditorName(cred)
-    applyExtractedPaymentFields({ ...p, rawText: t })
-    if (p.payment_details) setPaymentDetails(p.payment_details ? String(p.payment_details) : '')
-    if (typeof p.amount === 'number') setAmountStr(String(p.amount))
-    if (p.currency) setCurrency(p.currency)
-    if (p.due_date) setDueDate(p.due_date)
+    // Mark missing fields for review (internal flag; no UI changes).
+    const missing: string[] = []
+    if (!p.creditor_name) missing.push('supplier')
+    if (!p.iban) missing.push('iban')
+    if (!p.reference) missing.push('reference')
+    if (!p.purpose) missing.push('purpose')
+    if (!(typeof p.amount === 'number' && Number.isFinite(p.amount) && p.amount > 0)) missing.push('amount')
+    if (!p.currency) missing.push('currency')
+    if (!p.due_date) missing.push('due_date')
+    setParsed({ ...p, needsReview: missing.length > 0, missingFields: missing })
+    if (missing.length) console.warn('QR missing fields:', missing)
+    applyExtractedPaymentFields({ ...p, rawText: t }, 'qr')
 
-    // Reliability: for structured payment QRs (EPC/UPN), do NOT automatically run AI on the payload.
-    // AI extraction is best-effort and can misassign fields; keep QR parsing deterministic.
-    const missingCritical = !p.iban || !p.reference || !p.purpose || !p.creditor_name
-    const isStructuredPaymentQr = Boolean(epc || upn)
-    if (missingCritical && entitlements.canUseOCR && !isStructuredPaymentQr) {
-      ;(async () => {
-        try {
-          setOcrError(null)
-          setOcrBusy(true)
-          const { fields: f } = await extractTextWithAI(t)
-          const s2 = pickNameCandidate(f.creditor_name, f.supplier, supplier)
-          if (s2) setSupplier(s2)
-          const c2 = pickNameCandidate(f.creditor_name, s2)
-          if (c2) setCreditorName(c2)
-          if (!p.iban || !p.reference || !p.purpose) applyExtractedPaymentFields({ ...f, rawText: t })
-          if (!p.payment_details && f.payment_details) setPaymentDetails(String(f.payment_details || ''))
-          if (!p.invoice_number && f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
-          if (typeof p.amount !== 'number' && typeof f.amount === 'number') setAmountStr(String(f.amount))
-          if (!p.currency && f.currency) setCurrency(f.currency)
-          if (!p.due_date && f.due_date) setDueDate(f.due_date)
-        } catch {
-          // Silent: user can still edit manually.
-        } finally {
-          setOcrBusy(false)
-        }
-      })()
-    }
+    // QR mapping is deterministic: AI is never used for QR mapping.
     setUseDataActive(true)
     setCameraVisible(false)
     setTorch('off')
@@ -3388,38 +3820,11 @@ function ScanBillScreen() {
       setFormat(mode ? `OCR (${mode})` : 'OCR')
       setParsed(f)
     }
-    const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
-    if (supplierName) setSupplier(supplierName)
-    const cred = pickNameCandidate(f.creditor_name, supplierName)
-    if (cred) setCreditorName(cred)
-    applyExtractedPaymentFields({ ...f, rawText: ocrText })
-    if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
-    if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
-    if (typeof f.amount === 'number') setAmountStr(String(f.amount))
-    if (f.currency) setCurrency(f.currency)
-    if (f.due_date) setDueDate(f.due_date)
-
-    // Exceptional safety net: only when OCR says it's ambiguous AND the field is missing.
-    // Keep this rare; do not bother users when extraction is confident.
-    try {
-      const doubt = meta?.doubt || meta?.doubt === false ? meta.doubt : meta?.doubt
-      const candidates = meta?.candidates
-      const needIban = !String(f?.iban || '').trim() && !iban.trim() && Array.isArray(candidates?.ibans) && candidates.ibans.length > 1
-      const needRef = !String(f?.reference || '').trim() && !reference.trim() && Array.isArray(candidates?.references) && candidates.references.length > 1
-      const needAmt = !(typeof f?.amount === 'number' && f?.currency) && !amountStr.trim() && Array.isArray(candidates?.amounts) && candidates.amounts.length > 1
-      const anyNeed = Boolean(needIban || needRef || needAmt)
-      const isAmbiguous = Boolean(meta?.any || doubt?.iban || doubt?.reference || doubt?.amount)
-      if (isAmbiguous && anyNeed) {
-        setReviewMeta(meta)
-        setReviewPick({
-          iban: needIban ? String(candidates.ibans[0] || '') : undefined,
-          reference: needRef ? String(candidates.references[0] || '') : undefined,
-          amount: needAmt ? Number(candidates.amounts[0]?.amount) : undefined,
-          currency: needAmt ? String(candidates.amounts[0]?.currency || 'EUR') : undefined,
-        })
-        setReviewVisible(true)
-      }
-    } catch {}
+    if (meta && Array.isArray((meta as any).not_found) && (meta as any).not_found.length) {
+      console.warn('OCR not found fields:', { mode, not_found: (meta as any).not_found, scanned: (meta as any).scanned })
+    }
+    applyExtractedPaymentFields({ ...f, rawText: ocrText }, String(mode || '').trim())
+    // Do not directly overwrite form fields here; mapping happens via applyExtractedPaymentFields with strict precedence.
 
     setUseDataActive(true)
     setCameraVisible(false)
@@ -3482,16 +3887,6 @@ function ScanBillScreen() {
     }
   }
 
-  const applyReviewPick = useCallback(() => {
-    const pick = reviewPick || {}
-    if (pick.iban && !iban.trim()) setIban(String(pick.iban))
-    if (pick.reference && !reference.trim()) setReference(String(pick.reference))
-    if (typeof pick.amount === 'number' && Number.isFinite(pick.amount) && !amountStr.trim()) setAmountStr(String(pick.amount))
-    if (pick.currency && typeof pick.currency === 'string') setCurrency(String(pick.currency))
-    setReviewVisible(false)
-    setReviewMeta(null)
-    setReviewPick(null)
-  }, [reviewPick, iban, reference, amountStr, currency])
   const handleManualExtract = () => {
     if (!manual.trim()) {
       setMissingManualVisible(true)
@@ -3517,6 +3912,7 @@ function ScanBillScreen() {
     const y = selectedDate.getFullYear()
     const m = String(selectedDate.getMonth() + 1).padStart(2, '0')
     const d = String(selectedDate.getDate()).padStart(2, '0')
+    editedRef.current.dueDate = true
     setDueDate(`${y}-${m}-${d}`)
     if (!isIOS) setShowDuePicker(false)
   }
@@ -3889,9 +4285,9 @@ function ScanBillScreen() {
                   {tr('Supplier')}
                   <Text style={styles.requiredStar}> *</Text>
                 </Text>
-                <AppInput placeholder={tr('Supplier')} value={supplier} onChangeText={setSupplier} />
+                <AppInput placeholder={tr('Supplier')} value={supplier} onChangeText={handleSupplierInput} />
               </View>
-              <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={setPurchaseItem} />
+              <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={handlePurchaseItemInput} />
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>
                   {tr('Invoice number')}
@@ -3900,7 +4296,7 @@ function ScanBillScreen() {
                 <AppInput
                   placeholder={tr('Invoice number')}
                   value={invoiceNumber}
-                  onChangeText={setInvoiceNumber}
+                  onChangeText={handleInvoiceNumberInput}
                   hint={tr('Required for accounting.')}
                 />
               </View>
@@ -3910,11 +4306,11 @@ function ScanBillScreen() {
                     {tr('Amount')}
                     <Text style={styles.requiredStar}> *</Text>
                   </Text>
-                  <AppInput placeholder={tr('Amount')} value={amountStr} onChangeText={setAmountStr} keyboardType="numeric" />
+                  <AppInput placeholder={tr('Amount')} value={amountStr} onChangeText={handleAmountInput} keyboardType="numeric" />
                 </View>
                 <View style={{ gap: 6, width: 90 }}>
                   <Text style={styles.fieldLabel}>{tr('Currency')}</Text>
-                  <AppInput placeholder={tr('Currency')} value={currency} onChangeText={setCurrency} />
+                  <AppInput placeholder={tr('Currency')} value={currency} onChangeText={handleCurrencyInput} />
                 </View>
               </View>
 
@@ -3942,7 +4338,7 @@ function ScanBillScreen() {
                     <AppInput
                       placeholder={tr('Due date (YYYY-MM-DD)')}
                       value={dueDate}
-                      onChangeText={setDueDate}
+                      onChangeText={handleDueDateInput}
                       hint={tr('Due date (used for reminders and overdue status).')}
                     />
                   </View>
@@ -3982,7 +4378,7 @@ function ScanBillScreen() {
                   {tr('Creditor')}
                   <Text style={styles.requiredStar}> *</Text>
                 </Text>
-                <AppInput placeholder={tr('Creditor')} value={creditorName} onChangeText={setCreditorName} />
+                <AppInput placeholder={tr('Creditor')} value={creditorName} onChangeText={handleCreditorNameInput} />
               </View>
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>
@@ -4004,14 +4400,40 @@ function ScanBillScreen() {
                 <Text style={styles.fieldLabel}>
                   {tr('Reference')}
                 </Text>
-                <AppInput
-                  placeholder={tr('Reference')}
-                  value={reference}
-                  onChangeText={handleReferenceChange}
-                  autoCapitalize="characters"
-                  autoCorrect={false}
-                  keyboardType="default"
-                />
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <View style={{ width: 64 }}>
+                    <AppInput
+                      placeholder="SI"
+                      value={splitReferenceForUi(reference).country}
+                      onChangeText={(v: string) => setReferenceFromParts({ country: v })}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="default"
+                      maxLength={2}
+                    />
+                  </View>
+                  <View style={{ width: 64 }}>
+                    <AppInput
+                      placeholder="00"
+                      value={splitReferenceForUi(reference).model}
+                      onChangeText={(v: string) => setReferenceFromParts({ model: v })}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType={Platform.OS === 'ios' ? 'number-pad' : 'numeric'}
+                      maxLength={2}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <AppInput
+                      placeholder={tr('Reference')}
+                      value={splitReferenceForUi(reference).number}
+                      onChangeText={(v: string) => setReferenceFromParts({ number: v })}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="default"
+                    />
+                  </View>
+                </View>
                 {referenceHint ? (
                   <InlineInfo tone="info" iconName="information-circle-outline" message={referenceHint} style={styles.formNotice} />
                 ) : null}
@@ -4030,7 +4452,7 @@ function ScanBillScreen() {
                   {tr('Purpose')}
                   <Text style={styles.requiredStar}> *</Text>
                 </Text>
-                <AppInput placeholder={tr('Purpose')} value={purpose} onChangeText={setPurpose} multiline />
+                <AppInput placeholder={tr('Purpose')} value={purpose} onChangeText={handlePurposeInput} multiline />
               </View>
             </View>
           </View>
@@ -4112,82 +4534,6 @@ function ScanBillScreen() {
           />
         </Surface>
       </View>
-
-      <Modal
-        visible={reviewVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setReviewVisible(false)}
-      >
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', padding: 18, justifyContent: 'center' }}>
-          <View style={{ backgroundColor: '#fff', borderRadius: 14, padding: 14, maxHeight: '85%' }}>
-            <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 6 }}>{tr('Confirm extracted data')}</Text>
-            <Text style={{ opacity: 0.8, marginBottom: 10 }}>{tr('The document seems ambiguous. Please pick the correct value (optional).')}</Text>
-
-            <ScrollView style={{ maxHeight: 360 }}>
-              {Array.isArray(reviewMeta?.candidates?.ibans) && reviewMeta.candidates.ibans.length > 1 ? (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={{ fontWeight: '700', marginBottom: 6 }}>{tr('IBAN')}</Text>
-                  {reviewMeta.candidates.ibans.slice(0, 6).map((v: string) => (
-                    <Pressable
-                      key={`iban_${v}`}
-                      onPress={() => setReviewPick((p: any) => ({ ...(p || {}), iban: v }))}
-                      style={{ paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: (reviewPick?.iban === v ? '#111' : '#ddd'), marginBottom: 6 }}
-                    >
-                      <Text>{v}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              ) : null}
-
-              {Array.isArray(reviewMeta?.candidates?.references) && reviewMeta.candidates.references.length > 1 ? (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={{ fontWeight: '700', marginBottom: 6 }}>{tr('Reference')}</Text>
-                  {reviewMeta.candidates.references.slice(0, 8).map((v: string) => (
-                    <Pressable
-                      key={`ref_${v}`}
-                      onPress={() => setReviewPick((p: any) => ({ ...(p || {}), reference: v }))}
-                      style={{ paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: (reviewPick?.reference === v ? '#111' : '#ddd'), marginBottom: 6 }}
-                    >
-                      <Text>{v}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              ) : null}
-
-              {Array.isArray(reviewMeta?.candidates?.amounts) && reviewMeta.candidates.amounts.length > 1 ? (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={{ fontWeight: '700', marginBottom: 6 }}>{tr('Amount')}</Text>
-                  {reviewMeta.candidates.amounts.slice(0, 6).map((a: any, idx: number) => {
-                    const cur = String(a?.currency || 'EUR')
-                    const amt = typeof a?.amount === 'number' ? a.amount : Number(a?.amount)
-                    const label = Number.isFinite(amt) ? `${cur} ${amt}` : `${cur}`
-                    const isSel = reviewPick?.amount === amt && (reviewPick?.currency || 'EUR') === cur
-                    return (
-                      <Pressable
-                        key={`amt_${idx}_${cur}_${amt}`}
-                        onPress={() => setReviewPick((p: any) => ({ ...(p || {}), amount: amt, currency: cur }))}
-                        style={{ paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: (isSel ? '#111' : '#ddd'), marginBottom: 6 }}
-                      >
-                        <Text>{label}</Text>
-                      </Pressable>
-                    )
-                  })}
-                </View>
-              ) : null}
-            </ScrollView>
-
-            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 }}>
-              <TouchableOpacity onPress={() => { setReviewVisible(false); setReviewMeta(null); setReviewPick(null) }} style={{ paddingVertical: 10, paddingHorizontal: 12 }}>
-                <Text style={{ fontWeight: '700' }}>{tr('Skip')}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={applyReviewPick} style={{ paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#111', borderRadius: 10 }}>
-                <Text style={{ color: '#fff', fontWeight: '700' }}>{tr('Apply')}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
 
       <Modal
         visible={missingManualVisible}
@@ -4348,10 +4694,11 @@ function InboxScreen() {
     try {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
-      const { fields, summary } = await performOCR(sourceUri, { preferQr: false })
+      const { fields, summary, rawText } = await performOCR(sourceUri, { preferQr: false })
 
       const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
-      await updateInboxItem(spaceId, item.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
+      const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '' } : fields
+      await updateInboxItem(spaceId, item.id, { extractedFields: enriched, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
       if (looksLikeBill) await cancelInboxReviewReminder(item.id, spaceId)
       else await scheduleInboxReviewReminder(item.id, item.name, spaceId)
       await refresh()
