@@ -2911,6 +2911,8 @@ function ScanBillScreen() {
   function looksLikeMisassignedName(input: any): boolean {
     const s = (input ?? '').toString().trim()
     if (!s) return true
+    // Never treat URLs/domains as supplier/payee names.
+    if (/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b)/i.test(s)) return true
     if (/\b(rok|zapad|zapadl|valuta|datum|due|pay\s*by|payment\s*due)\b/i.test(s)) return true
     if (/\b\d{4}-\d{2}-\d{2}\b/.test(s)) return true
     if (/\b\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}\b/.test(s)) return true
@@ -2933,6 +2935,8 @@ function ScanBillScreen() {
       if (!s) continue
       if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) continue
       if (/^[0-9\s.,:\-\/]+$/.test(s)) continue
+      // Never accept URL-like strings as supplier/recipient.
+      if (/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b)/i.test(s)) continue
       // Never pick payer/customer names as supplier/payee.
       if (/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(s)) continue
       // Avoid accidentally picking a consumer/person name as supplier.
@@ -3172,6 +3176,7 @@ function ScanBillScreen() {
     if (isPayerLabelLine(cand)) return null
     const cleaned = cand.replace(/\s+/g, ' ').trim()
     if (!cleaned) return null
+    if (/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b)/i.test(cleaned)) return null
     if (looksLikeMisassignedName(cleaned)) return null
     return cleaned
   }
@@ -3184,6 +3189,7 @@ function ScanBillScreen() {
     if (isPayerLabelLine(cand)) return null
     const cleaned = cand.replace(/\s+/g, ' ').trim()
     if (!cleaned) return null
+    if (/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b)/i.test(cleaned)) return null
     if (looksLikeMisassignedName(cleaned)) return null
     return cleaned
   }
@@ -3199,6 +3205,7 @@ function ScanBillScreen() {
     const scoreLine = (line: string, idx: number): number => {
       const s = String(line || '').trim()
       if (!s) return -999
+      if (/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b)/i.test(s)) return -999
       if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) return -999
       if (/^[0-9\s.,:\-\/]+$/.test(s)) return -999
       if (isPayerLabelLine(s)) return -999
@@ -3213,6 +3220,7 @@ function ScanBillScreen() {
       if (isSupplierLabelLine(s) || isPayeeLabelLine(s)) score -= 2 // label lines themselves aren't names
 
       if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(s)) score += 5
+      if (/\bGEN\s*-?\s*I\b/i.test(s)) score += 20
       const letters = (s.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
       const digits = (s.match(/\d/g) || []).length
       if (letters >= 8 && digits <= 2) score += 3
@@ -3254,47 +3262,29 @@ function ScanBillScreen() {
   }
 
   function extractInvoiceNumberFromText(rawText: string): string | null {
-    const text = String(rawText || '')
+    // IMPORTANT: Invoice number must ONLY come from labeled fields.
+    // Allowed labels: "Račun št", "Številka računa", "Invoice no", "Račun številka".
+    const cand = extractLabeledValueFromText(rawText, [
+      /^(?:ra\u010dun\s*\u0161t\.?|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*no\.?)\s*:?\s*(.+)$/i,
+    ])
+    const v = String(cand || '').trim()
+    if (!v) return null
 
-    const looksLikeInvoiceId = (s: string): boolean => {
-      const v = String(s || '').trim()
-      if (!v) return false
-      if (v.length < 3 || v.length > 32) return false
-      if (!/\d/.test(v)) return false
-      const compact = v.toUpperCase().replace(/\s+/g, '')
-      if (/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(compact)) return false // IBAN
-      if (/^SI\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return false // reference
-      if (/^RF\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return false // reference
-      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return false // date
-      if (/^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}$/.test(v)) return false // date
-      return true
-    }
+    // Reject generic issuer tokens (e.g. "GEN-1").
+    if (/^GEN\s*[-_]?\s*1$/i.test(v) || /^GEN\s*[-_]?\s*I$/i.test(v)) return null
 
-    // 1) Explicit invoice label.
-    const labeled = text.match(
-      /(ra\u010dun\s*(\u0161t\.|st\.|stevilka)?|\binvoice\b\s*(no\.|nr\.|number)?|\b\u0161t\.?\s*ra\u010duna|\bdokument\b\s*(\u0161t\.|no\.|nr\.)?)\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/\.]{2,})/i,
-    )
-    const v1 = String(labeled?.[5] || '').trim()
-    if (looksLikeInvoiceId(v1)) return v1
+    const normalized = v.toUpperCase().replace(/\s+/g, '')
+    // Must contain at least one digit
+    if (!/\d/.test(normalized)) return null
+    // Conservative bounds
+    if (normalized.length < 3 || normalized.length > 32) return null
+    // Must not be IBAN/reference/date
+    if (/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(normalized)) return null
+    if (/^(SI|RF)\d{2}[0-9A-Z\-\/]{4,}$/i.test(normalized)) return null
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return null
+    if (/^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}$/.test(v)) return null
+    return normalized
 
-    // 2) If the invoice number is embedded in the payment purpose (Namen), extract a plausible token.
-    const lines = text.replace(/\r/g, '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
-    for (const l of lines) {
-      if (!/\b(namen|purpose|opis|description|memo|payment\s*for)\b/i.test(l)) continue
-      const after = l.split(/:\s*/, 2)[1] || ''
-      const tokens = (after.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/gi) || []).slice(0, 6)
-      for (const tok of tokens) {
-        if (looksLikeInvoiceId(tok)) return tok.toUpperCase()
-      }
-    }
-
-    // 3) Fallback: search for a plausible token anywhere, but stay conservative.
-    const all = (text.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/gi) || []).slice(0, 120)
-    for (const tok of all) {
-      if (looksLikeInvoiceId(tok)) return tok.toUpperCase()
-    }
-
-    return null
   }
 
   function extractPurposeFromText(rawText: string): string | null {
@@ -3361,7 +3351,17 @@ function ScanBillScreen() {
     const creditorFromText = extractCreditorNameFromText(rawText)
     const supplierFromText = extractSupplierNameFromText(rawText)
     const bestFromText = pickBestNameFromWholeText(rawText)
-    const nameCandidate = pickNameCandidate(creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
+    const normalizeIssuerName = (s: string): string => {
+      const v = String(s || '').replace(/\s+/g, ' ').trim()
+      if (!v) return ''
+      if (/\bGEN\s*-?\s*I\b/i.test(v)) {
+        if (/\bd\.o\.o\./i.test(v)) return 'GEN-I, d.o.o.'
+        return 'GEN-I'
+      }
+      return v
+    }
+    const nameCandidateRaw = pickNameCandidate(creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
+    const nameCandidate = normalizeIssuerName(nameCandidateRaw)
     if (nameCandidate) {
       const canOverwriteSupplier = !editedRef.current.supplier || !supplier.trim() || looksLikeMisassignedName(supplier)
       const canOverwriteCreditor = !editedRef.current.creditorName || !creditorName.trim() || looksLikeMisassignedName(creditorName)
@@ -3375,8 +3375,30 @@ function ScanBillScreen() {
       }
     }
 
-    // Invoice number (used as a fallback for purpose when purpose isn't explicit).
-    const invCandidate = (rawInvoice || '').trim() || extractInvoiceNumberFromText(rawText) || ''
+    // Invoice number must ONLY come from labeled fields in the document.
+    const hasInvoiceLabelEvidence = (text: string, invoice: string): boolean => {
+      const inv = String(invoice || '').trim()
+      if (!inv) return false
+      const invNorm = inv.toUpperCase().replace(/\s+/g, '')
+      const lines = String(text || '').replace(/\r/g, '').split(/\n+/)
+      const labelRe = /^(?:ra\u010dun\s*\u0161t\.?|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*no\.?)\b/i
+      for (let i = 0; i < lines.length; i++) {
+        const l = String(lines[i] || '').trim()
+        if (!l) continue
+        if (!labelRe.test(l)) continue
+        const m = l.match(/^(?:ra\u010dun\s*\u0161t\.?|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*no\.?)\s*:?\s*(.+)$/i)
+        const direct = String(m?.[1] || '').trim()
+        const directNorm = direct.toUpperCase().replace(/\s+/g, '')
+        if (directNorm && directNorm.includes(invNorm)) return true
+        const next = String(lines[i + 1] || '').trim()
+        const nextNorm = next.toUpperCase().replace(/\s+/g, '')
+        if (nextNorm && nextNorm.includes(invNorm)) return true
+      }
+      return false
+    }
+    const invFromDoc = extractInvoiceNumberFromText(rawText) || ''
+    const invFromField = (rawInvoice || '').trim()
+    const invCandidate = (invFromField && hasInvoiceLabelEvidence(rawText, invFromField) ? invFromField.toUpperCase().replace(/\s+/g, '') : '') || invFromDoc
     if (invCandidate) {
       if (canSetField('invoice_number', invCandidate, editedRef.current.invoiceNumber, invoiceNumber)) {
         setInvoiceNumber(invCandidate)
@@ -3405,13 +3427,30 @@ function ScanBillScreen() {
       warnings.push(tr('IBAN could not be validated. Please check it.'))
     }
 
-    let ref = normalizeReference(rawRef)
+    const isValidReferenceFormat = (r: string): boolean => {
+      const v = normalizeReference(r)
+      if (!v) return false
+      // Accept SIxx/RFxx reference formats.
+      if (!/^(SI|RF)\d{2}/i.test(v)) return false
+      // Require more than just the prefix/model; avoids IBAN prefix fragments like "SI56".
+      if (v.length < 6) return false
+      // Must not be a full IBAN.
+      if (looksLikeIban(v) && isValidIbanChecksum(v)) return false
+      return true
+    }
+    const refFromDoc = extractReferenceCandidate(rawText)
+    let ref = normalizeReference(rawRef) || ''
+    // If the extracted reference is missing or suspicious, fall back to labeled Sklic/Reference lines.
+    if (!ref || !isValidReferenceFormat(ref)) {
+      if (refFromDoc && isValidReferenceFormat(refFromDoc)) ref = refFromDoc
+    }
     if (ref) {
       if (foundIban && ref === foundIban) {
         warnings.push(tr('Reference matched the IBAN; it was ignored.'))
         ref = ''
       }
-      if (foundIban && ref && ref.length < 10 && String(foundIban || '').startsWith(ref)) {
+      // Only treat as IBAN fragment when it does NOT match a valid reference pattern.
+      if (foundIban && ref && !isValidReferenceFormat(ref) && ref.length < 10 && String(foundIban || '').startsWith(ref)) {
         warnings.push(tr('Reference looked like an IBAN fragment; it was ignored.'))
         ref = ''
       }

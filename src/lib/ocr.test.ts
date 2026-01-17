@@ -94,6 +94,7 @@ describe('OCR extraction (text heuristics)', () => {
     expect(sanitized.due_date).toBe('2026-01-22')
     expect(sanitized.iban).toBe('SI56029220260092885')
     expect(sanitized.reference).toBe('SI121234567890123')
+    expect(String(sanitized.reference || '')).not.toBe('')
     expect(String(sanitized.purpose || '')).toMatch(/elektr/i)
     expect(String(sanitized.purpose || '')).toMatch(/december\s+2025/i)
   })
