@@ -1545,6 +1545,73 @@ async function deleteAllAttachmentsForRecord(spaceId: string | null | undefined,
   await s.storage.from('attachments').remove(items.map((i) => i.path))
 }
 
+async function performOCRFromBase64(
+  base64: string,
+  contentType: string,
+  opts?: { preferQr?: boolean },
+): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any }> {
+  const base = getFunctionsBase()
+  if (!base) {
+    throw new Error('OCR unavailable: missing EXPO_PUBLIC_FUNCTIONS_BASE')
+  }
+  const supabase = getSupabase()
+  let authHeader: Record<string, string> = {}
+  if (supabase) {
+    try {
+      const { data } = await supabase.auth.getSession()
+      const token = data?.session?.access_token
+      if (token) authHeader = { Authorization: `Bearer ${token}` }
+    } catch {}
+  }
+  if (!authHeader.Authorization) {
+    const err: any = new Error('Sign in to use OCR.')
+    err.status = 401
+    err.code = 'auth_required'
+    throw err
+  }
+
+  const ct = (contentType && String(contentType).trim()) || 'application/octet-stream'
+  const raw = String(base64 || '').trim()
+  const approxBytes = Math.floor((raw.length * 3) / 4)
+  if (approxBytes > 12 * 1024 * 1024) {
+    const err: any = new Error('File too large for OCR.')
+    err.code = 'file_too_large'
+    throw err
+  }
+
+  const resp = await fetch(`${base}/.netlify/functions/ocr`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeader },
+    body: JSON.stringify(
+      ct === 'application/pdf'
+        ? { pdfBase64: raw, contentType: ct, preferQr: Boolean(opts?.preferQr) }
+        : { imageBase64: `data:${ct};base64,${raw}`, contentType: ct, preferQr: Boolean(opts?.preferQr) },
+    ),
+  })
+  const data = await resp.json().catch(() => null as any)
+  if (!resp.ok || !data?.ok) {
+    const message = data?.message || data?.error || `OCR failed (${resp.status})`
+    const err: any = new Error(message)
+    err.status = resp.status
+    err.code = data?.error || null
+    throw err
+  }
+  const f = data.fields || {}
+  const rawText = typeof data.rawText === 'string' ? data.rawText : ''
+  const mode = typeof data.mode === 'string' ? data.mode : undefined
+  const meta = data && typeof data.meta === 'object' ? data.meta : undefined
+  const parts: string[] = []
+  if (f.creditor_name || f.supplier) parts.push(`Creditor: ${f.creditor_name || f.supplier}`)
+  if (typeof f.amount === 'number' && f.currency) parts.push(`Amount: ${f.currency} ${f.amount}`)
+  if (f.due_date) parts.push(`Due: ${f.due_date}`)
+  if (f.iban) parts.push(`IBAN: ${f.iban}`)
+  if (f.reference) parts.push(`Ref: ${f.reference}`)
+  if (f.purpose) parts.push(`Purpose: ${f.purpose}`)
+  if (f.payment_details) parts.push(`Payment details: ${String(f.payment_details).slice(0, 200)}`)
+  const summary = parts.join('\n') || 'No fields found'
+  return { fields: f, summary, rawText, mode, meta }
+}
+
 // --- OCR helper (Netlify function wrapper) ---
 async function performOCR(
   uri: string,
@@ -3148,7 +3215,7 @@ function ScanBillScreen() {
       showUpgradeAlert('ocr')
       return
     }
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 })
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.9, base64: true })
     if (res.canceled) return
     const asset = res.assets?.[0]
     if (!asset?.uri) return
@@ -3158,7 +3225,8 @@ function ScanBillScreen() {
     if (decoded) {
       handleDecodedText(decoded)
     } else {
-      await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg')
+      if (asset.base64) await extractWithOCRBase64(asset.base64, asset.mimeType || 'image/jpeg')
+      else await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg')
     }
   }
 
@@ -3262,46 +3330,7 @@ function ScanBillScreen() {
       setOcrError(null)
       setOcrBusy(true)
       const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: false, contentType })
-      if (typeof ocrText === 'string' && ocrText.trim()) {
-        setRawText(ocrText)
-        setFormat(mode ? `OCR (${mode})` : 'OCR')
-        setParsed(f)
-      }
-      const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
-      if (supplierName) setSupplier(supplierName)
-      const cred = pickNameCandidate(f.creditor_name, supplierName)
-      if (cred) setCreditorName(cred)
-      applyExtractedPaymentFields({ ...f, rawText: ocrText })
-      if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
-      if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
-      if (typeof f.amount === 'number') setAmountStr(String(f.amount))
-      if (f.currency) setCurrency(f.currency)
-      if (f.due_date) setDueDate(f.due_date)
-
-      // Exceptional safety net: only when OCR says it's ambiguous AND the field is missing.
-      // Keep this rare; do not bother users when extraction is confident.
-      try {
-        const doubt = meta?.doubt || meta?.doubt === false ? meta.doubt : meta?.doubt
-        const candidates = meta?.candidates
-        const needIban = !String(f?.iban || '').trim() && !iban.trim() && Array.isArray(candidates?.ibans) && candidates.ibans.length > 1
-        const needRef = !String(f?.reference || '').trim() && !reference.trim() && Array.isArray(candidates?.references) && candidates.references.length > 1
-        const needAmt = !(typeof f?.amount === 'number' && f?.currency) && !amountStr.trim() && Array.isArray(candidates?.amounts) && candidates.amounts.length > 1
-        const anyNeed = Boolean(needIban || needRef || needAmt)
-        const isAmbiguous = Boolean(meta?.any || doubt?.iban || doubt?.reference || doubt?.amount)
-        if (isAmbiguous && anyNeed) {
-          setReviewMeta(meta)
-          setReviewPick({
-            iban: needIban ? String(candidates.ibans[0] || '') : undefined,
-            reference: needRef ? String(candidates.references[0] || '') : undefined,
-            amount: needAmt ? Number(candidates.amounts[0]?.amount) : undefined,
-            currency: needAmt ? String(candidates.amounts[0]?.currency || 'EUR') : undefined,
-          })
-          setReviewVisible(true)
-        }
-      } catch {}
-      setUseDataActive(true)
-      setCameraVisible(false)
-      setTorch('off')
+      applyOcr(f, String(ocrText || ''), mode, meta)
       // Keep UX non-technical; the draft is already filled and still editable.
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
@@ -3344,6 +3373,106 @@ function ScanBillScreen() {
 
       // Default: show the server/user-facing message (not stack traces).
       setOcrError(String(msg || tr('OCR failed')))
+    } finally {
+      setOcrBusy(false)
+    }
+  }
+
+  function applyOcr(f: any, ocrText: string, mode?: string, meta?: any) {
+    if (typeof ocrText === 'string' && ocrText.trim()) {
+      setRawText(ocrText)
+      setFormat(mode ? `OCR (${mode})` : 'OCR')
+      setParsed(f)
+    }
+    const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
+    if (supplierName) setSupplier(supplierName)
+    const cred = pickNameCandidate(f.creditor_name, supplierName)
+    if (cred) setCreditorName(cred)
+    applyExtractedPaymentFields({ ...f, rawText: ocrText })
+    if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
+    if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
+    if (typeof f.amount === 'number') setAmountStr(String(f.amount))
+    if (f.currency) setCurrency(f.currency)
+    if (f.due_date) setDueDate(f.due_date)
+
+    // Exceptional safety net: only when OCR says it's ambiguous AND the field is missing.
+    // Keep this rare; do not bother users when extraction is confident.
+    try {
+      const doubt = meta?.doubt || meta?.doubt === false ? meta.doubt : meta?.doubt
+      const candidates = meta?.candidates
+      const needIban = !String(f?.iban || '').trim() && !iban.trim() && Array.isArray(candidates?.ibans) && candidates.ibans.length > 1
+      const needRef = !String(f?.reference || '').trim() && !reference.trim() && Array.isArray(candidates?.references) && candidates.references.length > 1
+      const needAmt = !(typeof f?.amount === 'number' && f?.currency) && !amountStr.trim() && Array.isArray(candidates?.amounts) && candidates.amounts.length > 1
+      const anyNeed = Boolean(needIban || needRef || needAmt)
+      const isAmbiguous = Boolean(meta?.any || doubt?.iban || doubt?.reference || doubt?.amount)
+      if (isAmbiguous && anyNeed) {
+        setReviewMeta(meta)
+        setReviewPick({
+          iban: needIban ? String(candidates.ibans[0] || '') : undefined,
+          reference: needRef ? String(candidates.references[0] || '') : undefined,
+          amount: needAmt ? Number(candidates.amounts[0]?.amount) : undefined,
+          currency: needAmt ? String(candidates.amounts[0]?.currency || 'EUR') : undefined,
+        })
+        setReviewVisible(true)
+      }
+    } catch {}
+
+    setUseDataActive(true)
+    setCameraVisible(false)
+    setTorch('off')
+  }
+
+  async function extractWithOCRBase64(base64: string, contentType?: string) {
+    if (!entitlements.canUseOCR) {
+      showUpgradeAlert('ocr')
+      return
+    }
+    try {
+      setOcrError(null)
+      setOcrBusy(true)
+      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: false })
+      applyOcr(f, String(ocrText || ''), mode, meta)
+      if (summary && summary !== 'No fields found') {
+        // Optional: leave silent, but keep summary available via rawText.
+      }
+    } catch (e: any) {
+      const msg = e?.message || 'OCR failed'
+      const status = (e as any)?.status
+      const code = (e as any)?.code
+      console.warn('OCR failed:', { status, code, msg })
+
+      if (status === 401 || code === 'auth_required' || /sign in/i.test(msg)) {
+        setOcrError(tr('Please sign in again.'))
+        Alert.alert(tr('OCR unavailable'), tr('Please sign in again.'))
+        return
+      }
+
+      if (code === 'ocr_not_allowed') {
+        setOcrError(tr('OCR not available on your plan.'))
+        showUpgradeAlert('ocr')
+        return
+      }
+
+      if (code === 'ocr_quota_exceeded' || /quota/i.test(msg)) {
+        setOcrError(tr('OCR monthly quota exceeded.'))
+        showUpgradeAlert('ocr')
+        return
+      }
+
+      if (code === 'pdf_no_text') {
+        setOcrError(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        Alert.alert(tr('OCR failed'), tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        return
+      }
+
+      if (code === 'file_too_large') {
+        setOcrError(tr('File too large for OCR.'))
+        Alert.alert(tr('OCR failed'), tr('File too large for OCR.'))
+        return
+      }
+
+      setOcrError(msg)
+      Alert.alert(tr('OCR failed'), msg)
     } finally {
       setOcrBusy(false)
     }
