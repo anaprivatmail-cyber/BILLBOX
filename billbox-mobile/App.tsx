@@ -1548,7 +1548,7 @@ async function deleteAllAttachmentsForRecord(spaceId: string | null | undefined,
 // --- OCR helper (Netlify function wrapper) ---
 async function performOCR(
   uri: string,
-  opts?: { preferQr?: boolean },
+  opts?: { preferQr?: boolean; contentType?: string; filename?: string },
 ): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any }>{
   const base = getFunctionsBase()
   if (!base) {
@@ -1570,35 +1570,98 @@ async function performOCR(
     throw err
   }
 
-  // Reading local URIs via fetch/blob is flaky on Android (content://, large PDFs).
+  // Reading local URIs via fetch/blob can be flaky on Android (content://, large PDFs).
   // Use expo-file-system base64 and send JSON (server supports imageBase64/pdfBase64).
+  // For content:// URIs, copy into cache first.
   let base64: string
-  let contentType = 'application/octet-stream'
-  try {
-    const info = await FileSystem.getInfoAsync(uri)
-    if (!info?.exists) throw new Error('file_missing')
-    // Guard: avoid trying to base64-encode huge files on device.
-    if (typeof info.size === 'number' && info.size > 12 * 1024 * 1024) {
-      throw new Error('file_too_large')
+  let contentType = (opts?.contentType && String(opts.contentType).trim()) || 'application/octet-stream'
+  let tempFileUri: string | null = null
+
+  const inferContentTypeFromUri = (u: string): string => {
+    const lower = String(u || '').toLowerCase()
+    if (lower.endsWith('.pdf')) return 'application/pdf'
+    if (lower.endsWith('.png')) return 'image/png'
+    if (lower.endsWith('.webp')) return 'image/webp'
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+    return 'application/octet-stream'
+  }
+
+  const extFromContentType = (ct: string): string => {
+    const c = String(ct || '').toLowerCase()
+    if (c.includes('pdf')) return '.pdf'
+    if (c.includes('png')) return '.png'
+    if (c.includes('webp')) return '.webp'
+    if (c.includes('jpg') || c.includes('jpeg')) return '.jpg'
+    if (c.startsWith('image/')) return '.jpg'
+    return ''
+  }
+
+  const ensureReadableFileUri = async (): Promise<string> => {
+    const u = String(uri || '')
+    if (!contentType || contentType === 'application/octet-stream') {
+      contentType = inferContentTypeFromUri(u)
+      if (!contentType || contentType === 'application/octet-stream') contentType = 'image/jpeg'
     }
-  } catch (e: any) {
-    const err: any = new Error(e?.message === 'file_too_large' ? 'File too large for OCR.' : 'Could not read the selected file.')
-    err.code = e?.message || 'file_read_failed'
-    throw err
+
+    // Remote URL: download to cache.
+    if (/^https?:\/\//i.test(u)) {
+      const ext = extFromContentType(contentType)
+      const target = `${FileSystem.cacheDirectory || FileSystem.documentDirectory || ''}billbox_ocr_${Date.now()}${ext}`
+      const dl = await FileSystem.downloadAsync(u, target)
+      tempFileUri = dl?.uri || target
+      return tempFileUri
+    }
+
+    // content://: copy to cache first.
+    if (/^content:\/\//i.test(u)) {
+      const ext = extFromContentType(contentType)
+      const target = `${FileSystem.cacheDirectory || FileSystem.documentDirectory || ''}billbox_ocr_${Date.now()}${ext}`
+      await FileSystem.copyAsync({ from: u, to: target })
+      tempFileUri = target
+      return target
+    }
+
+    return u
   }
 
   try {
-    // Best-effort mime inference from extension.
-    const lower = String(uri || '').toLowerCase()
-    if (lower.endsWith('.pdf')) contentType = 'application/pdf'
-    else if (lower.endsWith('.png')) contentType = 'image/png'
-    else if (lower.endsWith('.webp')) contentType = 'image/webp'
-    else contentType = 'image/jpeg'
-    base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 })
-  } catch (e: any) {
-    const err: any = new Error('Could not read the selected file.')
-    err.code = 'file_read_failed'
-    throw err
+    const readableUri = await ensureReadableFileUri()
+    // Guard: avoid trying to base64-encode huge files on device.
+    try {
+      const info = await FileSystem.getInfoAsync(readableUri)
+      if (info && info.exists === false) throw new Error('file_missing')
+      if (typeof info?.size === 'number' && info.size > 12 * 1024 * 1024) throw new Error('file_too_large')
+    } catch (e: any) {
+      const err: any = new Error(e?.message === 'file_too_large' ? 'File too large for OCR.' : 'Could not read the selected file.')
+      err.code = e?.message || 'file_read_failed'
+      throw err
+    }
+
+    try {
+      base64 = await FileSystem.readAsStringAsync(readableUri, { encoding: FileSystem.EncodingType.Base64 })
+    } catch (e: any) {
+      // Final fallback: try fetch->blob for edge cases.
+      try {
+        const resp = await fetch(readableUri)
+        const b = await resp.blob()
+        const dataUrl: string = await new Promise((resolve, reject) => {
+          const reader: any = new (global as any).FileReader()
+          reader.onload = () => resolve(String(reader.result || ''))
+          reader.onerror = (err: any) => reject(err)
+          reader.readAsDataURL(b)
+        })
+        const parts = dataUrl.split(',')
+        base64 = parts.length > 1 ? parts[1] : ''
+      } catch {
+        const err: any = new Error('Could not read the selected file.')
+        err.code = 'file_read_failed'
+        throw err
+      }
+    }
+  } finally {
+    if (tempFileUri) {
+      try { await FileSystem.deleteAsync(tempFileUri, { idempotent: true }) } catch {}
+    }
   }
 
   const resp = await fetch(`${base}/.netlify/functions/ocr`, {
@@ -3089,13 +3152,13 @@ function ScanBillScreen() {
     if (res.canceled) return
     const asset = res.assets?.[0]
     if (!asset?.uri) return
-    setPendingAttachment({ uri: asset.uri, name: (asset.fileName || 'photo.jpg'), type: asset.type || 'image/jpeg' })
+    setPendingAttachment({ uri: asset.uri, name: (asset.fileName || 'photo.jpg'), type: (asset.mimeType || 'image/jpeg') })
     // Try QR decode first (web via ZXing), with up to 3 retries; fallback to OCR
     const decoded = await decodeImageQR(asset.uri, 3)
     if (decoded) {
       handleDecodedText(decoded)
     } else {
-      await extractWithOCR(asset.uri)
+      await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg')
     }
   }
 
@@ -3109,7 +3172,7 @@ function ScanBillScreen() {
     const file = res.assets?.[0]
     if (!file?.uri) return
     setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
-    await extractWithOCR(file.uri)
+    await extractWithOCR(file.uri, file.mimeType || 'application/pdf')
   }
 
   async function decodeImageQR(uri: string, retries: number): Promise<string | null> {
@@ -3190,7 +3253,7 @@ function ScanBillScreen() {
     setTorch('off')
   }
 
-  async function extractWithOCR(uri: string) {
+  async function extractWithOCR(uri: string, contentType?: string) {
     if (!entitlements.canUseOCR) {
       showUpgradeAlert('ocr')
       return
@@ -3198,7 +3261,7 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: false })
+      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: false, contentType })
       if (typeof ocrText === 'string' && ocrText.trim()) {
         setRawText(ocrText)
         setFormat(mode ? `OCR (${mode})` : 'OCR')
