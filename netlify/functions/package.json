@@ -12,6 +12,7 @@
     "google-auth-library": "9.0.0",
     "pdfkit": "0.17.2",
     "pdf-parse": "1.1.1",
+    "sharp": "0.33.5",
     "stripe": "16.6.0"
   }
 }

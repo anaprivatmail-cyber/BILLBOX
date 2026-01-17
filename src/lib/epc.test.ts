@@ -128,6 +128,24 @@ describe('parsePaymentQR (EPC/UPN)', () => {
     expect(res?.reference).toBeUndefined()
   })
 
+  it('prefers IBAN-labeled line over IBAN-looking sklic', () => {
+    const ibanInSklic = makeIban('SI', '121212121212121')
+    const realIban = makeIban('SI', '343434343434343')
+    const upn = [
+      'UPNQR',
+      'Prejemnik: Test d.o.o.',
+      // Some payloads/OCR might contain an IBAN-looking token in the reference.
+      `Sklic: ${ibanInSklic}`,
+      `IBAN: ${spacedIban(realIban)}`,
+      'Namen: Test',
+      'EUR 1,00',
+    ].join('\n')
+
+    const res = parsePaymentQR(upn)
+    expect(res).not.toBeNull()
+    expect(res?.iban).toBe(realIban)
+  })
+
   it('heuristically extracts payee name near UPN header when unlabeled', () => {
     const iban = makeIban('SI', '222233334444555')
     const upn = [

@@ -48,4 +48,24 @@ describe('OCR extraction (text heuristics)', () => {
     expect(sanitized.supplier).toBe('Acme Corp')
     expect(sanitized.creditor_name).toBe('Acme Corp')
   })
+
+  it('extracts supplier and invoice number even when supplier is unlabeled', () => {
+    const rawText = [
+      'RAČUN',
+      'ELEKTRO TEST d.d.',
+      'Ulica 1',
+      '1000 Ljubljana',
+      'Račun št:',
+      '2026-001',
+      'Znesek: EUR 10,55',
+      'Rok plačila: 12.03.2026',
+    ].join('\n')
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.supplier).toBe('ELEKTRO TEST d.d.')
+    expect(sanitized.creditor_name).toBe('ELEKTRO TEST d.d.')
+    expect(sanitized.invoice_number).toBe('2026-001')
+  })
 })

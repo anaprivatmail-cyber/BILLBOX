@@ -91,11 +91,19 @@ Expo reads only `process.env.EXPO_PUBLIC_*` at runtime. Do not rely on Netlify e
 
 Set these in Netlify → Site settings → Environment variables:
 
-- `GOOGLE_SERVICE_ACCOUNT_JSON`: JSON string of service account with Vision API access
+- `SUPABASE_URL`: Supabase project URL (server-side)
+- `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key (required for auth + quota/entitlements)
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (or `GOOGLE_APPLICATION_CREDENTIALS_JSON`): JSON string of a Google service account with Vision API access
   - Must include `private_key` and `client_email`
-- (Optional) Supabase service role key if server-side writes are needed
+
+Optional:
+- `OPENAI_API_KEY`: enables AI assistance for non-payment-critical fields (never amount)
+- `ENABLE_OCR_AI`: set to `false`/`0` to disable AI OCR even if a key exists (otherwise it is enabled when `OPENAI_API_KEY` exists)
+- `OPENAI_MODEL`: overrides the default model
 
 No OCR keys in frontend code. Expo uploads the file to the Netlify OCR function; the function returns parsed JSON only.
+
+Tip (local dev): see `netlify/functions/.env.example` for a safe template.
 
 ### Features Implemented
 

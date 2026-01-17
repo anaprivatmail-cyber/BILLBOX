@@ -621,11 +621,29 @@ function parseUPN(text: string): EPCResult | null {
     const lines = normalized.split(/\n+/).map((l) => l.trim()).filter(Boolean)
     const joined = lines.join('\n')
     if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
-    const ibanCandidates = joined.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
-    const iban = (ibanCandidates
-      .map((c) => normalizeIban(c))
-      .filter((c): c is string => Boolean(c))
-      .find((c) => isValidIbanChecksum(c)))
+    const findValidIbanInText = (t: string): string | undefined => {
+      const matches = String(t || '').match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
+      for (const m of matches) {
+        const cand = normalizeIban(m)
+        if (!cand) continue
+        if (isValidIbanChecksum(cand)) return cand
+      }
+      return undefined
+    }
+    // IBAN: prefer lines explicitly labeled as IBAN; avoid accidentally treating reference (Sklic/Model) as IBAN.
+    const iban = (() => {
+      for (const l of lines) {
+        if (!/\biban\b/i.test(l)) continue
+        const v = findValidIbanInText(l)
+        if (v) return v
+      }
+      for (const l of lines) {
+        if (/\b(sklic|reference|ref\.?|model)\b/i.test(l)) continue
+        const v = findValidIbanInText(l)
+        if (v) return v
+      }
+      return findValidIbanInText(joined)
+    })()
     let amount: number | undefined
     let currency: string | undefined
 
@@ -679,7 +697,6 @@ function parseUPN(text: string): EPCResult | null {
       const cand = normalizeReference(labeled[2])
       if (!cand) continue
       if (iban && cand === iban) continue
-      if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
       reference = cand
       break
     }
@@ -701,15 +718,17 @@ function parseUPN(text: string): EPCResult | null {
         const cand = normalizeReference(m[0])
         if (!cand) continue
         if (iban && cand === iban) continue
-        if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
         reference = cand
         break
       }
     }
     let purpose: string | undefined
     for (const l of lines) {
-      const m = l.match(/namen:?\s*(.+)|purpose:?\s*(.+)/i)
-      if (m) { purpose = (m[1] || m[2] || '').trim(); if (purpose) break }
+      const m = l.match(/(?:namen|purpose)\s*:?\s*(.+)$/i)
+      if (m) {
+        purpose = String(m[1] || '').trim()
+        if (purpose) break
+      }
     }
 
     // UPNQR often contains unlabeled fields; pick a conservative purpose candidate.
@@ -734,8 +753,13 @@ function parseUPN(text: string): EPCResult | null {
     }
     let creditor_name: string | undefined
     for (const l of lines) {
-      const m = l.match(/prejemnik|recipient|name:?\s*(.+)/i)
-      if (m) { const n = (m[1] || '').trim(); if (n) { creditor_name = n; break } }
+      const m = l.match(/(?:prejemnik|recipient|payee|upravi\w*|name)\s*:?\s*(.+)$/i)
+      if (!m) continue
+      const n = String(m[1] || '').trim()
+      if (!n) continue
+      if (/UPNQR|\bUPN\b/i.test(n)) continue
+      creditor_name = n
+      break
     }
 
     // UPNQR often contains unlabeled creditor name; choose the last reasonable text line before IBAN.
@@ -1522,13 +1546,14 @@ async function deleteAllAttachmentsForRecord(spaceId: string | null | undefined,
 }
 
 // --- OCR helper (Netlify function wrapper) ---
-async function performOCR(uri: string): Promise<{ fields: any; summary: string; rawText?: string }>{
+async function performOCR(
+  uri: string,
+  opts?: { preferQr?: boolean },
+): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any }>{
   const base = getFunctionsBase()
   if (!base) {
     throw new Error('OCR unavailable: missing EXPO_PUBLIC_FUNCTIONS_BASE')
   }
-  const fileResp = await fetch(uri)
-  const blob = await fileResp.blob()
   const supabase = getSupabase()
   let authHeader: Record<string, string> = {}
   if (supabase) {
@@ -1538,10 +1563,52 @@ async function performOCR(uri: string): Promise<{ fields: any; summary: string; 
       if (token) authHeader = { Authorization: `Bearer ${token}` }
     } catch {}
   }
+  if (!authHeader.Authorization) {
+    const err: any = new Error('Sign in to use OCR.')
+    err.status = 401
+    err.code = 'auth_required'
+    throw err
+  }
+
+  // Reading local URIs via fetch/blob is flaky on Android (content://, large PDFs).
+  // Use expo-file-system base64 and send JSON (server supports imageBase64/pdfBase64).
+  let base64: string
+  let contentType = 'application/octet-stream'
+  try {
+    const info = await FileSystem.getInfoAsync(uri)
+    if (!info?.exists) throw new Error('file_missing')
+    // Guard: avoid trying to base64-encode huge files on device.
+    if (typeof info.size === 'number' && info.size > 12 * 1024 * 1024) {
+      throw new Error('file_too_large')
+    }
+  } catch (e: any) {
+    const err: any = new Error(e?.message === 'file_too_large' ? 'File too large for OCR.' : 'Could not read the selected file.')
+    err.code = e?.message || 'file_read_failed'
+    throw err
+  }
+
+  try {
+    // Best-effort mime inference from extension.
+    const lower = String(uri || '').toLowerCase()
+    if (lower.endsWith('.pdf')) contentType = 'application/pdf'
+    else if (lower.endsWith('.png')) contentType = 'image/png'
+    else if (lower.endsWith('.webp')) contentType = 'image/webp'
+    else contentType = 'image/jpeg'
+    base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 })
+  } catch (e: any) {
+    const err: any = new Error('Could not read the selected file.')
+    err.code = 'file_read_failed'
+    throw err
+  }
+
   const resp = await fetch(`${base}/.netlify/functions/ocr`, {
     method: 'POST',
-    headers: { 'Content-Type': blob.type || 'application/octet-stream', ...authHeader },
-    body: blob,
+    headers: { 'Content-Type': 'application/json', ...authHeader },
+    body: JSON.stringify(
+      contentType === 'application/pdf'
+        ? { pdfBase64: base64, contentType, preferQr: Boolean(opts?.preferQr) }
+        : { imageBase64: `data:${contentType};base64,${base64}`, contentType, preferQr: Boolean(opts?.preferQr) },
+    ),
   })
   const data = await resp.json().catch(() => null as any)
   if (!resp.ok || !data?.ok) {
@@ -1553,6 +1620,8 @@ async function performOCR(uri: string): Promise<{ fields: any; summary: string; 
   }
   const f = data.fields || {}
   const rawText = typeof data.rawText === 'string' ? data.rawText : ''
+  const mode = typeof data.mode === 'string' ? data.mode : undefined
+  const meta = data && typeof data.meta === 'object' ? data.meta : undefined
   const parts: string[] = []
   if (f.creditor_name || f.supplier) parts.push(`Creditor: ${f.creditor_name || f.supplier}`)
   if (typeof f.amount === 'number' && f.currency) parts.push(`Amount: ${f.currency} ${f.amount}`)
@@ -1562,7 +1631,7 @@ async function performOCR(uri: string): Promise<{ fields: any; summary: string; 
   if (f.purpose) parts.push(`Purpose: ${f.purpose}`)
   if (f.payment_details) parts.push(`Payment details: ${String(f.payment_details).slice(0, 200)}`)
   const summary = parts.join('\n') || 'No fields found'
-  return { fields: f, summary, rawText }
+  return { fields: f, summary, rawText, mode, meta }
 }
 
 function extractWarrantyFieldsFromOcr(rawText: string): {
@@ -2658,6 +2727,10 @@ function ScanBillScreen() {
   const [cameraVisible, setCameraVisible] = useState(true)
   const [missingManualVisible, setMissingManualVisible] = useState(false)
 
+  const [reviewVisible, setReviewVisible] = useState(false)
+  const [reviewMeta, setReviewMeta] = useState<any | null>(null)
+  const [reviewPick, setReviewPick] = useState<{ iban?: string; reference?: string; amount?: number; currency?: string } | null>(null)
+
   function looksLikeMisassignedName(input: any): boolean {
     const s = (input ?? '').toString().trim()
     if (!s) return true
@@ -2722,12 +2795,30 @@ function ScanBillScreen() {
 
   function extractFirstValidIban(text: string): string | null {
     const raw = String(text || '')
-    const matches = raw.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
-    for (const m of matches) {
-      const cand = normalizeIban(m)
-      if (isValidIbanChecksum(cand)) return cand
+    const lines = raw.replace(/\r/g, '').split(/\n+/)
+
+    const findIn = (s: string): string | null => {
+      const matches = String(s || '').match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
+      for (const m of matches) {
+        const cand = normalizeIban(m)
+        if (isValidIbanChecksum(cand)) return cand
+      }
+      return null
     }
-    return null
+
+    // Prefer explicit IBAN-labeled lines.
+    for (const l of lines) {
+      if (!/\biban\b/i.test(l)) continue
+      const v = findIn(l)
+      if (v) return v
+    }
+    // Avoid extracting IBANs from reference/model lines (these can look IBAN-ish in SI).
+    for (const l of lines) {
+      if (/\b(sklic|reference|ref\.?|model)\b/i.test(l)) continue
+      const v = findIn(l)
+      if (v) return v
+    }
+    return findIn(raw)
   }
 
   function normalizeReference(input: string): string {
@@ -2830,25 +2921,17 @@ function ScanBillScreen() {
       if (!invoiceNumber.trim()) setInvoiceNumber(invCandidate)
     }
 
-    const foundIban = extractFirstValidIban(rawIban) || extractFirstValidIban(rawPaymentDetails) || extractFirstValidIban(rawText) || extractFirstValidIban(rawRef)
+    // Bank-level rule: do not guess critical payment fields.
+    // Only fill IBAN/reference/purpose when they are explicitly extracted.
+    const foundIban = extractFirstValidIban(rawIban)
     if (foundIban) {
       setIban(foundIban)
     } else if (rawIban) {
-      // Never shove arbitrary OCR/QR junk into the IBAN field.
       warnings.push(tr('IBAN could not be validated. Please check it.'))
     }
 
     let ref = normalizeReference(rawRef)
-    if (!ref) {
-      const extracted = extractReferenceCandidate(rawPaymentDetails) || extractReferenceCandidate(rawText)
-      if (extracted) ref = extracted
-    }
-    // Guardrails: reference must not be a valid IBAN.
     if (ref) {
-      if (looksLikeIban(ref) && isValidIbanChecksum(ref)) {
-        warnings.push(tr('Reference looked like an IBAN; it was ignored.'))
-        ref = ''
-      }
       if (foundIban && ref === foundIban) {
         warnings.push(tr('Reference matched the IBAN; it was ignored.'))
         ref = ''
@@ -2857,19 +2940,7 @@ function ScanBillScreen() {
     if (ref) setReference(ref)
 
     const purposeClean = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
-    const purposeFromText = extractPurposeFromText(rawText)
-    const purposeFinal = purposeClean || purposeFromText || ''
-    if (purposeFinal) {
-      setPurpose(purposeFinal)
-    } else if (!purpose.trim() && invCandidate) {
-      // If purpose isn't explicitly present, using the invoice/document number is a safe, common fallback.
-      setPurpose(invCandidate)
-    }
-
-    // Only fill paymentDetails if it looks like actual routing/SWIFT/account info (not random OCR garbage).
-    if (rawPaymentDetails && rawPaymentDetails.trim().length >= 8) {
-      setPaymentDetails(rawPaymentDetails.trim())
-    }
+    if (purposeClean) setPurpose(purposeClean)
 
     setIbanHint(null)
     setReferenceHint(null)
@@ -2901,7 +2972,13 @@ function ScanBillScreen() {
   function handleReferenceChange(next: string) {
     const norm = normalizeReference(next)
     setReference(norm)
-    if (norm && looksLikeIban(norm) && isValidIbanChecksum(norm)) {
+    const currentIban = normalizeIban(iban)
+    if (norm && currentIban && norm === currentIban) {
+      setReferenceHint(tr('Reference matched the IBAN; it was ignored.'))
+      return
+    }
+    // Only warn about IBAN-looking references when the IBAN field is empty (otherwise SI references can false-positive).
+    if (!currentIban && norm && looksLikeIban(norm) && isValidIbanChecksum(norm)) {
       setReferenceHint(tr('This looks like an IBAN, not a reference.'))
     } else {
       setReferenceHint(null)
@@ -2917,7 +2994,7 @@ function ScanBillScreen() {
     }
     if (!reference.trim()) {
       const extractedRef = extractReferenceCandidate(next)
-      if (extractedRef && !(looksLikeIban(extractedRef) && isValidIbanChecksum(extractedRef))) setReference(extractedRef)
+      if (extractedRef) setReference(extractedRef)
     }
   }
 
@@ -3066,34 +3143,6 @@ function ScanBillScreen() {
     if (!p) {
       setFormat('Unknown')
       setParsed(null)
-      // Fallback to AI extraction from text when QR parsing fails.
-      if (entitlements.canUseOCR) {
-        ;(async () => {
-          try {
-            setOcrError(null)
-            setOcrBusy(true)
-            const { fields: f } = await extractTextWithAI(t)
-            const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
-            if (supplierName) setSupplier(supplierName)
-            const cred = pickNameCandidate(f.creditor_name, supplierName)
-            if (cred) setCreditorName(cred)
-            applyExtractedPaymentFields({ ...f, rawText: t })
-            if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
-            if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
-            if (typeof f.amount === 'number') setAmountStr(String(f.amount))
-            if (f.currency) setCurrency(f.currency)
-            if (f.due_date) setDueDate(f.due_date)
-            setUseDataActive(true)
-            setCameraVisible(false)
-            setTorch('off')
-          } catch (e: any) {
-            Alert.alert(tr('Unsupported QR format'), e?.message || tr('Unsupported QR format'))
-          } finally {
-            setOcrBusy(false)
-          }
-        })()
-        return
-      }
       Alert.alert(tr('Unsupported QR format'))
       return
     }
@@ -3109,9 +3158,11 @@ function ScanBillScreen() {
     if (p.currency) setCurrency(p.currency)
     if (p.due_date) setDueDate(p.due_date)
 
-    // If QR parsing is incomplete, ask AI to classify and fill the missing fields from the raw payload.
+    // Reliability: for structured payment QRs (EPC/UPN), do NOT automatically run AI on the payload.
+    // AI extraction is best-effort and can misassign fields; keep QR parsing deterministic.
     const missingCritical = !p.iban || !p.reference || !p.purpose || !p.creditor_name
-    if (missingCritical && entitlements.canUseOCR) {
+    const isStructuredPaymentQr = Boolean(epc || upn)
+    if (missingCritical && entitlements.canUseOCR && !isStructuredPaymentQr) {
       ;(async () => {
         try {
           setOcrError(null)
@@ -3147,10 +3198,10 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText } = await performOCR(uri)
+      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: false })
       if (typeof ocrText === 'string' && ocrText.trim()) {
         setRawText(ocrText)
-        setFormat('OCR')
+        setFormat(mode ? `OCR (${mode})` : 'OCR')
         setParsed(f)
       }
       const supplierName = pickNameCandidate(f.creditor_name, f.supplier, supplier)
@@ -3163,6 +3214,28 @@ function ScanBillScreen() {
       if (typeof f.amount === 'number') setAmountStr(String(f.amount))
       if (f.currency) setCurrency(f.currency)
       if (f.due_date) setDueDate(f.due_date)
+
+      // Exceptional safety net: only when OCR says it's ambiguous AND the field is missing.
+      // Keep this rare; do not bother users when extraction is confident.
+      try {
+        const doubt = meta?.doubt || meta?.doubt === false ? meta.doubt : meta?.doubt
+        const candidates = meta?.candidates
+        const needIban = !String(f?.iban || '').trim() && !iban.trim() && Array.isArray(candidates?.ibans) && candidates.ibans.length > 1
+        const needRef = !String(f?.reference || '').trim() && !reference.trim() && Array.isArray(candidates?.references) && candidates.references.length > 1
+        const needAmt = !(typeof f?.amount === 'number' && f?.currency) && !amountStr.trim() && Array.isArray(candidates?.amounts) && candidates.amounts.length > 1
+        const anyNeed = Boolean(needIban || needRef || needAmt)
+        const isAmbiguous = Boolean(meta?.any || doubt?.iban || doubt?.reference || doubt?.amount)
+        if (isAmbiguous && anyNeed) {
+          setReviewMeta(meta)
+          setReviewPick({
+            iban: needIban ? String(candidates.ibans[0] || '') : undefined,
+            reference: needRef ? String(candidates.references[0] || '') : undefined,
+            amount: needAmt ? Number(candidates.amounts[0]?.amount) : undefined,
+            currency: needAmt ? String(candidates.amounts[0]?.currency || 'EUR') : undefined,
+          })
+          setReviewVisible(true)
+        }
+      } catch {}
       setUseDataActive(true)
       setCameraVisible(false)
       setTorch('off')
@@ -3171,24 +3244,58 @@ function ScanBillScreen() {
         // Optional: leave silent, but keep summary available via rawText.
       }
     } catch (e: any) {
-        const msg = e?.message || 'OCR failed'
-        const status = (e as any)?.status
-        const code = (e as any)?.code
-        console.warn('OCR failed:', { status, code, msg })
-        if (status === 401 || code === 'auth_required' || /sign in/i.test(msg)) {
-          setOcrError(tr('Please sign in again.'))
-          Alert.alert(tr('OCR unavailable'), tr('Please sign in again.'))
-          return
-        }
-        // Avoid leaking technical errors into UI.
-        setOcrError(tr('OCR failed'))
-        if (/quota/i.test(msg) || /ocr_quota_exceeded/i.test(msg)) {
-          showUpgradeAlert('ocr')
-        }
+      const msg = e?.message || 'OCR failed'
+      const status = (e as any)?.status
+      const code = (e as any)?.code
+      console.warn('OCR failed:', { status, code, msg })
+
+      if (status === 401 || code === 'auth_required' || /sign in/i.test(msg)) {
+        setOcrError(tr('Please sign in again.'))
+        Alert.alert(tr('OCR unavailable'), tr('Please sign in again.'))
+        return
+      }
+
+      if (code === 'ocr_not_allowed') {
+        setOcrError(tr('OCR not available on your plan.'))
+        showUpgradeAlert('ocr')
+        return
+      }
+
+      if (code === 'ocr_quota_exceeded' || /quota/i.test(msg)) {
+        setOcrError(tr('OCR monthly quota exceeded.'))
+        showUpgradeAlert('ocr')
+        return
+      }
+
+      if (code === 'pdf_no_text') {
+        setOcrError(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        Alert.alert(tr('OCR failed'), tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        return
+      }
+
+      if (code === 'file_too_large') {
+        setOcrError(tr('File too large for OCR.'))
+        Alert.alert(tr('OCR failed'), tr('File too large for OCR.'))
+        return
+      }
+
+      // Default: show the server/user-facing message (not stack traces).
+      setOcrError(String(msg || tr('OCR failed')))
     } finally {
       setOcrBusy(false)
     }
   }
+
+  const applyReviewPick = useCallback(() => {
+    const pick = reviewPick || {}
+    if (pick.iban && !iban.trim()) setIban(String(pick.iban))
+    if (pick.reference && !reference.trim()) setReference(String(pick.reference))
+    if (typeof pick.amount === 'number' && Number.isFinite(pick.amount) && !amountStr.trim()) setAmountStr(String(pick.amount))
+    if (pick.currency && typeof pick.currency === 'string') setCurrency(String(pick.currency))
+    setReviewVisible(false)
+    setReviewMeta(null)
+    setReviewPick(null)
+  }, [reviewPick, iban, reference, amountStr, currency])
   const handleManualExtract = () => {
     if (!manual.trim()) {
       setMissingManualVisible(true)
@@ -3528,6 +3635,27 @@ function ScanBillScreen() {
               <Badge label={format ? `${tr('Detected:')} ${format}` : tr('Awaiting data')} tone={format ? 'info' : 'neutral'} />
             </View>
           </Disclosure>
+
+          <Disclosure title={tr('Last captured raw text (debug)')}>
+            {rawText?.trim() ? (
+              <>
+                <Text style={styles.mutedText}>{tr('This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.')}</Text>
+                <Surface style={{ padding: 10, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.03)' }}>
+                  <Text selectable style={{ fontSize: 12, lineHeight: 16 }}>{rawText}</Text>
+                </Surface>
+                <View style={styles.actionRow}>
+                  <AppButton
+                    label={tr('Load into manual input')}
+                    variant="secondary"
+                    iconName="arrow-up-outline"
+                    onPress={() => setManual(rawText)}
+                  />
+                </View>
+              </>
+            ) : (
+              <Text style={styles.mutedText}>{tr('No captured text yet. Scan a QR or import a file first.')}</Text>
+            )}
+          </Disclosure>
         </Surface>
 
         <Surface elevated>
@@ -3780,6 +3908,82 @@ function ScanBillScreen() {
       </View>
 
       <Modal
+        visible={reviewVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReviewVisible(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', padding: 18, justifyContent: 'center' }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 14, padding: 14, maxHeight: '85%' }}>
+            <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 6 }}>{tr('Confirm extracted data')}</Text>
+            <Text style={{ opacity: 0.8, marginBottom: 10 }}>{tr('The document seems ambiguous. Please pick the correct value (optional).')}</Text>
+
+            <ScrollView style={{ maxHeight: 360 }}>
+              {Array.isArray(reviewMeta?.candidates?.ibans) && reviewMeta.candidates.ibans.length > 1 ? (
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={{ fontWeight: '700', marginBottom: 6 }}>{tr('IBAN')}</Text>
+                  {reviewMeta.candidates.ibans.slice(0, 6).map((v: string) => (
+                    <Pressable
+                      key={`iban_${v}`}
+                      onPress={() => setReviewPick((p: any) => ({ ...(p || {}), iban: v }))}
+                      style={{ paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: (reviewPick?.iban === v ? '#111' : '#ddd'), marginBottom: 6 }}
+                    >
+                      <Text>{v}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
+              {Array.isArray(reviewMeta?.candidates?.references) && reviewMeta.candidates.references.length > 1 ? (
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={{ fontWeight: '700', marginBottom: 6 }}>{tr('Reference')}</Text>
+                  {reviewMeta.candidates.references.slice(0, 8).map((v: string) => (
+                    <Pressable
+                      key={`ref_${v}`}
+                      onPress={() => setReviewPick((p: any) => ({ ...(p || {}), reference: v }))}
+                      style={{ paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: (reviewPick?.reference === v ? '#111' : '#ddd'), marginBottom: 6 }}
+                    >
+                      <Text>{v}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
+              {Array.isArray(reviewMeta?.candidates?.amounts) && reviewMeta.candidates.amounts.length > 1 ? (
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={{ fontWeight: '700', marginBottom: 6 }}>{tr('Amount')}</Text>
+                  {reviewMeta.candidates.amounts.slice(0, 6).map((a: any, idx: number) => {
+                    const cur = String(a?.currency || 'EUR')
+                    const amt = typeof a?.amount === 'number' ? a.amount : Number(a?.amount)
+                    const label = Number.isFinite(amt) ? `${cur} ${amt}` : `${cur}`
+                    const isSel = reviewPick?.amount === amt && (reviewPick?.currency || 'EUR') === cur
+                    return (
+                      <Pressable
+                        key={`amt_${idx}_${cur}_${amt}`}
+                        onPress={() => setReviewPick((p: any) => ({ ...(p || {}), amount: amt, currency: cur }))}
+                        style={{ paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: (isSel ? '#111' : '#ddd'), marginBottom: 6 }}
+                      >
+                        <Text>{label}</Text>
+                      </Pressable>
+                    )
+                  })}
+                </View>
+              ) : null}
+            </ScrollView>
+
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 }}>
+              <TouchableOpacity onPress={() => { setReviewVisible(false); setReviewMeta(null); setReviewPick(null) }} style={{ paddingVertical: 10, paddingHorizontal: 12 }}>
+                <Text style={{ fontWeight: '700' }}>{tr('Skip')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={applyReviewPick} style={{ paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#111', borderRadius: 10 }}>
+                <Text style={{ color: '#fff', fontWeight: '700' }}>{tr('Apply')}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
         visible={missingManualVisible}
         transparent
         animationType="fade"
@@ -3874,7 +4078,7 @@ function InboxScreen() {
           try {
             // Quiet auto-OCR for newly received email items so "Attach to bill" is immediately useful.
             const sourceUri = (it as any).localPath || it.uri
-            const { fields, summary } = await performOCR(sourceUri)
+            const { fields, summary } = await performOCR(sourceUri, { preferQr: false })
             const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
             await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : (it.status || 'new') })
             if (looksLikeBill) await cancelInboxReviewReminder(it.id, effectiveSpaceId)
@@ -3938,7 +4142,7 @@ function InboxScreen() {
     try {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
-      const { fields, summary } = await performOCR(sourceUri)
+      const { fields, summary } = await performOCR(sourceUri, { preferQr: false })
 
       const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
       await updateInboxItem(spaceId, item.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
@@ -9754,7 +9958,7 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
         if (entitlements.plan === 'pro' && entitlements.canUseOCR) {
           try {
             const sourceUri = (item as any).localPath || item.uri
-            const { fields, summary } = await performOCR(sourceUri)
+            const { fields, summary } = await performOCR(sourceUri, { preferQr: false })
             const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
             await updateInboxItem(targetSpaceId, item.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
             if (looksLikeBill) await cancelInboxReviewReminder(item.id, targetSpaceId)

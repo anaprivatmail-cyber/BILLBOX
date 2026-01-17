@@ -107,12 +107,29 @@ export function parseUPN(text: string): EPCResult | null {
     const joined = lines.join('\n')
     // Detect presence
     if (!/UPNQR|UPN/i.test(joined) && !/SI\d{2}[A-Z0-9]{15,}/.test(joined)) return null
-    // IBAN
-    const ibanCandidates = joined.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
-    const iban = (ibanCandidates
-      .map((c) => normalizeIban(c))
-      .filter((c): c is string => Boolean(c))
-      .find((c) => isValidIbanChecksum(c)))
+    const findValidIbanInText = (t: string): string | undefined => {
+      const matches = String(t || '').match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
+      for (const m of matches) {
+        const cand = normalizeIban(m)
+        if (!cand) continue
+        if (isValidIbanChecksum(cand)) return cand
+      }
+      return undefined
+    }
+    // IBAN: prefer lines explicitly labeled as IBAN; avoid treating reference (Sklic/Model) as IBAN.
+    const iban = (() => {
+      for (const l of lines) {
+        if (!/\biban\b/i.test(l)) continue
+        const v = findValidIbanInText(l)
+        if (v) return v
+      }
+      for (const l of lines) {
+        if (/\b(sklic|reference|ref\.?|model)\b/i.test(l)) continue
+        const v = findValidIbanInText(l)
+        if (v) return v
+      }
+      return findValidIbanInText(joined)
+    })()
     const hasIban = Boolean(iban)
     // Amount: prefer explicit EUR or comma/decimal
     let amount: number | undefined
@@ -142,7 +159,6 @@ export function parseUPN(text: string): EPCResult | null {
       const cand = normalizeReference(labeled[2])
       if (!cand) continue
       if (iban && cand === iban) continue
-      if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
       reference = cand
       if (reference) break
     }
@@ -154,7 +170,6 @@ export function parseUPN(text: string): EPCResult | null {
         const cand = normalizeReference(m[0])
         if (!cand) continue
         if (iban && cand === iban) continue
-        if (looksLikeIban(cand) && isValidIbanChecksum(cand)) continue
         reference = cand
         if (reference) break
       }

@@ -118,12 +118,12 @@ export async function handler(event) {
     }
 
     // Resolve linked warranties for these bills
-    const billIds = billList.map((b) => b.id)
+    const billIdList = billList.map((b) => b.id)
     let warranties = []
     try {
       let wq = supabase.from('warranties').select('*').eq('user_id', userId)
       if (spaceId) wq = wq.eq('space_id', spaceId)
-      if (billIds.length) wq = wq.in('bill_id', billIds)
+      if (billIdList.length) wq = wq.in('bill_id', billIdList)
       const { data } = await wq
       warranties = data || []
     } catch {
