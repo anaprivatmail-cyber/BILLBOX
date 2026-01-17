@@ -102,16 +102,54 @@ function extractIbanCandidates(rawText) {
 }
 
 function extractReferenceCandidates(rawText) {
-  const raw = String(rawText || '')
-  const matches = raw.match(/\b(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,})\b/gi) || []
-  const unique = [...new Set(matches.map((m) => String(m || '').replace(/\s+/g, '').toUpperCase()))]
-  return unique
+  const text = String(rawText || '').replace(/\r/g, '')
+  const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+  // Allow spaces inside the token so we can capture whole strings like:
+  // "SI56 0292 1503 0596 1290" (IBAN) and then exclude it by checksum.
+  const refTokenRe = /\b(SI\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,}|RF\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,})\b/gi
+
+  const normalizeRef = (s) => {
+    const upper = String(s || '').toUpperCase()
+    const m = upper.match(/\b(SI\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,}|RF\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,})\b/i)
+    const picked = m ? m[1] : upper
+    const compact = picked.replace(/\s+/g, '')
+    // If it is actually an IBAN (checksum-valid), it must not be considered a payment reference.
+    if (isValidIbanChecksum(compact)) return null
+    // Keep only plausible references.
+    if (/^SI\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return compact
+    if (/^RF\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return compact
+    return null
+  }
+
+  const out = []
+  const seen = new Set()
+
+  // Prefer explicitly labeled lines.
+  for (const l of lines) {
+    const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
+    if (!labeled) continue
+    const cand = normalizeRef(labeled[2])
+    if (!cand) continue
+    if (!seen.has(cand)) { seen.add(cand); out.push(cand) }
+  }
+
+  // Fallback: scan all text, but exclude IBANs.
+  const matches = text.match(refTokenRe) || []
+  for (const m of matches) {
+    const cand = normalizeRef(m)
+    if (!cand) continue
+    if (!seen.has(cand)) { seen.add(cand); out.push(cand) }
+  }
+  return out
 }
 
 function extractLabeledAmountCandidates(rawText) {
   const text = String(rawText || '').replace(/\r/g, '')
   const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
-  const amountLabels = /(total\s*due|amount\s*due|balance\s*due|grand\s*total|total|za\s*pla\S*|znesek\b|skupaj\b)/i
+  // Prefer payable/amount-due lines; avoid VAT/tax/subtotals.
+  const payableLabels = /(total\s*due|amount\s*due|balance\s*due|grand\s*total|za\s*pla\S*|za\s*pla\u010dat\S*|za\s*pla\u010dilo|za\s*pla\u010dati|payable|to\s*pay|pay\s*now)/i
+  const totalLabels = /(grand\s*total|\btotal\b|\bskupaj\b)/i
+  const ignoreContext = /(\bddv\b|\bvat\b|\btax\b|\bdavek\b|osnova|base\s*amount|\bsubtotal\b|sub\s*total|popust|discount|provizi\S*|fee\b|shipping|po\u0161tnina|delivery|surcharge)/i
   const currencyFromSymbol = (s) => {
     if (/€/.test(s)) return 'EUR'
     if (/[£]/.test(s)) return 'GBP'
@@ -120,20 +158,33 @@ function extractLabeledAmountCandidates(rawText) {
     return null
   }
   const out = []
+  const labelScore = (line) => {
+    const l = String(line || '')
+    const hasPayable = payableLabels.test(l)
+    const hasTotal = totalLabels.test(l)
+    const hasIgnore = ignoreContext.test(l)
+    // Ignore VAT/tax/subtotal lines unless they are explicitly payable/amount due.
+    if (hasIgnore && !hasPayable) return 0
+    if (hasPayable) return 8
+    if (hasTotal) return 6
+    return 0
+  }
+
   for (const line of lines) {
-    if (!amountLabels.test(line)) continue
+    const score = labelScore(line)
+    if (score <= 0) continue
     const codePrefix = line.match(/\b([A-Z]{3})\b\s*([0-9][0-9.,\s-]{0,20})/i)
     if (codePrefix) {
       const cur = String(codePrefix[1]).toUpperCase()
       const val = parseMoneyAmountLoose(codePrefix[2])
-      if (val != null && val > 0) out.push({ currency: cur, amount: val, line })
+      if (val != null && val > 0) out.push({ currency: cur, amount: val, line, score })
       continue
     }
     const sym = currencyFromSymbol(line)
     if (sym) {
       const m = line.match(/([0-9][0-9.,\s-]{0,20})\s*[$€£¥]/)
       const val = m ? parseMoneyAmountLoose(m[1]) : null
-      if (val != null && val > 0) out.push({ currency: sym, amount: val, line })
+      if (val != null && val > 0) out.push({ currency: sym, amount: val, line, score })
     }
   }
   // Dedupe by currency+amount
@@ -145,6 +196,7 @@ function extractLabeledAmountCandidates(rawText) {
     seen.add(key)
     uniq.push(x)
   }
+  uniq.sort((a, b) => (b.score || 0) - (a.score || 0))
   return uniq
 }
 
@@ -153,10 +205,13 @@ function buildExtractionMeta(rawText, sanitizedFields) {
   const refs = extractReferenceCandidates(rawText)
   const amounts = extractLabeledAmountCandidates(rawText)
 
+  // Only “strong” labeled candidates should trigger the review modal.
+  const strongAmounts = amounts.filter((a) => (a && typeof a.score === 'number' ? a.score : 0) >= 6)
+
   const candidates = {
     ibans: ibansScored.map((x) => x.iban),
     references: refs,
-    amounts,
+    amounts: strongAmounts.length ? strongAmounts : amounts,
   }
 
   const doubt = {
@@ -737,7 +792,21 @@ function extractFields(rawText) {
       return null
     }
 
-    const amountLabels = /(total\s*due|amount\s*due|balance\s*due|total|grand\s*total|za\s*pla\S*|znesek|skupaj|za\s*pla\S*)/i
+    const payableLabels = /(total\s*due|amount\s*due|balance\s*due|grand\s*total|za\s*pla\S*|za\s*pla\u010dat\S*|za\s*pla\u010dilo|za\s*pla\u010dati|payable|to\s*pay|pay\s*now)/i
+    const totalLabels = /(grand\s*total|\btotal\b|\bskupaj\b)/i
+    const ignoreContext = /(\bddv\b|\bvat\b|\btax\b|\bdavek\b|osnova|base\s*amount|\bsubtotal\b|sub\s*total|popust|discount|provizi\S*|fee\b|shipping|po\u0161tnina|delivery|surcharge)/i
+
+    const labelBoostForLine = (line) => {
+      const l = String(line || '')
+      const hasPayable = payableLabels.test(l)
+      const hasTotal = totalLabels.test(l)
+      const hasIgnore = ignoreContext.test(l)
+      // Ignore VAT/subtotal lines unless explicitly payable.
+      if (hasIgnore && !hasPayable) return 0
+      if (hasPayable) return 6
+      if (hasTotal) return 4
+      return 0
+    }
 
     const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
     const candidates = []
@@ -765,7 +834,11 @@ function extractFields(rawText) {
       }
     }
 
-    for (const l of lines) pushFromLine(l, amountLabels.test(l) ? 3 : 0)
+    for (const l of lines) {
+      const boost = labelBoostForLine(l)
+      if (boost <= 0) continue
+      pushFromLine(l, boost)
+    }
     // Fallback: search whole text for prefix/suffix codes.
     if (!candidates.length) {
       const all = text.match(/\b[A-Z]{3}\b\s*[0-9][0-9.,\s-]{0,20}|[0-9][0-9.,\s-]{0,20}\s*\b[A-Z]{3}\b/g) || []
@@ -774,12 +847,13 @@ function extractFields(rawText) {
 
     if (candidates.length) {
       candidates.sort((a, b) => b.score - a.score)
-      // Reliability: only accept amounts from labeled total/payable lines.
-      // (Avoids picking item quantities/prices like "1" or random line totals.)
-      const bestLabeled = candidates.find((c) => c.score >= 5) // 2 + labelBoost(3)
-      if (bestLabeled) {
-        out.currency = bestLabeled.currency
-        out.amount = bestLabeled.amount
+      // Reliability: accept only strong payable/total lines.
+      const bestPayable = candidates.find((c) => c.score >= 8) // 2 + payableBoost(6)
+      const bestTotal = candidates.find((c) => c.score >= 6) // 2 + totalBoost(4)
+      const best = bestPayable || bestTotal || null
+      if (best) {
+        out.currency = best.currency
+        out.amount = best.amount
       }
     }
   } catch {}
@@ -827,15 +901,18 @@ function extractFields(rawText) {
       if (!labeled) continue
       const v = String(labeled[2] || '').trim()
       if (!v) continue
-      const m = v.match(/\b(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,})\b/i)
+      const m = v.match(/\b(SI\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,}|RF\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,})\b/i)
       refVal = m ? m[1] : v
+      const compact = String(refVal || '').replace(/\s+/g, '').toUpperCase()
+      if (isValidIbanChecksum(compact)) { refVal = null; continue }
       break
     }
     if (!refVal) {
       for (const l of lines) {
-        if (/\biban\b/i.test(l)) continue
-        const m = l.match(/\b(SI\d{2}\s*[0-9A-Z\-\/]{4,}|RF\d{2}[0-9A-Z]{4,})\b/i)
+        const m = l.match(/\b(SI\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,}|RF\d{2}(?:[ \t]*[0-9A-Z\-\/]){4,})\b/i)
         if (!m) continue
+        const compact = String(m[1] || '').replace(/\s+/g, '').toUpperCase()
+        if (isValidIbanChecksum(compact)) continue
         refVal = m[1]
         break
       }
