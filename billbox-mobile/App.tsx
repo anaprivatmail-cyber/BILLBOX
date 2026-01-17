@@ -3049,6 +3049,10 @@ function ScanBillScreen() {
     const invCandidate = (rawInvoice || '').trim() || extractInvoiceNumberFromText(rawText) || ''
     if (invCandidate) {
       if (!invoiceNumber.trim()) setInvoiceNumber(invCandidate)
+      // Accounting rule: invoice number is mandatory, and can safely be used as default purpose.
+      if (!purpose.trim() && !String(rawPurpose || '').trim()) {
+        setPurpose(`Plačilo ${invCandidate}`)
+      }
     }
 
     // Bank-level rule: do not guess critical payment fields.
@@ -3522,6 +3526,10 @@ function ScanBillScreen() {
       Alert.alert(tr('Supplier required'), tr('Enter the supplier or issuer of the bill.'))
       return
     }
+    if (!invoiceNumber.trim()) {
+      Alert.alert(tr('Invoice number required'), tr('Enter the invoice number from the bill (required for accounting).'))
+      return
+    }
     if (!currency.trim()) {
       Alert.alert(tr('Currency required'), tr('Enter a currency (for example EUR).'))
       return
@@ -3535,8 +3543,11 @@ function ScanBillScreen() {
     const trimmedDue = dueDate.trim()
     const effectiveDueDate = trimmedDue || new Date().toISOString().slice(0, 10)
 
+    const inv = invoiceNumber.trim()
+    const defaultPurposeFromInvoice = inv ? `Plačilo ${inv}` : ''
+
     if (!archiveOnly) {
-      const effectivePurpose = purpose.trim() || purchaseItem.trim()
+      const effectivePurpose = purpose.trim() || defaultPurposeFromInvoice || purchaseItem.trim()
       const paymentDetailsTrimmed = paymentDetails.trim()
       if (!creditorName.trim()) {
         Alert.alert(tr('Creditor required'), tr('Enter the creditor/payee name (often the same as the supplier).'))
@@ -3618,7 +3629,7 @@ function ScanBillScreen() {
       }
       let savedId: string | null = null
       if (s) {
-        const effectivePurpose = purpose.trim() || purchaseItem.trim()
+        const effectivePurpose = purpose.trim() || defaultPurposeFromInvoice || purchaseItem.trim()
         const details = paymentDetails.trim()
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
@@ -3643,7 +3654,7 @@ function ScanBillScreen() {
         }
         savedId = data?.id || null
       } else {
-        const effectivePurpose = purpose.trim() || purchaseItem.trim()
+        const effectivePurpose = purpose.trim() || defaultPurposeFromInvoice || purchaseItem.trim()
         const details = paymentDetails.trim()
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
@@ -3882,12 +3893,15 @@ function ScanBillScreen() {
               </View>
               <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={setPurchaseItem} />
               <View style={{ gap: 6 }}>
-                <Text style={styles.fieldLabel}>{tr('Invoice number (optional)')}</Text>
+                <Text style={styles.fieldLabel}>
+                  {tr('Invoice number')}
+                  <Text style={styles.requiredStar}> *</Text>
+                </Text>
                 <AppInput
                   placeholder={tr('Invoice number')}
                   value={invoiceNumber}
                   onChangeText={setInvoiceNumber}
-                  hint={tr('Required for accounting export.')}
+                  hint={tr('Required for accounting.')}
                 />
               </View>
               <View style={styles.formRow}>
