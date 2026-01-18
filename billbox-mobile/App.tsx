@@ -1137,6 +1137,32 @@ async function listBills(
   return { data: (data as Bill[]) || [], error }
 }
 
+type ExportPayerScope = 'payer1' | 'payer2' | 'both'
+
+function localPayerIdsForExportScope(scope: ExportPayerScope): Array<'personal' | 'personal2'> {
+  if (scope === 'both') return ['personal', 'personal2']
+  if (scope === 'payer2') return ['personal2']
+  return ['personal']
+}
+
+async function resolveDbExportScopePayload(
+  supabase: SupabaseClient,
+  entitlements: EntitlementsSnapshot | null | undefined,
+  scope: ExportPayerScope,
+): Promise<{ spaceId?: string; spaceIds?: string[] } | null> {
+  const canUsePayer2 = Number(entitlements?.payerLimit || 1) >= 2
+  if ((scope === 'payer2' || scope === 'both') && !canUsePayer2) return null
+
+  const p1 = await resolveDbSpaceId(supabase, 'personal', entitlements || null)
+  const p2 = await resolveDbSpaceId(supabase, 'personal2', entitlements || null)
+  if (!p1) return null
+  if (scope === 'payer1') return { spaceId: p1 }
+  if (!p2) return null
+  if (scope === 'payer2') return { spaceId: p2 }
+  const ids = Array.from(new Set([p1, p2].filter(Boolean)))
+  return ids.length ? { spaceIds: ids } : null
+}
+
 async function createBill(supabase: SupabaseClient, input: CreateBillInput): Promise<{ data: Bill | null; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
   const dbSpaceId = await resolveDbSpaceId(supabase, input.space_id || null)
@@ -1203,14 +1229,34 @@ async function setBillInvoiceNumber(
   return { data: (data as Bill) || null, error }
 }
 
-async function listWarranties(supabase: SupabaseClient, _spaceId?: string | null): Promise<{ data: Warranty[]; error: PostgrestError | null }>{
+async function listWarranties(
+  supabase: SupabaseClient,
+  _spaceId?: string | string[] | null,
+  entitlements?: EntitlementsSnapshot | null,
+): Promise<{ data: Warranty[]; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
   let q = supabase
     .from('warranties')
     .select('*')
     .eq('user_id', userId)
-  const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
-  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
+
+  const requested = Array.isArray(_spaceId)
+    ? (_spaceId || []).filter(Boolean).length > 0
+    : Boolean(String(_spaceId || '').trim())
+
+  const rawIds = Array.isArray(_spaceId) ? (_spaceId || []) : [(_spaceId || null)]
+  const resolved = (await Promise.all(
+    rawIds
+      .map((v) => (typeof v === 'string' ? v.trim() : ''))
+      .filter(Boolean)
+      .map((sid) => resolveDbSpaceId(supabase, sid, entitlements || null)),
+  )).filter((v): v is string => Boolean(v && isUuidString(v)))
+
+  const unique = Array.from(new Set(resolved))
+  if (requested && unique.length === 0) return { data: [], error: null }
+  if (unique.length === 1) q = q.eq('space_id', unique[0])
+  else if (unique.length > 1) q = q.in('space_id', unique)
+
   const { data, error } = await q.order('created_at', { ascending: false })
   return { data: (data as Warranty[]) || [], error }
 }
@@ -9023,6 +9069,7 @@ function ExportsScreen() {
   const [exportBusyLabel, setExportBusyLabel] = useState('')
   const [bills, setBills] = useState<Bill[]>([])
   const [warranties, setWarranties] = useState<Warranty[]>([])
+  const [exportScope, setExportScope] = useState<ExportPayerScope>('payer1')
   const [range, setRange] = useState<{ start: string; end: string }>({
     start: route.params?.start || new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10),
     end: route.params?.end || new Date().toISOString().slice(0, 10),
@@ -9037,6 +9084,13 @@ function ExportsScreen() {
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const effectiveSpaceId = spaceId || space?.id || 'default'
   const { snapshot: entitlements } = useEntitlements()
+
+  const canUsePayer2 = Number(entitlements?.payerLimit || 1) >= 2
+    && isUuidString((entitlements as any)?.spaceId2)
+
+  useEffect(() => {
+    if (!canUsePayer2 && exportScope !== 'payer1') setExportScope('payer1')
+  }, [canUsePayer2, exportScope])
 
   const [iosPickerVisible, setIosPickerVisible] = useState(false)
   const [iosPickerField, setIosPickerField] = useState<'start' | 'end' | null>(null)
@@ -9109,18 +9163,31 @@ function ExportsScreen() {
 
   useEffect(() => { (async ()=>{
     if (spaceLoading || !space) return
+
+    const localIds = localPayerIdsForExportScope(exportScope)
+    const localParam: any = localIds.length > 1 ? localIds : localIds[0]
+
     if (supabase) {
-      const { data: b } = await listBills(supabase, spaceId)
-      setBills(b || [])
-      const { data: w } = await listWarranties(supabase, spaceId)
-      setWarranties(w || [])
+      const { data: b } = await listBills(supabase, localParam, entitlements)
+      setBills((b as any) || [])
+      const { data: w } = await listWarranties(supabase, localParam, entitlements)
+      setWarranties((w as any) || [])
     } else {
-      const locals = await loadLocalBills(spaceId)
-      setBills((locals as any) || [])
-      const wLocals = await loadLocalWarranties(spaceId)
-      setWarranties((wLocals as any) || [])
+      const mergedBills: any[] = []
+      const mergedWarranties: any[] = []
+      for (const sid of localIds) {
+        const locals = await loadLocalBills(sid)
+        for (const b of ((locals as any) || []) as any[]) mergedBills.push(b)
+        const wLocals = await loadLocalWarranties(sid)
+        for (const w of ((wLocals as any) || []) as any[]) mergedWarranties.push(w)
+      }
+      // De-dupe by id to avoid accidental duplicates.
+      const uniqBills = Array.from(new Map(mergedBills.map((b) => [String(b?.id || ''), b])).values()).filter(Boolean)
+      const uniqWarranties = Array.from(new Map(mergedWarranties.map((w) => [String(w?.id || ''), w])).values()).filter(Boolean)
+      setBills(uniqBills as any)
+      setWarranties(uniqWarranties as any)
     }
-  })() }, [supabase, spaceLoading, space, spaceId])
+  })() }, [entitlements, exportScope, spaceLoading, space, spaceId, supabase])
 
   useEffect(() => {
     if (!spaceId) {
@@ -9347,10 +9414,10 @@ function ExportsScreen() {
 
     const base = getFunctionsBase()
     const s = getSupabase()
-    const dbSpaceId = s ? await resolveDbSpaceId(s, spaceId, entitlements) : null
+    const scopePayload = s ? await resolveDbExportScopePayload(s, entitlements, exportScope) : null
 
     // Prefer server-side export only when status is not filtering
-    if (status === 'all' && base && s && dbSpaceId) {
+    if (status === 'all' && base && s && scopePayload) {
       try {
         const { data } = await s.auth.getSession()
         const token = data?.session?.access_token
@@ -9358,7 +9425,7 @@ function ExportsScreen() {
           const resp = await fetch(`${base}/.netlify/functions/export-csv`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ from: range.start, to: range.end, dateField: 'due_date', spaceId: dbSpaceId }),
+            body: JSON.stringify({ from: range.start, to: range.end, dateField: 'due_date', ...scopePayload }),
           })
           const json = await resp.json().catch(() => null)
           if (resp.ok && json?.ok && typeof json.csv === 'string') {
@@ -9414,11 +9481,16 @@ function ExportsScreen() {
       showUpgradeAlert('export')
       return
     }
+    const scopePayload = supabase ? await resolveDbExportScopePayload(supabase!, entitlements, exportScope) : null
+    if (supabase && !scopePayload) {
+      Alert.alert(tr('Export'), tr('Selected profile scope is unavailable.'))
+      return
+    }
     const res = await callExportFunction(
       'export-pdf',
       {
         kind: 'range',
-        spaceId: (supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null),
+        ...scopePayload,
         filters: {
           start: range.start,
           end: range.end,
@@ -9441,11 +9513,16 @@ function ExportsScreen() {
       showUpgradeAlert('export')
       return
     }
+    const scopePayload = supabase ? await resolveDbExportScopePayload(supabase!, entitlements, exportScope) : null
+    if (supabase && !scopePayload) {
+      Alert.alert(tr('Export'), tr('Selected profile scope is unavailable.'))
+      return
+    }
     const res = await callExportFunction(
       'export-pdf',
       {
         kind: 'single',
-        spaceId: (supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null),
+        ...scopePayload,
         billId: bill.id,
       },
       tr('Preparing PDF…')
@@ -9463,10 +9540,15 @@ function ExportsScreen() {
       Alert.alert(tr('No bills match the current filters.'), tr('Adjust the filters to include bills with attachments.'))
       return
     }
+    const scopePayload = supabase ? await resolveDbExportScopePayload(supabase!, entitlements, exportScope) : null
+    if (supabase && !scopePayload) {
+      Alert.alert(tr('Export'), tr('Selected profile scope is unavailable.'))
+      return
+    }
     const res = await callExportFunction(
       'export-zip',
       {
-        spaceId: (supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null),
+        ...scopePayload,
         filters: {
           start: range.start,
           end: range.end,
@@ -9563,7 +9645,24 @@ function ExportsScreen() {
                 <AppButton label={tr('Paid')} variant={status === 'paid' ? 'secondary' : 'ghost'} onPress={() => setStatus('paid')} />
                 <AppButton label={tr('Archived')} variant={status === 'archived' ? 'secondary' : 'ghost'} onPress={() => setStatus('archived')} />
               </View>
-              <Text style={styles.helperText}>{tr('Exports are scoped to the active profile and the filters above.')}</Text>
+              <View style={{ marginTop: themeSpacing.sm }}>
+                <Text style={styles.filterLabel}>{tr('Profile scope')}</Text>
+                <SegmentedControl
+                  value={exportScope}
+                  onChange={(v) => setExportScope(v as any)}
+                  options={canUsePayer2
+                    ? [
+                      { value: 'payer1', label: 'Profil 1' },
+                      { value: 'payer2', label: 'Profil 2' },
+                      { value: 'both', label: 'Profil 1 + Profil 2' },
+                    ]
+                    : [
+                      { value: 'payer1', label: 'Profil 1' },
+                    ]}
+                  style={{ marginTop: themeSpacing.xs }}
+                />
+                <Text style={styles.helperText}>{tr('Exports are scoped to the selected profile scope and the filters above.')}</Text>
+              </View>
             </View>
           </View>
         </Surface>
