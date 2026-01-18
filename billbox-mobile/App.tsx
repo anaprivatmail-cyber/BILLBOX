@@ -12,7 +12,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import * as ImagePicker from 'expo-image-picker'
 import * as DocumentPicker from 'expo-document-picker'
-import * as FileSystem from 'expo-file-system'
+import * as FileSystem from 'expo-file-system/legacy'
 import * as Print from 'expo-print'
 import * as Sharing from 'expo-sharing'
 import Constants from 'expo-constants'
@@ -49,12 +49,67 @@ import { showUpgradeAlert, setUpgradeNavigation, setUpgradePrompt, type Entitlem
 import {
   DEFAULT_BILL_DRAFT_SELECTION,
   archiveOnlyFromBillDraftSelection,
-  billDraftSelectionFromArchiveOnly,
 } from './src/billDraftMode'
 import { isUuidString, localPayerIdFromDbSpaceId, resolveDbSpaceIdFromEntitlements } from './src/space-id'
 
 const BRAND_WORDMARK = require('./assets/logo/logo-wordmark.png')
 const BRAND_ICON = require('./assets/logo/logo-icon.png')
+
+function isDebugBuild(): boolean {
+  const buildProfile = String(process.env.EXPO_PUBLIC_BUILD_PROFILE || (Constants as any)?.expoConfig?.extra?.eas?.buildProfile || (Constants as any)?.manifest2?.extra?.eas?.buildProfile || '')
+  return __DEV__ || /preview|development/i.test(buildProfile)
+}
+
+async function ensureLocalReadableFile(
+  uri: string,
+  fileName?: string,
+  mimeType?: string,
+  opts?: { allowBase64Fallback?: boolean },
+): Promise<{ uri: string; cachedUri: string; size: number | null }> {
+  const sourceUri = String(uri || '')
+  if (!sourceUri) throw new Error('missing_uri')
+  if (Platform.OS === 'web') {
+    return { uri: sourceUri, cachedUri: sourceUri, size: null }
+  }
+
+  const extFromName = (n?: string) => {
+    const match = String(n || '').match(/(\.[a-z0-9]{2,5})$/i)
+    return match ? match[1] : ''
+  }
+  const extFromMime = (m?: string) => {
+    const t = String(m || '').toLowerCase()
+    if (t.includes('pdf')) return '.pdf'
+    if (t.includes('png')) return '.png'
+    if (t.includes('webp')) return '.webp'
+    if (t.includes('jpg') || t.includes('jpeg')) return '.jpg'
+    return ''
+  }
+  const ext = extFromName(fileName) || extFromMime(mimeType) || ''
+  const cachedUri = `${FileSystem.cacheDirectory || FileSystem.documentDirectory || ''}billbox_import_${Date.now()}${ext}`
+
+  const tryCopy = async () => {
+    await FileSystem.copyAsync({ from: sourceUri, to: cachedUri })
+  }
+
+  try {
+    await tryCopy()
+  } catch (e) {
+    if (opts?.allowBase64Fallback) {
+      const data = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 })
+      await FileSystem.writeAsStringAsync(cachedUri, data, { encoding: FileSystem.EncodingType.Base64 })
+    } else {
+      throw e
+    }
+  }
+
+  let size: number | null = null
+  try {
+    const info = await FileSystem.getInfoAsync(cachedUri)
+    if (typeof info?.size === 'number') size = info.size
+  } catch {}
+
+  return { uri: cachedUri, cachedUri, size }
+}
 
 function tr(key: string, vars?: any): string {
   return t(getCurrentLang(), key, vars)
@@ -1723,7 +1778,7 @@ async function performOCRFromBase64(
   base64: string,
   contentType: string,
   opts?: { preferQr?: boolean; allowAi?: boolean; aiMode?: string; languageHint?: string },
-): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any }> {
+): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any; ai?: boolean; aiModel?: string | null; aiTier?: string | null }> {
   const base = getFunctionsBase()
   if (!base) {
     throw new Error('OCR unavailable: missing EXPO_PUBLIC_FUNCTIONS_BASE')
@@ -1774,6 +1829,9 @@ async function performOCRFromBase64(
   const rawText = typeof data.rawText === 'string' ? data.rawText : ''
   const mode = typeof data.mode === 'string' ? data.mode : undefined
   const meta = data && typeof data.meta === 'object' ? data.meta : undefined
+  const ai = Boolean(data?.ai)
+  const aiModel = typeof data?.aiModel === 'string' ? data.aiModel : null
+  const aiTier = typeof data?.aiTier === 'string' ? data.aiTier : null
   const parts: string[] = []
   if (f.creditor_name || f.supplier) parts.push(`Creditor: ${f.creditor_name || f.supplier}`)
   if (typeof f.amount === 'number' && f.currency) parts.push(`Amount: ${f.currency} ${f.amount}`)
@@ -1783,14 +1841,14 @@ async function performOCRFromBase64(
   if (f.purpose) parts.push(`Purpose: ${f.purpose}`)
   if (f.payment_details) parts.push(`Payment details: ${String(f.payment_details).slice(0, 200)}`)
   const summary = parts.join('\n') || 'No fields found'
-  return { fields: f, summary, rawText, mode, meta }
+  return { fields: f, summary, rawText, mode, meta, ai, aiModel, aiTier }
 }
 
 // --- OCR helper (Netlify function wrapper) ---
 async function performOCR(
   uri: string,
   opts?: { preferQr?: boolean; contentType?: string; filename?: string; allowAi?: boolean; aiMode?: string; languageHint?: string },
-): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any }>{
+): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any; ai?: boolean; aiModel?: string | null; aiTier?: string | null }>{
   const base = getFunctionsBase()
   if (!base) {
     throw new Error('OCR unavailable: missing EXPO_PUBLIC_FUNCTIONS_BASE')
@@ -1926,6 +1984,9 @@ async function performOCR(
   const rawText = typeof data.rawText === 'string' ? data.rawText : ''
   const mode = typeof data.mode === 'string' ? data.mode : undefined
   const meta = data && typeof data.meta === 'object' ? data.meta : undefined
+  const ai = Boolean(data?.ai)
+  const aiModel = typeof data?.aiModel === 'string' ? data.aiModel : null
+  const aiTier = typeof data?.aiTier === 'string' ? data.aiTier : null
   const parts: string[] = []
   if (f.creditor_name || f.supplier) parts.push(`Creditor: ${f.creditor_name || f.supplier}`)
   if (typeof f.amount === 'number' && f.currency) parts.push(`Amount: ${f.currency} ${f.amount}`)
@@ -1935,7 +1996,7 @@ async function performOCR(
   if (f.purpose) parts.push(`Purpose: ${f.purpose}`)
   if (f.payment_details) parts.push(`Payment details: ${String(f.payment_details).slice(0, 200)}`)
   const summary = parts.join('\n') || 'No fields found'
-  return { fields: f, summary, rawText, mode, meta }
+  return { fields: f, summary, rawText, mode, meta, ai, aiModel, aiTier }
 }
 
 function extractWarrantyFieldsFromOcr(rawText: string): {
@@ -3004,6 +3065,12 @@ function ScanBillScreen() {
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrError, setOcrError] = useState<string | null>(null)
 
+  const [debugStatus, setDebugStatus] = useState<'IDLE' | 'RUNNING' | 'DONE' | 'ERROR'>('IDLE')
+  const [debugQrFound, setDebugQrFound] = useState<boolean | null>(null)
+  const [debugOcrLength, setDebugOcrLength] = useState(0)
+  const [debugAiInfo, setDebugAiInfo] = useState<{ called: boolean; model?: string | null; tier?: string | null } | null>(null)
+  const [debugFileInfo, setDebugFileInfo] = useState<{ source: 'original' | 'preview'; size?: number | null } | null>(null)
+
   const [supplier, setSupplier] = useState('')
   const [purchaseItem, setPurchaseItem] = useState('')
   const [invoiceNumber, setInvoiceNumber] = useState('')
@@ -3018,6 +3085,8 @@ function ScanBillScreen() {
   const [reference, setReference] = useState('')
   const [purpose, setPurpose] = useState('')
   const [paymentDetails, setPaymentDetails] = useState('')
+  const [payerName, setPayerName] = useState('')
+  const [missingBasicFields, setMissingBasicFields] = useState({ supplier: false, invoice: false, amount: false, currency: false })
 
   // Track manual edits so new scans can overwrite stale autofill,
   // while still respecting fields the user actively changed.
@@ -3050,6 +3119,11 @@ function ScanBillScreen() {
   const [inboxSourceId, setInboxSourceId] = useState<string | null>(null)
   const [cameraVisible, setCameraVisible] = useState(true)
   const [missingManualVisible, setMissingManualVisible] = useState(false)
+
+  const debugOverlayEnabled = useMemo(() => {
+    const buildProfile = String(process.env.EXPO_PUBLIC_BUILD_PROFILE || (Constants as any)?.expoConfig?.extra?.eas?.buildProfile || (Constants as any)?.manifest2?.extra?.eas?.buildProfile || '')
+    return __DEV__ || /preview|development/i.test(buildProfile)
+  }, [])
 
   function looksLikeMisassignedName(input: any): boolean {
     const s = (input ?? '').toString().trim()
@@ -3105,6 +3179,7 @@ function ScanBillScreen() {
     const raw = String(input || '').replace(/\s+/g, ' ').trim()
     if (!raw) return ''
     const prefixRe = /^(?:uporabnik|obrazec|ra\u010dun|racun|dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|customer|payer)\s*[:\-]?\s*/i
+    const labelOnlyRe = /^(?:uporabnik|obrazec|ra\u010dun|racun|dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|customer|payer)\b/i
     const splitRe = /[|•·]/
     const legalSuffixRe = /\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|s\.r\.l\.|srl|sas|sa|bv|oy|ab|kg|ltd|llc|inc|plc)\b/i
     const addressRe = /\b(ulica|cesta|street|st\.?|road|rd\.?|avenue|ave\.?|strasse|stra\u00dfe|via|trg|naselje|posta|po\u0161t\S*|zip)\b/i
@@ -3117,6 +3192,7 @@ function ScanBillScreen() {
     const cleaned = parts
       .map((p) => p.replace(/\s+/g, ' ').trim())
       .filter((p) => !/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b|@)/i.test(p))
+      .filter((p) => !labelOnlyRe.test(p))
       .filter((p) => !addressRe.test(p) || !/\d/.test(p))
       .filter((p) => /[A-Za-zÀ-žČŠŽčšž]/.test(p))
 
@@ -3661,6 +3737,9 @@ function ScanBillScreen() {
     const nameCandidate = normalizeCompanyName(normalizeIssuerName(nameCandidateRaw))
 
     const payerFromDoc = !isQr ? extractPayerNameFromText(rawText, nameCandidate) : null
+    if (payerFromDoc && payerFromDoc !== payerName) {
+      setPayerName(payerFromDoc)
+    }
     if (nameCandidate) {
       const canOverwriteSupplier = !editedRef.current.supplier || !supplier.trim() || looksLikeMisassignedName(supplier)
       if (canOverwriteSupplier && canSetField('supplier', nameCandidate, editedRef.current.supplier, supplier)) {
@@ -3776,11 +3855,15 @@ function ScanBillScreen() {
 
     // Purpose is mandatory for payment flows (non-QR): fill deterministic fallback in strict order.
     if (allowPaymentFields && !editedRef.current.purpose && !purpose.trim()) {
+      const paymentLabel = tr('Payment')
       const invForPurpose = String(invCandidate || invoiceNumber || '').trim()
       const payerForPurpose = String(payerFromDoc || '').trim()
-      const fallbackPurpose = invForPurpose
-        ? `Plačilo ${invForPurpose}`
-        : (payerForPurpose ? `Plačilo ${payerForPurpose}` : 'Plačilo')
+      const purchaseItemForPurpose = String(purchaseItem || '').trim()
+      const fallbackPurpose = purchaseItemForPurpose
+        ? purchaseItemForPurpose
+        : (invForPurpose
+          ? `${paymentLabel} ${invForPurpose}`
+          : (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel))
       if (canSetField('purpose', fallbackPurpose, editedRef.current.purpose, purpose)) {
         setPurpose(fallbackPurpose)
         // Fallback purposes must be overwritable by later extracted meaningful purposes.
@@ -3807,19 +3890,21 @@ function ScanBillScreen() {
     }
 
     // Due date: only accept ISO YYYY-MM-DD.
-    const dueClean = String(rawDue || '').trim()
-    if (dueClean && /^\d{4}-\d{2}-\d{2}$/.test(dueClean) && canSetField('due_date', dueClean, editedRef.current.dueDate, dueDate)) {
-      setDueDate(dueClean)
-      markFieldSource('due_date')
-    }
-    if (allowPaymentFields && !isQr && !editedRef.current.dueDate && !dueDate.trim() && !dueClean) {
-      const base = new Date()
-      base.setDate(base.getDate() + 14)
-      const iso = base.toISOString().slice(0, 10)
-      if (canSetField('due_date', iso, editedRef.current.dueDate, dueDate)) {
-        setDueDate(iso)
-        // Default due dates must be overwritable by later extracted due dates.
-        markFieldSource('due_date', 999)
+    if (allowPaymentFields) {
+      const dueClean = String(rawDue || '').trim()
+      if (dueClean && /^\d{4}-\d{2}-\d{2}$/.test(dueClean) && canSetField('due_date', dueClean, editedRef.current.dueDate, dueDate)) {
+        setDueDate(dueClean)
+        markFieldSource('due_date')
+      }
+      if (!isQr && !editedRef.current.dueDate && !dueDate.trim() && !dueClean) {
+        const base = new Date()
+        base.setDate(base.getDate() + 14)
+        const iso = base.toISOString().slice(0, 10)
+        if (canSetField('due_date', iso, editedRef.current.dueDate, dueDate)) {
+          setDueDate(iso)
+          // Default due dates must be overwritable by later extracted due dates.
+          markFieldSource('due_date', 999)
+        }
       }
     }
 
@@ -3921,11 +4006,27 @@ function ScanBillScreen() {
     }
   }
 
-  const handleSupplierInput = (v: string) => { editedRef.current.supplier = true; setSupplier(v) }
+  const handleSupplierInput = (v: string) => {
+    editedRef.current.supplier = true
+    setSupplier(v)
+    if (missingBasicFields.supplier) setMissingBasicFields((prev) => ({ ...prev, supplier: false }))
+  }
   const handlePurchaseItemInput = (v: string) => { editedRef.current.purchaseItem = true; setPurchaseItem(v) }
-  const handleInvoiceNumberInput = (v: string) => { editedRef.current.invoiceNumber = true; setInvoiceNumber(v) }
-  const handleAmountInput = (v: string) => { editedRef.current.amount = true; setAmountStr(v) }
-  const handleCurrencyInput = (v: string) => { editedRef.current.currency = true; setCurrency(v) }
+  const handleInvoiceNumberInput = (v: string) => {
+    editedRef.current.invoiceNumber = true
+    setInvoiceNumber(v)
+    if (missingBasicFields.invoice) setMissingBasicFields((prev) => ({ ...prev, invoice: false }))
+  }
+  const handleAmountInput = (v: string) => {
+    editedRef.current.amount = true
+    setAmountStr(v)
+    if (missingBasicFields.amount) setMissingBasicFields((prev) => ({ ...prev, amount: false }))
+  }
+  const handleCurrencyInput = (v: string) => {
+    editedRef.current.currency = true
+    setCurrency(v)
+    if (missingBasicFields.currency) setMissingBasicFields((prev) => ({ ...prev, currency: false }))
+  }
   const handleDueDateInput = (v: string) => { editedRef.current.dueDate = true; setDueDate(v) }
   const handleCreditorNameInput = (v: string) => { editedRef.current.creditorName = true; setCreditorName(v) }
   const handlePurposeInput = (v: string) => { editedRef.current.purpose = true; setPurpose(v) }
@@ -3984,10 +4085,17 @@ function ScanBillScreen() {
     setReference('')
     setPurpose('')
     setPaymentDetails('')
+    setPayerName('')
+    setMissingBasicFields({ supplier: false, invoice: false, amount: false, currency: false })
     setInboxSourceId(null)
     setLastQR('')
     setCameraVisible(true)
     setTorch('off')
+    setDebugStatus('IDLE')
+    setDebugQrFound(null)
+    setDebugOcrLength(0)
+    setDebugAiInfo(null)
+    setDebugFileInfo(null)
     editedRef.current = {
       supplier: false,
       purchaseItem: false,
@@ -4036,20 +4144,38 @@ function ScanBillScreen() {
       showUpgradeAlert('ocr')
       return
     }
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.9, base64: true })
-    if (res.canceled) return
-    const asset = res.assets?.[0]
-    if (!asset?.uri) return
-    setPendingAttachment({ uri: asset.uri, name: (asset.fileName || 'photo.jpg'), type: (asset.mimeType || 'image/jpeg') })
-    // Try QR decode first (web via ZXing), with up to 3 retries; fallback to OCR
-    const decoded = await decodeImageQR(asset.uri, 3)
-    if (decoded) {
-      handleDecodedText(decoded)
-    } else {
-      const languageHint = getCurrentLang()
-      const allowAi = !archiveOnly
-      if (asset.base64) await extractWithOCRBase64(asset.base64, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi, aiMode: 'document', languageHint })
-      else await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi, aiMode: 'document', languageHint })
+    try {
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 })
+      if (res.canceled) return
+      const asset = res.assets?.[0]
+      if (!asset?.uri) return
+      const logMeta = {
+        originalUri: asset.uri,
+        mimeType: asset.mimeType || 'image/jpeg',
+        fileName: asset.fileName || 'photo.jpg',
+        fileSize: (asset as any)?.fileSize ?? null,
+        platform: Platform.OS,
+      }
+      console.log('[Import] pickImage', logMeta)
+      const cached = await ensureLocalReadableFile(asset.uri, asset.fileName || 'photo.jpg', asset.mimeType || 'image/jpeg', { allowBase64Fallback: false })
+      console.log('[Import] cached image', { cachedUri: cached.uri, size: cached.size })
+      setPendingAttachment({ uri: cached.uri, name: asset.fileName || 'photo.jpg', type: (asset.mimeType || 'image/jpeg') })
+      // Try QR decode first (web via ZXing), with up to 3 retries; fallback to OCR
+      const decoded = await decodeImageQR(cached.uri, 3)
+      if (decoded) {
+        handleDecodedText(decoded)
+      } else {
+        const languageHint = getCurrentLang()
+        await extractWithOCR(cached.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
+      }
+    } catch (e: any) {
+      console.warn('[Import] pickImage failed', {
+        message: e?.message,
+        stack: e?.stack,
+        platform: Platform.OS,
+      })
+      const msg = isDebugBuild() ? (e?.message || String(e)) : tr('Could not read the selected file.')
+      Alert.alert(tr('Import failed'), msg)
     }
   }
 
@@ -4058,14 +4184,33 @@ function ScanBillScreen() {
       showUpgradeAlert('ocr')
       return
     }
-    const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true })
-    if (res.canceled) return
-    const file = res.assets?.[0]
-    if (!file?.uri) return
-    setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
-    const languageHint = getCurrentLang()
-    const allowAi = !archiveOnly
-    await extractWithOCR(file.uri, file.mimeType || 'application/pdf', { preferQr: true, allowAi, aiMode: 'document', languageHint })
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true })
+      if (res.canceled) return
+      const file = res.assets?.[0]
+      if (!file?.uri) return
+      const logMeta = {
+        originalUri: file.uri,
+        mimeType: file.mimeType || 'application/pdf',
+        fileName: file.name || 'document.pdf',
+        fileSize: (file as any)?.size ?? null,
+        platform: Platform.OS,
+      }
+      console.log('[Import] pickPdf', logMeta)
+      const cached = await ensureLocalReadableFile(file.uri, file.name || 'document.pdf', file.mimeType || 'application/pdf', { allowBase64Fallback: true })
+      console.log('[Import] cached pdf', { cachedUri: cached.uri, size: cached.size })
+      setPendingAttachment({ uri: cached.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
+      const languageHint = getCurrentLang()
+      await extractWithOCR(cached.uri, file.mimeType || 'application/pdf', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
+    } catch (e: any) {
+      console.warn('[Import] pickPdf failed', {
+        message: e?.message,
+        stack: e?.stack,
+        platform: Platform.OS,
+      })
+      const msg = isDebugBuild() ? (e?.message || String(e)) : tr('Could not read the selected file.')
+      Alert.alert(tr('Import failed'), msg)
+    }
   }
 
   async function decodeImageQR(uri: string, retries: number): Promise<string | null> {
@@ -4102,6 +4247,11 @@ function ScanBillScreen() {
       Alert.alert(tr('Unsupported QR format'))
       return
     }
+    setDebugFileInfo({ source: 'original', size: null })
+    setDebugStatus('DONE')
+    setDebugQrFound(true)
+    setDebugOcrLength(t.length)
+    setDebugAiInfo({ called: false, model: null, tier: null })
     setFormat(epc ? 'EPC/SEPA SCT' : (upn ? 'UPN' : 'URL'))
     // Mark missing fields for review (internal flag; no UI changes).
     const missing: string[] = []
@@ -4130,8 +4280,19 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+      setDebugStatus('RUNNING')
+      setDebugQrFound(null)
+      setDebugAiInfo(null)
+      try {
+        const info = await FileSystem.getInfoAsync(uri)
+        if (info) setDebugFileInfo({ source: 'original', size: typeof info.size === 'number' ? info.size : null })
+      } catch {}
+      const { fields: f, summary, rawText: ocrText, mode, meta, ai, aiModel, aiTier } = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
       applyOcr(f, String(ocrText || ''), mode, meta)
+      setDebugStatus('DONE')
+      setDebugQrFound(/qr/i.test(String(mode || '')))
+      setDebugOcrLength(String(ocrText || '').length)
+      setDebugAiInfo({ called: Boolean(ai), model: aiModel || null, tier: aiTier || null })
       // Keep UX non-technical; the draft is already filled and still editable.
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
@@ -4174,6 +4335,7 @@ function ScanBillScreen() {
 
       // Default: show the server/user-facing message (not stack traces).
       setOcrError(String(msg || tr('OCR failed')))
+      setDebugStatus('ERROR')
     } finally {
       setOcrBusy(false)
     }
@@ -4204,8 +4366,16 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+      setDebugStatus('RUNNING')
+      setDebugQrFound(null)
+      setDebugAiInfo(null)
+      setDebugFileInfo({ source: 'preview', size: Math.floor(String(base64 || '').length * 0.75) })
+      const { fields: f, summary, rawText: ocrText, mode, meta, ai, aiModel, aiTier } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
       applyOcr(f, String(ocrText || ''), mode, meta)
+      setDebugStatus('DONE')
+      setDebugQrFound(/qr/i.test(String(mode || '')))
+      setDebugOcrLength(String(ocrText || '').length)
+      setDebugAiInfo({ called: Boolean(ai), model: aiModel || null, tier: aiTier || null })
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
       }
@@ -4247,6 +4417,7 @@ function ScanBillScreen() {
 
       setOcrError(msg)
       Alert.alert(tr('OCR failed'), msg)
+      setDebugStatus('ERROR')
     } finally {
       setOcrBusy(false)
     }
@@ -4282,29 +4453,29 @@ function ScanBillScreen() {
     if (!isIOS) setShowDuePicker(false)
   }
 
-  const handleSaveBill = async () => {
+  const handleSaveBill = async (overrideArchiveOnly?: boolean, opts?: { showAlert?: boolean }): Promise<boolean> => {
+    const isArchiveOnly = typeof overrideArchiveOnly === 'boolean' ? overrideArchiveOnly : archiveOnly
+    const showAlert = opts?.showAlert !== false
     const supplierTrimmed = supplier.trim()
     const invoiceTrimmed = invoiceNumber.trim()
     const currencyTrimmed = currency.trim()
-    if (!archiveOnly) {
-      if (!supplierTrimmed) {
-        Alert.alert(tr('Supplier required'), tr('Enter the supplier or issuer of the bill.'))
-        return
-      }
-      if (!invoiceTrimmed) {
-        Alert.alert(tr('Invoice number required'), tr('Enter the invoice number from the bill (required for accounting).'))
-        return
-      }
-      if (!currencyTrimmed) {
-        Alert.alert(tr('Currency required'), tr('Enter a currency (for example EUR).'))
-        return
-      }
-    }
     const amt = Number(String(amountStr).replace(',', '.'))
-    if (!archiveOnly) {
+    const nextMissing = {
+      supplier: !supplierTrimmed,
+      invoice: !invoiceTrimmed,
+      amount: !Number.isFinite(amt) || amt <= 0,
+      currency: !currencyTrimmed,
+    }
+    setMissingBasicFields(nextMissing)
+    if (nextMissing.supplier || nextMissing.invoice || nextMissing.amount || nextMissing.currency) {
+      Alert.alert(tr('Missing data'), tr('Please fill all required fields.'))
+      return false
+    }
+
+    if (!isArchiveOnly) {
       if (Number.isNaN(amt) || amt <= 0) {
         Alert.alert(tr('Invalid amount'), tr('Provide a numeric amount greater than 0.'))
-        return
+        return false
       }
     }
 
@@ -4312,14 +4483,17 @@ function ScanBillScreen() {
     const effectiveDueDate = trimmedDue || new Date().toISOString().slice(0, 10)
 
     const inv = invoiceNumber.trim()
-    const defaultPurposeFromInvoice = inv ? `Plačilo ${inv}` : ''
+    const paymentLabel = tr('Payment')
+    const defaultPurposeFromInvoice = inv ? `${paymentLabel} ${inv}` : ''
+    const purchaseItemTrimmed = purchaseItem.trim()
+    const payerForPurpose = payerName.trim()
 
-    if (!archiveOnly) {
-      const effectivePurpose = purpose.trim() || defaultPurposeFromInvoice || purchaseItem.trim()
+    if (!isArchiveOnly) {
+      const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
       const paymentDetailsTrimmed = paymentDetails.trim()
       if (!creditorName.trim()) {
         Alert.alert(tr('Creditor required'), tr('Enter the creditor/payee name (often the same as the supplier).'))
-        return
+        return false
       }
       // Payment instructions:
       // - SEPA: IBAN + reference
@@ -4328,43 +4502,43 @@ function ScanBillScreen() {
         const ibanNorm = normalizeIban(iban)
         if (!isValidIbanChecksum(ibanNorm)) {
           Alert.alert(tr('Invalid IBAN'), tr('IBAN checksum failed. Please double-check it.'))
-          return
+          return false
         }
         if (!reference.trim()) {
           Alert.alert(tr('Reference required'), tr('Enter the payment reference.'))
-          return
+          return false
         }
         const refNorm = normalizeReference(reference)
         if (looksLikeIban(refNorm) && isValidIbanChecksum(refNorm)) {
           Alert.alert(tr('Invalid reference'), tr('Reference looks like an IBAN. Please move it to the IBAN field.'))
-          return
+          return false
         }
         if (refNorm === ibanNorm) {
           Alert.alert(tr('Invalid reference'), tr('Reference must not be the same as IBAN.'))
-          return
+          return false
         }
       } else {
         if (!paymentDetailsTrimmed) {
           Alert.alert(tr('Payment details required'), tr('Enter IBAN + reference, or provide payment details (routing / SWIFT / account).'))
-          return
+          return false
         }
       }
       if (!effectivePurpose && !paymentDetailsTrimmed) {
         Alert.alert(tr('Purpose required'), tr('Enter the payment purpose/description.'))
-        return
+        return false
       }
       if (!trimmedDue) {
         Alert.alert(tr('Due date required'), tr('Add a due date so reminders can be scheduled.'))
-        return
+        return false
       }
       if (!pendingAttachment?.uri) {
         Alert.alert(tr('Attachment required'), tr('Attach a PDF or image of the original bill.'))
-        return
+        return false
       }
     }
     try {
       setSaving(true)
-      const s = supabase
+      let s = supabase
 
       // Resolve payer/profile scope to a UUID for the database.
       // Prevent sending labels like "personal" into UUID columns.
@@ -4379,9 +4553,13 @@ function ScanBillScreen() {
         }
       }
       if (s && !dbSpaceId) {
-        Alert.alert(tr('Save failed'), tr('Active profile is not available. Please try again.'))
-        setSaving(false)
-        return
+        if (isArchiveOnly) {
+          s = null
+        } else {
+          Alert.alert(tr('Save failed'), tr('Active profile is not available. Please try again.'))
+          setSaving(false)
+          return false
+        }
       }
 
       if (entitlements.plan === 'free') {
@@ -4410,13 +4588,13 @@ function ScanBillScreen() {
           if (currentCount >= 10) {
             showUpgradeAlert('bills_limit')
             setSaving(false)
-            return
+            return false
           }
         } catch {}
       }
       let savedId: string | null = null
       if (s) {
-        const effectivePurpose = purpose.trim() || defaultPurposeFromInvoice || purchaseItem.trim()
+        const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
         const details = paymentDetails.trim()
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
@@ -4424,13 +4602,13 @@ function ScanBillScreen() {
 
         const saveSupplier = supplierTrimmed || creditorName.trim() || (pendingAttachment?.name ? String(pendingAttachment.name).replace(/\.[^.]+$/, '') : '') || 'Archived bill'
         const saveCurrency = currencyTrimmed || 'EUR'
-        const saveAmount = archiveOnly ? (Number.isFinite(amt) && amt > 0 ? amt : 0) : amt
+        const saveAmount = isArchiveOnly ? (Number.isFinite(amt) && amt > 0 ? amt : 0) : amt
         const { data, error } = await createBill(s, {
           supplier: saveSupplier,
           amount: saveAmount,
           currency: saveCurrency,
           due_date: effectiveDueDate,
-          status: archiveOnly ? 'archived' : 'unpaid',
+          status: isArchiveOnly ? 'archived' : 'unpaid',
           creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
           reference: reference.trim() || null,
@@ -4441,11 +4619,11 @@ function ScanBillScreen() {
         if (error) {
           Alert.alert(tr('Save failed'), error.message)
           setSaving(false)
-          return
+          return false
         }
         savedId = data?.id || null
       } else {
-        const effectivePurpose = purpose.trim() || defaultPurposeFromInvoice || purchaseItem.trim()
+        const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
         const details = paymentDetails.trim()
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
@@ -4453,13 +4631,13 @@ function ScanBillScreen() {
 
         const saveSupplier = supplierTrimmed || creditorName.trim() || (pendingAttachment?.name ? String(pendingAttachment.name).replace(/\.[^.]+$/, '') : '') || 'Archived bill'
         const saveCurrency = currencyTrimmed || 'EUR'
-        const saveAmount = archiveOnly ? (Number.isFinite(amt) && amt > 0 ? amt : 0) : amt
+        const saveAmount = isArchiveOnly ? (Number.isFinite(amt) && amt > 0 ? amt : 0) : amt
         const local = await addLocalBill(spaceId, {
           supplier: saveSupplier,
           amount: saveAmount,
           currency: saveCurrency,
           due_date: effectiveDueDate,
-          status: archiveOnly ? 'archived' : 'unpaid',
+          status: isArchiveOnly ? 'archived' : 'unpaid',
           creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
           reference: reference.trim() || null,
@@ -4479,14 +4657,24 @@ function ScanBillScreen() {
         setInboxSourceId(null)
       }
 
-      Alert.alert(tr('Bill saved'), archiveOnly ? tr('Saved as archived (already paid)') : (s ? tr('Bill created successfully') : tr('Saved locally (Not synced)')))
+      if (showAlert) {
+        Alert.alert(tr('Bill saved'), isArchiveOnly ? tr('Saved as archived (already paid)') : (s ? tr('Bill created successfully') : tr('Saved locally (Not synced)')))
+      }
       clearExtraction()
       try { (navigation as any)?.navigate?.('Bills', { highlightBillId: savedId }) } catch {}
+      return true
     } catch (e: any) {
       Alert.alert(tr('Save error'), e?.message || tr('Unable to save.'))
+      return false
     } finally {
       setSaving(false)
     }
+  }
+
+  const handleArchiveImmediate = async () => {
+    setArchiveOnly(true)
+    const ok = await handleSaveBill(true, { showAlert: false })
+    if (ok) Alert.alert(tr('Saved'), tr('Saved to archive'))
   }
 
   if (spaceLoading || !space) {
@@ -4679,12 +4867,21 @@ function ScanBillScreen() {
           <View style={styles.formSection}>
             <Text style={styles.formSectionTitle}>{tr('Summary')}</Text>
             <View style={styles.formStack}>
+              {pendingAttachment && (
+                <View style={styles.attachmentPreviewCompact}>
+                  <Text style={styles.mutedText}>{tr('Staged attachment:')} {pendingAttachment.name}</Text>
+                  {pendingAttachment.type?.startsWith('image/') && (
+                    <Image source={{ uri: pendingAttachment.uri }} style={styles.attachmentImageSmall} />
+                  )}
+                </View>
+              )}
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>
                   {tr('Supplier')}
                   <Text style={styles.requiredStar}> *</Text>
                 </Text>
-                <AppInput placeholder={tr('Supplier')} value={supplier} onChangeText={handleSupplierInput} />
+                <AppInput placeholder={tr('Supplier')} value={supplier} onChangeText={handleSupplierInput} style={missingBasicFields.supplier ? styles.inputError : undefined} />
+                {missingBasicFields.supplier ? <Text style={styles.fieldErrorText}>{tr('Required field')}</Text> : null}
               </View>
               <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={handlePurchaseItemInput} />
               <View style={{ gap: 6 }}>
@@ -4697,7 +4894,9 @@ function ScanBillScreen() {
                   value={invoiceNumber}
                   onChangeText={handleInvoiceNumberInput}
                   hint={tr('Required for accounting.')}
+                  style={missingBasicFields.invoice ? styles.inputError : undefined}
                 />
+                {missingBasicFields.invoice ? <Text style={styles.fieldErrorText}>{tr('Required field')}</Text> : null}
               </View>
               <View style={styles.formRow}>
                 <View style={[styles.flex1, { gap: 6 }]}>
@@ -4705,21 +4904,34 @@ function ScanBillScreen() {
                     {tr('Amount')}
                     <Text style={styles.requiredStar}> *</Text>
                   </Text>
-                  <AppInput placeholder={tr('Amount')} value={amountStr} onChangeText={handleAmountInput} keyboardType="numeric" />
+                  <AppInput placeholder={tr('Amount')} value={amountStr} onChangeText={handleAmountInput} keyboardType="numeric" style={missingBasicFields.amount ? styles.inputError : undefined} />
+                  {missingBasicFields.amount ? <Text style={styles.fieldErrorText}>{tr('Required field')}</Text> : null}
                 </View>
                 <View style={{ gap: 6, width: 90 }}>
                   <Text style={styles.fieldLabel}>{tr('Currency')}</Text>
-                  <AppInput placeholder={tr('Currency')} value={currency} onChangeText={handleCurrencyInput} />
+                  <AppInput placeholder={tr('Currency')} value={currency} onChangeText={handleCurrencyInput} style={missingBasicFields.currency ? styles.inputError : undefined} />
+                  {missingBasicFields.currency ? <Text style={styles.fieldErrorText}>{tr('Required field')}</Text> : null}
                 </View>
               </View>
 
-              <View style={{ marginTop: themeSpacing.xs }}>
-                <SegmentedControl
-                  value={billDraftSelectionFromArchiveOnly(archiveOnly)}
-                  onChange={(v) => {
-                    const nextArchive = String(v) === 'archive'
-                    setArchiveOnly(nextArchive)
-                    if (!nextArchive && archiveOnly && pendingAttachment?.uri) {
+              <View style={{ marginTop: themeSpacing.xs, flexDirection: 'row', gap: themeSpacing.xs }}>
+                <AppButton
+                  label={tr('Archive')}
+                  variant="primary"
+                  iconName="archive-outline"
+                  onPress={handleArchiveImmediate}
+                  disabled={saving}
+                />
+                <AppButton
+                  label={ocrBusy ? tr('Extracting…') : tr('To pay')}
+                  variant="secondary"
+                  iconName="card-outline"
+                  onPress={() => {
+                    setArchiveOnly(false)
+                    if (parsed && /EPC|UPN|URL|qr/i.test(String(format || ''))) {
+                      applyExtractedPaymentFields({ ...parsed, rawText }, 'qr')
+                    }
+                    if (pendingAttachment?.uri) {
                       const languageHint = getCurrentLang()
                       void extractWithOCR(
                         pendingAttachment.uri,
@@ -4728,161 +4940,147 @@ function ScanBillScreen() {
                       )
                     }
                   }}
-                  options={[
-                    { value: 'archive', label: tr('Archive') },
-                    { value: 'pay', label: tr('To pay') },
-                  ]}
-                  style={{ marginTop: themeSpacing.xs }}
+                  disabled={ocrBusy}
                 />
               </View>
 
-              {archiveOnly ? (
-                <InlineInfo
-                  tone="info"
-                  iconName="archive-outline"
-                  message={tr('Archive: no payment extraction.')}
-                  style={styles.formNotice}
-                />
-              ) : (
-                <InlineInfo
-                  tone="info"
-                  iconName="card-outline"
-                  message={tr('To pay: extract payment fields.')}
-                  style={styles.formNotice}
-                />
+              {!archiveOnly && (
+                <View style={{ gap: themeSpacing.xs }}>
+                  <Text style={styles.formSectionTitle}>{tr('Dates')}</Text>
+                  <View style={styles.formRow}>
+                    <View style={[styles.flex1, { gap: 6 }]}>
+                      <Text style={styles.fieldLabel}>
+                        {tr('Due date')}
+                        <Text style={styles.requiredStar}> *</Text>
+                      </Text>
+                      <AppInput
+                        placeholder={tr('Due date (YYYY-MM-DD)')}
+                        value={dueDate}
+                        onChangeText={handleDueDateInput}
+                        hint={tr('Due date (used for reminders and overdue status).')}
+                      />
+                    </View>
+                    <AppButton
+                      label={dueDate ? tr('Change date') : tr('Pick date')}
+                      variant="secondary"
+                      iconName="calendar-outline"
+                      onPress={() => setShowDuePicker(true)}
+                    />
+                  </View>
+                  {showDuePicker && (
+                    <View style={styles.datePickerContainer}>
+                      <DateTimePicker
+                        value={getDueDateValue()}
+                        mode="date"
+                        display={isIOS ? 'spinner' : 'calendar'}
+                        onChange={handleDuePickerChange}
+                      />
+                      {isIOS && (
+                        <View style={styles.datePickerActions}>
+                          <AppButton label={tr('Done')} variant="primary" onPress={() => setShowDuePicker(false)} />
+                        </View>
+                      )}
+                    </View>
+                  )}
+                </View>
               )}
+            </View>
+          </View>
 
-              <View style={{ gap: themeSpacing.xs }}>
-                <Text style={styles.formSectionTitle}>{tr('Dates')}</Text>
-                <View style={styles.formRow}>
-                  <View style={[styles.flex1, { gap: 6 }]}>
+          {!archiveOnly && (
+            <>
+              <Divider style={styles.formDivider} />
+
+              <View style={styles.formSection}>
+                <Text style={styles.formSectionTitle}>{tr('Payment details')}</Text>
+                <View style={styles.formStack}>
+                  <View style={{ gap: 6 }}>
                     <Text style={styles.fieldLabel}>
-                      {tr('Due date')}
+                      {tr('Creditor')}
                       <Text style={styles.requiredStar}> *</Text>
                     </Text>
-                    <AppInput
-                      placeholder={tr('Due date (YYYY-MM-DD)')}
-                      value={dueDate}
-                      onChangeText={handleDueDateInput}
-                      hint={tr('Due date (used for reminders and overdue status).')}
-                    />
+                    <AppInput placeholder={tr('Creditor')} value={creditorName} onChangeText={handleCreditorNameInput} />
                   </View>
-                  <AppButton
-                    label={dueDate ? tr('Change date') : tr('Pick date')}
-                    variant="secondary"
-                    iconName="calendar-outline"
-                    onPress={() => setShowDuePicker(true)}
-                  />
-                </View>
-                {showDuePicker && (
-                  <View style={styles.datePickerContainer}>
-                    <DateTimePicker
-                      value={getDueDateValue()}
-                      mode="date"
-                      display={isIOS ? 'spinner' : 'calendar'}
-                      onChange={handleDuePickerChange}
+                  <View style={{ gap: 6 }}>
+                    <Text style={styles.fieldLabel}>
+                      {tr('IBAN')}
+                    </Text>
+                    <AppInput
+                      placeholder={tr('IBAN')}
+                      value={iban}
+                      onChangeText={handleIbanChange}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="default"
                     />
-                    {isIOS && (
-                      <View style={styles.datePickerActions}>
-                        <AppButton label={tr('Done')} variant="primary" onPress={() => setShowDuePicker(false)} />
+                    {ibanHint ? (
+                      <InlineInfo tone="warning" iconName="alert-circle-outline" message={ibanHint} style={styles.formNotice} />
+                    ) : null}
+                  </View>
+                  <View style={{ gap: 6 }}>
+                    <Text style={styles.fieldLabel}>
+                      {tr('Reference')}
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <View style={{ width: 64 }}>
+                        <AppInput
+                          placeholder="SI"
+                          value={splitReferenceForUi(reference).country}
+                          onChangeText={(v: string) => setReferenceFromParts({ country: v })}
+                          autoCapitalize="characters"
+                          autoCorrect={false}
+                          keyboardType="default"
+                          maxLength={2}
+                        />
                       </View>
-                    )}
+                      <View style={{ width: 64 }}>
+                        <AppInput
+                          placeholder="00"
+                          value={splitReferenceForUi(reference).model}
+                          onChangeText={(v: string) => setReferenceFromParts({ model: v })}
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          keyboardType={Platform.OS === 'ios' ? 'number-pad' : 'numeric'}
+                          maxLength={2}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <AppInput
+                          placeholder={tr('Reference')}
+                          value={splitReferenceForUi(reference).number}
+                          onChangeText={(v: string) => setReferenceFromParts({ number: v })}
+                          autoCapitalize="characters"
+                          autoCorrect={false}
+                          keyboardType="default"
+                        />
+                      </View>
+                    </View>
+                    {referenceHint ? (
+                      <InlineInfo tone="info" iconName="information-circle-outline" message={referenceHint} style={styles.formNotice} />
+                    ) : null}
                   </View>
-                )}
-              </View>
-            </View>
-          </View>
-
-          <Divider style={styles.formDivider} />
-
-          <View style={styles.formSection}>
-            <Text style={styles.formSectionTitle}>{tr('Payment details')}</Text>
-            <View style={styles.formStack}>
-              <View style={{ gap: 6 }}>
-                <Text style={styles.fieldLabel}>
-                  {tr('Creditor')}
-                  <Text style={styles.requiredStar}> *</Text>
-                </Text>
-                <AppInput placeholder={tr('Creditor')} value={creditorName} onChangeText={handleCreditorNameInput} />
-              </View>
-              <View style={{ gap: 6 }}>
-                <Text style={styles.fieldLabel}>
-                  {tr('IBAN')}
-                </Text>
-                <AppInput
-                  placeholder={tr('IBAN')}
-                  value={iban}
-                  onChangeText={handleIbanChange}
-                  autoCapitalize="characters"
-                  autoCorrect={false}
-                  keyboardType="default"
-                />
-                {ibanHint ? (
-                  <InlineInfo tone="warning" iconName="alert-circle-outline" message={ibanHint} style={styles.formNotice} />
-                ) : null}
-              </View>
-              <View style={{ gap: 6 }}>
-                <Text style={styles.fieldLabel}>
-                  {tr('Reference')}
-                </Text>
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <View style={{ width: 64 }}>
+                  <View style={{ gap: 6 }}>
+                    <Text style={styles.fieldLabel}>{tr('Payment details (routing/SWIFT/account)')}</Text>
                     <AppInput
-                      placeholder="SI"
-                      value={splitReferenceForUi(reference).country}
-                      onChangeText={(v: string) => setReferenceFromParts({ country: v })}
-                      autoCapitalize="characters"
-                      autoCorrect={false}
-                      keyboardType="default"
-                      maxLength={2}
+                      placeholder={tr('Paste bank details here if you do not have IBAN/reference.')}
+                      value={paymentDetails}
+                      onChangeText={handlePaymentDetailsChange}
+                      multiline
                     />
                   </View>
-                  <View style={{ width: 64 }}>
-                    <AppInput
-                      placeholder="00"
-                      value={splitReferenceForUi(reference).model}
-                      onChangeText={(v: string) => setReferenceFromParts({ model: v })}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      keyboardType={Platform.OS === 'ios' ? 'number-pad' : 'numeric'}
-                      maxLength={2}
-                    />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <AppInput
-                      placeholder={tr('Reference')}
-                      value={splitReferenceForUi(reference).number}
-                      onChangeText={(v: string) => setReferenceFromParts({ number: v })}
-                      autoCapitalize="characters"
-                      autoCorrect={false}
-                      keyboardType="default"
-                    />
+                  <View style={{ gap: 6 }}>
+                    <Text style={styles.fieldLabel}>
+                      {tr('Purpose')}
+                      <Text style={styles.requiredStar}> *</Text>
+                    </Text>
+                    <AppInput placeholder={tr('Purpose')} value={purpose} onChangeText={handlePurposeInput} multiline />
                   </View>
                 </View>
-                {referenceHint ? (
-                  <InlineInfo tone="info" iconName="information-circle-outline" message={referenceHint} style={styles.formNotice} />
-                ) : null}
               </View>
-              <View style={{ gap: 6 }}>
-                <Text style={styles.fieldLabel}>{tr('Payment details (routing/SWIFT/account)')}</Text>
-                <AppInput
-                  placeholder={tr('Paste bank details here if you do not have IBAN/reference.')}
-                  value={paymentDetails}
-                  onChangeText={handlePaymentDetailsChange}
-                  multiline
-                />
-              </View>
-              <View style={{ gap: 6 }}>
-                <Text style={styles.fieldLabel}>
-                  {tr('Purpose')}
-                  <Text style={styles.requiredStar}> *</Text>
-                </Text>
-                <AppInput placeholder={tr('Purpose')} value={purpose} onChangeText={handlePurposeInput} multiline />
-              </View>
-            </View>
-          </View>
 
-          <Divider style={styles.formDivider} />
+              <Divider style={styles.formDivider} />
+            </>
+          )}
 
           <View style={styles.formSection}>
             <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
@@ -4950,15 +5148,38 @@ function ScanBillScreen() {
             )}
           </View>
 
-          <AppButton
-            label={saving ? tr('Saving bill…') : tr('Save bill')}
-            iconName="save-outline"
-            onPress={handleSaveBill}
-            loading={saving}
-            style={styles.saveButton}
-          />
+          {!archiveOnly && (
+            <AppButton
+              label={saving ? tr('Saving bill for payment…') : tr('Save bill for payment')}
+              iconName="save-outline"
+              onPress={handleSaveBill}
+              loading={saving}
+              style={styles.saveButton}
+            />
+          )}
         </Surface>
       </View>
+
+      {debugOverlayEnabled && (
+        <View style={styles.debugOverlay} pointerEvents="none">
+          <Text style={styles.debugTitle}>{tr('Debug')}</Text>
+          <Text style={styles.debugLine}>{tr('Build')}: {(Constants as any)?.expoConfig?.android?.versionCode || 'n/a'} • {String((Constants as any)?.expoConfig?.extra?.commitHash || 'unknown').slice(0, 7)}</Text>
+          <Text style={styles.debugLine}>{tr('Mode')}: {archiveOnly ? tr('Archive') : tr('To pay')}</Text>
+          <Text style={styles.debugLine}>{tr('Extraction')}: {debugStatus}</Text>
+          <Text style={styles.debugLine}>{tr('File')}: {debugFileInfo?.source || 'original'} • {(typeof debugFileInfo?.size === 'number' ? `${debugFileInfo.size} B` : 'n/a')}</Text>
+          <Text style={styles.debugLine}>{tr('QR found')}: {String(debugQrFound)}</Text>
+          <Text style={styles.debugLine}>{tr('OCR length')}: {debugOcrLength}</Text>
+          <Text style={styles.debugLine}>{tr('AI called')}: {debugAiInfo?.called ? 'true' : 'false'}{debugAiInfo?.model || debugAiInfo?.tier ? ` (${[debugAiInfo?.model, debugAiInfo?.tier].filter(Boolean).join(', ')})` : ''}</Text>
+          <Text style={styles.debugLine}>{tr('Fields')}: {[
+            supplier ? tr('Issuer') : null,
+            invoiceNumber ? tr('Invoice') : null,
+            amountStr ? tr('Amount') : null,
+            dueDate ? tr('Due') : null,
+            iban ? tr('IBAN') : null,
+            reference ? tr('Reference') : null,
+          ].filter(Boolean).join(', ') || '—'}</Text>
+        </View>
+      )}
 
       <Modal
         visible={missingManualVisible}
@@ -11039,7 +11260,17 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
           if (!targetSpaceId) return
         }
 
-        const item = await addToInbox({ spaceId: targetSpaceId, uri: targetUri, name: fileName, mimeType })
+        const fileInfoLog = {
+          originalUri: targetUri,
+          mimeType,
+          fileName,
+          platform: Platform.OS,
+        }
+        console.log('[Import] share/open-with', fileInfoLog)
+        const cached = await ensureLocalReadableFile(targetUri, fileName, mimeType, { allowBase64Fallback: true })
+        console.log('[Import] share cached', { cachedUri: cached.uri, size: cached.size })
+
+        const item = await addToInbox({ spaceId: targetSpaceId, uri: cached.uri, name: fileName, mimeType })
         await scheduleInboxReviewReminder(item.id, item.name, targetSpaceId)
 
         // Več: attempt OCR automatically for better "email/attachment import" flow.
@@ -11060,7 +11291,9 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
           navRef.current?.navigate('Inbox', { highlight: item.id })
         }, 250)
       } catch (e: any) {
-        Alert.alert(tr('Import failed'), e?.message || tr('Could not import this file.'))
+        console.warn('[Import] share failed', { message: e?.message, stack: e?.stack, platform: Platform.OS })
+        const msg = isDebugBuild() ? (e?.message || String(e)) : tr('Could not import this file.')
+        Alert.alert(tr('Import failed'), msg)
       }
     }
   }, [loading, space, spaceId, spacesCtx.spaces, entitlements.plan, entitlements.canUseOCR])
@@ -11598,6 +11831,8 @@ const styles = StyleSheet.create({
   formRow: { flexDirection: 'row', gap: themeLayout.gap },
   flex1: { flex: 1 },
   currencyInput: { width: 96 },
+  inputError: { borderColor: themeColors.danger },
+  fieldErrorText: { fontSize: 11, color: themeColors.danger },
   datePickerContainer: { marginTop: themeSpacing.sm, gap: themeLayout.gap },
   datePickerActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap },
   formDivider: { marginVertical: themeSpacing.sm },
@@ -11606,7 +11841,23 @@ const styles = StyleSheet.create({
   attachmentRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
   attachmentPreview: { marginTop: themeSpacing.sm, gap: themeLayout.gap },
   attachmentImage: { width: 160, height: 120, borderRadius: 12 },
+  attachmentPreviewCompact: { gap: themeSpacing.xs },
+  attachmentImageSmall: { width: 96, height: 72, borderRadius: 8 },
   codeBlock: { marginTop: themeSpacing.xs, fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }), fontSize: 12, color: '#374151' },
+  debugOverlay: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    right: 6,
+    padding: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(15, 23, 42, 0.88)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    zIndex: 50,
+  },
+  debugTitle: { fontSize: 11, fontWeight: '700', color: '#FFFFFF', marginBottom: 4 },
+  debugLine: { fontSize: 10, color: '#E5E7EB' },
 
   // Home tiles
   gridWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },

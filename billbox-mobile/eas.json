@@ -8,6 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
+        "EXPO_PUBLIC_BUILD_PROFILE": "development",
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
         "EXPO_PUBLIC_SITE_URL": "https://getbillbox.com",
         "EXPO_PUBLIC_SUPABASE_URL": "https://wokpzqubsccbpwbkfirz.supabase.co",
@@ -21,6 +22,7 @@
         "buildType": "app-bundle"
       },
       "env": {
+        "EXPO_PUBLIC_BUILD_PROFILE": "preview",
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
         "EXPO_PUBLIC_SITE_URL": "https://getbillbox.com",
         "EXPO_PUBLIC_SUPABASE_URL": "https://wokpzqubsccbpwbkfirz.supabase.co",
@@ -34,6 +36,7 @@
         "buildType": "apk"
       },
       "env": {
+        "EXPO_PUBLIC_BUILD_PROFILE": "preview",
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
         "EXPO_PUBLIC_SITE_URL": "https://getbillbox.com",
         "EXPO_PUBLIC_SUPABASE_URL": "https://wokpzqubsccbpwbkfirz.supabase.co",
@@ -43,6 +46,7 @@
     "production": {
       "autoIncrement": true,
       "env": {
+        "EXPO_PUBLIC_BUILD_PROFILE": "production",
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
         "EXPO_PUBLIC_SITE_URL": "https://getbillbox.com",
         "EXPO_PUBLIC_SUPABASE_URL": "https://wokpzqubsccbpwbkfirz.supabase.co",

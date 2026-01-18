@@ -2287,7 +2287,9 @@ export async function handler(event) {
       const candidates = buildFieldCandidates(text)
       const aiFields = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
       const fields = mergeFields(fields0, aiFields, text)
-      return jsonResponse(200, { ok: true, rawText: text, fields, ai: !!aiFields, mode: 'text' })
+      const aiModel = aiFields ? resolveModel() : null
+      const aiTier = aiFields ? 'document' : null
+      return jsonResponse(200, { ok: true, rawText: text, fields, ai: !!aiFields, aiModel, aiTier, mode: 'text' })
     }
 
     let base64Image
@@ -2425,7 +2427,7 @@ export async function handler(event) {
           const parsedQr = parsePaymentQR_QR(text)
           if (parsedQr) {
             console.log('[OCR] QR found:', true, { mode: 'qr_text' })
-            return jsonResponse(200, { ok: true, rawText: text, fields: sanitizeFields(text, parsedQr), ai: false, mode: 'qr_text' })
+            return jsonResponse(200, { ok: true, rawText: text, fields: sanitizeFields(text, parsedQr), ai: false, aiModel: null, aiTier: null, mode: 'qr_text' })
           }
         }
 
@@ -2439,7 +2441,9 @@ export async function handler(event) {
         }
         const fields = mergeFields(fields0, aiFields, text)
         const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null } }
-        return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, mode: 'pdf_text' })
+        const aiModel = aiFields ? resolveModel() : null
+        const aiTier = aiFields ? 'document' : null
+        return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
       }
 
       // Scanned PDF: use Vision PDF OCR on the first page.
@@ -2516,7 +2520,9 @@ export async function handler(event) {
       }
       const fields = mergeFields(fields0, aiFields, ocrText)
       const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null } }
-      return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, mode: 'pdf_vision' })
+      const aiModel = aiFields ? resolveModel() : null
+      const aiTier = aiFields ? 'document' : null
+      return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_vision' })
     }
 
     const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
@@ -2667,7 +2673,7 @@ export async function handler(event) {
                 }
               } catch {}
 
-              return jsonResponse(200, { ok: true, rawText: qrText, fields: sanitizeFields(qrText, parsedQr), ai: false, mode: 'qr_barcode' })
+              return jsonResponse(200, { ok: true, rawText: qrText, fields: sanitizeFields(qrText, parsedQr), ai: false, aiModel: null, aiTier: null, mode: 'qr_barcode' })
             }
           }
         }
@@ -2715,7 +2721,9 @@ export async function handler(event) {
     const fields = mergeFields(fields0, aiFields, full)
     const meta = buildExtractionMeta(full, fields)
 
-    return jsonResponse(200, { ok: true, rawText: fullText || '', fields, meta, ai: !!aiFields, mode: 'vision_text' })
+    const aiModel = aiFields ? resolveModel() : null
+    const aiTier = aiFields ? 'document' : null
+    return jsonResponse(200, { ok: true, rawText: fullText || '', fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'vision_text' })
   } catch (err) {
     return jsonResponse(500, { ok: false, step: 'catch', error: 'unhandled_exception', detail: safeDetailFromError(err) })
   }

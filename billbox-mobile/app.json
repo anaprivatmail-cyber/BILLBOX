@@ -28,7 +28,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 76,
+      "versionCode": 82,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
@@ -120,7 +120,8 @@
     "extra": {
       "eas": {
         "projectId": "b201d860-e579-4734-acf9-71594e8d0054"
-      }
+      },
+      "commitHash": "6a4f293"
     }
   }
 }
