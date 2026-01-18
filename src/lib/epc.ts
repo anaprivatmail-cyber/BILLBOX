@@ -66,7 +66,13 @@ function normalizeQrText(input: string): string {
 // BCD\n001\n1\nSCT\nBIC\nName\nIBAN\nEURamount\nPurpose\nReference\n...
 export function parseEPC(text: string): EPCResult | null {
   try {
-    const lines = normalizeQrText(text).split(/\n+/).map((l) => l.trim())
+    // IMPORTANT: Preserve empty lines.
+    // EPC QR has fixed positions and the BIC field (line 4) is often empty.
+    // Using /\n+/ would drop that empty line and shift all indices.
+    const lines = normalizeQrText(text)
+      .split(/\n/)
+      .map((l) => l.trim())
+    while (lines.length && lines[lines.length - 1] === '') lines.pop()
     if (lines.length < 7) return null
     if (lines[0] !== 'BCD') return null
     const serviceTag = lines[3]

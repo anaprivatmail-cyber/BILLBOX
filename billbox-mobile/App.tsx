@@ -3261,11 +3261,132 @@ function ScanBillScreen() {
     return picked ? picked : null
   }
 
+  function extractIssuerFromHeaderBlock(rawText: string): string |null {
+    const text = String(rawText || '').replace(/\r/g, '')
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    if (!lines.length) return null
+
+    const headerCount = Math.max(1, Math.min(40, Math.ceil(lines.length * 0.25)))
+    const header = lines.slice(0, headerCount)
+
+    const taxOrContact = /\b(ddv|vat|tax|id\s*no|mati\u010dna|maticna|reg\.?\s*no|registration|tel\.?|phone|fax)\b/i
+    const labelStrip = /^(?:dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor)\s*:?(?:\s+)?(.+)$/i
+
+    const isUrlOrEmailLike = (s: string) => /(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b|@)/i.test(String(s || ''))
+    const hasLegalSuffix = (s: string) => /\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|srl|s\.p\.a\.|ltd|llc|inc|bv|oy|ab|kg|sas|sa|nv|plc)\b/i.test(String(s || ''))
+    const isCustomerLabel = (s: string) => /\b(kupec|odjemalec|pla\u010dnik|placnik|payer|customer|buyer|bill\s*to|sold\s*to|recipient)\b/i.test(String(s || ''))
+    const isAddressOnly = (s: string) => {
+      const t = String(s || '').replace(/\s+/g, ' ').trim()
+      if (!t) return true
+      if (!/[A-Za-zÀ-žČŠŽčšž]/.test(t)) return true
+      if (/\b(ulica|cesta|street|st\.?|road|rd\.?|avenue|ave\.?|strasse|stra\u00dfe|via|trg|naselje|posta|po\u0161t\S*|zip)\b/i.test(t) && /\d{1,4}\b/.test(t)) return true
+      if (/\b\d{4,6}\b/.test(t) && !hasLegalSuffix(t) && t.length <= 40) return true
+      return false
+    }
+
+    let best: { v: string; score: number } | null = null
+    for (let i = 0; i < header.length; i++) {
+      const raw = String(header[i] || '').replace(/\s+/g, ' ').trim()
+      const stripped = raw.match(labelStrip)
+      const v = String(stripped?.[1] || raw).replace(/\s+/g, ' ').trim()
+      if (!v) continue
+      if (isUrlOrEmailLike(v)) continue
+      if (!/[A-Za-zÀ-žČŠŽčšž]/.test(v)) continue
+      if (looksLikeMisassignedName(v)) continue
+      if (isCustomerLabel(raw) || isCustomerLabel(v)) continue
+      if (isAddressOnly(v)) continue
+      if (/\b(iban|trr|sklic|referenca|reference|model|namen|purpose|znesek|rok\s*pla\S*|zapad|due\s*date)\b/i.test(raw)) continue
+
+      let score = 0
+      score += Math.max(0, 6 - Math.floor(i / 5))
+      if (hasLegalSuffix(v)) score += 10
+      const digits = (v.match(/\d/g) || []).length
+      const letters = (v.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
+      if (letters >= 8 && digits <= 2) score += 3
+      if (v.length >= 4 && v.length <= 60) score += 2
+      const window = [header[i - 2], header[i - 1], header[i], header[i + 1], header[i + 2]].filter(Boolean).join(' ')
+      if (taxOrContact.test(window)) score += 4
+      if (/\bGEN\s*-?\s*I\b/i.test(v)) score += 8
+
+      if (!best || score > best.score) best = { v, score }
+    }
+    return best && best.score >= 6 ? best.v : null
+  }
+
+  function extractPayerNameFromText(rawText: string, issuer?: string): string | null {
+    const lines = String(rawText || '').replace(/\r/g, '').split(/\n+/).map((l) => l.trim())
+    const issuerNorm = String(issuer || '').replace(/\s+/g, ' ').trim().toUpperCase()
+    const startRe = /^(?:kupec|odjemalec|pla\u010dnik|placnik|customer|buyer|bill\s*to|sold\s*to|recipient|destinatario|cliente|empf[a\u00e4]nger)\b\s*:?(.*)$/i
+    const stopRe = /\b(iban|trr|sklic|referenca|reference|model|rok\s*pla\S*|due\s*date|znesek|amount|total|invoice|ra\u010dun)\b/i
+    const isUrlOrEmailLike = (s: string) => /(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b|@)/i.test(String(s || ''))
+    const isAddressOnly = (s: string) => {
+      const t = String(s || '').replace(/\s+/g, ' ').trim()
+      if (!t) return true
+      if (!/[A-Za-zÀ-žČŠŽčšž]/.test(t)) return true
+      if (/\b(ulica|cesta|street|st\.?|road|rd\.?|avenue|ave\.?|strasse|stra\u00dfe|via|trg|naselje|posta|po\u0161t\S*|zip)\b/i.test(t) && /\d{1,4}\b/.test(t)) return true
+      return false
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const l = String(lines[i] || '').trim()
+      const m = l.match(startRe)
+      if (!m) continue
+
+      const candidates: string[] = []
+      const direct = String(m[1] || '').trim()
+      if (direct) candidates.push(direct)
+      for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) {
+        const x = String(lines[j] || '').trim()
+        if (!x) break
+        if (stopRe.test(x)) break
+        candidates.push(x)
+      }
+
+      for (const c of candidates) {
+        const v = String(c || '').replace(/\s+/g, ' ').trim()
+        if (!v) continue
+        if (isUrlOrEmailLike(v)) continue
+        if (looksLikeMisassignedName(v)) continue
+        if (isAddressOnly(v)) continue
+        const vNorm = v.toUpperCase()
+        if (issuerNorm && (vNorm === issuerNorm || issuerNorm.includes(vNorm))) continue
+        if (v.length < 2 || v.length > 70) continue
+        return v
+      }
+    }
+    return null
+  }
+
+  function extractMeaningfulPurposeFromText(rawText: string): string | null {
+    const labeled = extractPurposeFromText(rawText)
+    if (labeled) return labeled
+
+    const text = String(rawText || '').replace(/\r/g, '')
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    const monthSl = /(januar|februar|marec|april|maj|junij|julij|avgust|september|oktober|november|december)\s+20\d{2}/i
+    const monthEn = /(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+20\d{2}/i
+    const service = /(elektri\S*\s*energija|electric\S*\s*energy|electricity|power\b|plin\b|gas\b|internet\b|zavarovanj\S*|komunal\S*|voda\b|waste\b|heating|ogrevanj\S*)/i
+    const ignore = /(iban|trr|sklic|referenca|reference|model|rok\s*pla\S*|zapad|znesek|amount|total|ddv|vat|subtotal|grand\s*total|\btotal\b)/i
+
+    let best: { v: string; score: number } | null = null
+    for (const l of lines) {
+      const v = String(l || '').replace(/\s+/g, ' ').trim()
+      if (!v || v.length < 6 || v.length > 90) continue
+      if (ignore.test(v)) continue
+      if (!/[A-Za-zÀ-žČŠŽčšž]/.test(v)) continue
+      let score = 0
+      if (service.test(v)) score += 3
+      if (monthSl.test(v) || monthEn.test(v)) score += 3
+      if (!best || score > best.score) best = { v, score }
+    }
+    return best && best.score >= 6 ? best.v : null
+  }
+
   function extractInvoiceNumberFromText(rawText: string): string | null {
     // IMPORTANT: Invoice number must ONLY come from labeled fields.
-    // Allowed labels: "Račun št", "Številka računa", "Invoice no", "Račun številka".
+    // Allowed labels (multilingual): "Račun št", "Številka računa", "Račun številka", "Invoice No/#", "Document No".
     const cand = extractLabeledValueFromText(rawText, [
-      /^(?:ra\u010dun\s*\u0161t\.?|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*no\.?)\s*:?\s*(.+)$/i,
+      /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\s*:?\s*(.+)$/i,
     ])
     const v = String(cand || '').trim()
     if (!v) return null
@@ -3343,14 +3464,17 @@ function ScanBillScreen() {
       const prevRank = typeof fieldSourceRankRef.current[key] === 'number' ? fieldSourceRankRef.current[key] : 999
       return incomingRank < prevRank
     }
-    const markFieldSource = (key: string) => {
-      fieldSourceRankRef.current[key] = incomingRank
+    const markFieldSource = (key: string, rankOverride?: number) => {
+      fieldSourceRankRef.current[key] = typeof rankOverride === 'number' ? rankOverride : incomingRank
     }
 
-    // Names: prefer evidence from OCR text first (labels anywhere in document), never payer.
+    const isQr = incomingRank === 0
+
+    // Issuer (Dobavitelj/Prejemnik): invoice issuer. For non-QR sources, prefer header-block evidence.
     const creditorFromText = extractCreditorNameFromText(rawText)
     const supplierFromText = extractSupplierNameFromText(rawText)
     const bestFromText = pickBestNameFromWholeText(rawText)
+    const issuerFromHeader = !isQr ? extractIssuerFromHeaderBlock(rawText) : null
     const normalizeIssuerName = (s: string): string => {
       const v = String(s || '').replace(/\s+/g, ' ').trim()
       if (!v) return ''
@@ -3360,8 +3484,10 @@ function ScanBillScreen() {
       }
       return v
     }
-    const nameCandidateRaw = pickNameCandidate(creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
+    const nameCandidateRaw = pickNameCandidate(issuerFromHeader, creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
     const nameCandidate = normalizeIssuerName(nameCandidateRaw)
+
+    const payerFromDoc = !isQr ? extractPayerNameFromText(rawText, nameCandidate) : null
     if (nameCandidate) {
       const canOverwriteSupplier = !editedRef.current.supplier || !supplier.trim() || looksLikeMisassignedName(supplier)
       const canOverwriteCreditor = !editedRef.current.creditorName || !creditorName.trim() || looksLikeMisassignedName(creditorName)
@@ -3381,12 +3507,12 @@ function ScanBillScreen() {
       if (!inv) return false
       const invNorm = inv.toUpperCase().replace(/\s+/g, '')
       const lines = String(text || '').replace(/\r/g, '').split(/\n+/)
-      const labelRe = /^(?:ra\u010dun\s*\u0161t\.?|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*no\.?)\b/i
+      const labelRe = /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
       for (let i = 0; i < lines.length; i++) {
         const l = String(lines[i] || '').trim()
         if (!l) continue
         if (!labelRe.test(l)) continue
-        const m = l.match(/^(?:ra\u010dun\s*\u0161t\.?|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*no\.?)\s*:?\s*(.+)$/i)
+        const m = l.match(/^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\s*:?\s*(.+)$/i)
         const direct = String(m?.[1] || '').trim()
         const directNorm = direct.toUpperCase().replace(/\s+/g, '')
         if (directNorm && directNorm.includes(invNorm)) return true
@@ -3398,20 +3524,19 @@ function ScanBillScreen() {
     }
     const invFromDoc = extractInvoiceNumberFromText(rawText) || ''
     const invFromField = (rawInvoice || '').trim()
-    const invCandidate = (invFromField && hasInvoiceLabelEvidence(rawText, invFromField) ? invFromField.toUpperCase().replace(/\s+/g, '') : '') || invFromDoc
+    let invCandidate = (invFromField && hasInvoiceLabelEvidence(rawText, invFromField) ? invFromField.toUpperCase().replace(/\s+/g, '') : '') || invFromDoc
+    let invoiceGenerated = false
+    if (!invCandidate && !isQr) {
+      const baseIso = (String(rawDue || '').trim().match(/^\d{4}-\d{2}-\d{2}$/)?.[0]) || new Date().toISOString().slice(0, 10)
+      const stamp = baseIso.replace(/-/g, '')
+      invCandidate = `DOC-${stamp}-001`
+      invoiceGenerated = true
+    }
     if (invCandidate) {
       if (canSetField('invoice_number', invCandidate, editedRef.current.invoiceNumber, invoiceNumber)) {
         setInvoiceNumber(invCandidate)
-        markFieldSource('invoice_number')
-      }
-      // Accounting rule: invoice number is mandatory, and can safely be used as default purpose.
-      if (!purpose.trim() && !String(rawPurpose || '').trim()) {
-        const period = extractBillingPeriodFromText(rawText)
-        const autoPurpose = period ? `Plačilo ${invCandidate} ${period}` : `Plačilo ${invCandidate}`
-        if (canSetField('purpose', autoPurpose, editedRef.current.purpose, purpose)) {
-          setPurpose(autoPurpose)
-          markFieldSource('purpose')
-        }
+        // Generated invoice numbers are low-priority fallbacks and must be overwritable.
+        markFieldSource('invoice_number', invoiceGenerated ? 999 : undefined)
       }
     }
 
@@ -3461,22 +3586,24 @@ function ScanBillScreen() {
     }
 
     const purposeClean = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
-    if (purposeClean && canSetField('purpose', purposeClean, editedRef.current.purpose, purpose)) {
-      setPurpose(purposeClean)
+    const meaningfulPurpose = !isQr ? extractMeaningfulPurposeFromText(rawText) : null
+    const preferredPurpose = meaningfulPurpose || (purposeClean && purposeClean.toLowerCase() !== 'plačilo' ? purposeClean : '')
+    if (preferredPurpose && canSetField('purpose', preferredPurpose, editedRef.current.purpose, purpose)) {
+      setPurpose(preferredPurpose)
       markFieldSource('purpose')
     }
-    // Purpose is mandatory for bank apps. If the QR/OCR did not include a purpose and
-    // we also did not derive one from invoice number, fill a safe generic default.
-    if (!purposeClean && !purpose.trim() && !editedRef.current.purpose) {
-      const hasSignal = Boolean(
-        invCandidate ||
-        foundIban ||
-        ref ||
-        (typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0)
-      )
-      if (hasSignal && canSetField('purpose', 'Plačilo', editedRef.current.purpose, purpose)) {
-        setPurpose('Plačilo')
-        markFieldSource('purpose')
+
+    // Purpose is mandatory (non-QR): fill deterministic fallback in strict order.
+    if (!isQr && !editedRef.current.purpose && !purpose.trim()) {
+      const invForPurpose = String(invCandidate || invoiceNumber || '').trim()
+      const payerForPurpose = String(payerFromDoc || '').trim()
+      const fallbackPurpose = invForPurpose
+        ? `Plačilo ${invForPurpose}`
+        : (payerForPurpose ? `Plačilo ${payerForPurpose}` : 'Plačilo')
+      if (canSetField('purpose', fallbackPurpose, editedRef.current.purpose, purpose)) {
+        setPurpose(fallbackPurpose)
+        // Fallback purposes must be overwritable by later extracted meaningful purposes.
+        markFieldSource('purpose', 999)
       }
     }
 
@@ -3503,6 +3630,16 @@ function ScanBillScreen() {
     if (dueClean && /^\d{4}-\d{2}-\d{2}$/.test(dueClean) && canSetField('due_date', dueClean, editedRef.current.dueDate, dueDate)) {
       setDueDate(dueClean)
       markFieldSource('due_date')
+    }
+    if (!isQr && !editedRef.current.dueDate && !dueDate.trim() && !dueClean) {
+      const base = new Date()
+      base.setDate(base.getDate() + 14)
+      const iso = base.toISOString().slice(0, 10)
+      if (canSetField('due_date', iso, editedRef.current.dueDate, dueDate)) {
+        setDueDate(iso)
+        // Default due dates must be overwritable by later extracted due dates.
+        markFieldSource('due_date', 999)
+      }
     }
 
     // Payment details (non-IBAN systems): treat as informational; still respect precedence.
@@ -3970,9 +4107,11 @@ function ScanBillScreen() {
       return
     }
     const amt = Number(String(amountStr).replace(',', '.'))
-    if (Number.isNaN(amt) || amt <= 0) {
-      Alert.alert(tr('Invalid amount'), tr('Provide a numeric amount greater than 0.'))
-      return
+    if (!archiveOnly) {
+      if (Number.isNaN(amt) || amt <= 0) {
+        Alert.alert(tr('Invalid amount'), tr('Provide a numeric amount greater than 0.'))
+        return
+      }
     }
 
     const trimmedDue = dueDate.trim()

@@ -445,27 +445,323 @@ function textContainsReference(rawText, ref) {
   return compact.includes(s)
 }
 
+function splitLines(rawText) {
+  return String(rawText || '')
+    .replace(/\r/g, '')
+    .split(/\n+/)
+    .map((l) => String(l || '').trim())
+    .filter(Boolean)
+}
+
+function isUrlOrEmailLike(input) {
+  const s = String(input || '').trim()
+  if (!s) return false
+  return /(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b|@)/i.test(s)
+}
+
+function hasLegalSuffix(input) {
+  const s = String(input || '').replace(/\s+/g, ' ').trim()
+  if (!s) return false
+  // Avoid \b around suffixes that end with '.' (\b doesn't match after a non-word char).
+  // Accept common spacing/dot variants (e.g. d o o, d.o.o, d.o.o.).
+  return /(?:^|[^A-Za-z0-9])(?:d\s*\.?\s*o\s*\.?\s*o\s*\.?|d\s*\.?\s*d\s*\.?|s\s*\.?\s*p\s*\.?|gmbh|ag|srl|s\s*\.?\s*p\s*\.?\s*a\s*\.?|ltd|llc|inc|bv|oy|ab|kg|sas|sa|nv|plc)(?:$|[^A-Za-z0-9])/i.test(s)
+}
+
+function isCustomerLabelLine(input) {
+  const s = String(input || '')
+  return /\b(kupec|odjemalec|pla\u010dnik|placnik|payer|customer|buyer|bill\s*to|sold\s*to|recipient|destinatario|cliente|empf[a\u00e4]nger)\b/i.test(s)
+}
+
+function isLikelyAddressOnly(input) {
+  const s = String(input || '').replace(/\s+/g, ' ').trim()
+  if (!s) return true
+  if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) return true
+  // Street/address keywords + a number, or ZIP/postal patterns.
+  if (/\b(ulica|cesta|street|st\.?|road|rd\.?|avenue|ave\.?|strasse|stra\u00dfe|via|trg|naselje|posta|po\u0161t\S*|zip)\b/i.test(s) && /\d{1,4}\b/.test(s)) return true
+  if (/\b\d{4,6}\b/.test(s) && !hasLegalSuffix(s) && s.length <= 40) return true
+  return false
+}
+
+function extractIssuerFromHeaderBlock(rawText) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return null
+
+  const headerCount = Math.max(1, Math.min(40, Math.ceil(lines.length * 0.25)))
+  const header = lines.slice(0, headerCount)
+
+  const taxOrContact = /\b(ddv|vat|tax|id\s*no|mati\u010dna|maticna|reg\.?\s*no|registration|tel\.?|phone|fax)\b/i
+
+  const scoreLine = (line, idx) => {
+    const raw = String(line || '').replace(/\s+/g, ' ').trim()
+    if (!raw) return { score: -999, value: '' }
+
+    // Reject obvious non-issuer structural lines.
+    if (/^[-_]{3,}$/.test(raw) || /\bpage\b|\bstran\b|\bheader\b/i.test(raw)) return { score: -999, value: '' }
+
+    // Strip common issuer/payee label prefixes.
+    const stripped = raw.match(/^(?:dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor)\s*:?(?:\s+)?(.+)$/i)
+    const fromLabel = Boolean(stripped)
+    const s = String(stripped?.[1] || raw).replace(/\s+/g, ' ').trim()
+    if (!s) return { score: -999, value: '' }
+    if (isUrlOrEmailLike(s)) return { score: -999, value: '' }
+    if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) return { score: -999, value: '' }
+    if (looksLikeMisassignedName(s)) return { score: -999, value: '' }
+    if (isCustomerLabelLine(raw) || isCustomerLabelLine(s)) return { score: -999, value: '' }
+    if (isLikelyAddressOnly(s)) return { score: -999, value: '' }
+
+    // Reject pure payment labels.
+    if (/\b(iban|trr|sklic|referenca|reference|model|namen|purpose|znesek|rok\s*pla\S*|zapad|due\s*date)\b/i.test(raw)) return { score: -50, value: '' }
+
+    let score = 0
+    // Strong preference for legal suffix.
+    if (hasLegalSuffix(s)) score += 10
+    // Prefer earlier lines.
+    score += Math.max(0, 6 - Math.floor(idx / 5))
+    // Prefer company-like names.
+    const digits = (s.match(/\d/g) || []).length
+    const letters = (s.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
+    if (letters >= 8 && digits <= 2) score += 3
+    if (s.length >= 4 && s.length <= 60) score += 2
+    // Boost if near tax/contact markers.
+    const window = [header[idx - 2], header[idx - 1], header[idx], header[idx + 1], header[idx + 2]].filter(Boolean).join(' ')
+    const hasContext = taxOrContact.test(window) || fromLabel
+    if (taxOrContact.test(window)) score += 4
+    // If GEN-I appears, boost (safe brand/company marker).
+    const hasGenI = /\bGEN\s*-?\s*I\b/i.test(s)
+    if (hasGenI) score += 8
+
+    // Hard requirement: issuer must have either a legal suffix, a strong header context, or GEN-I marker.
+    if (!hasLegalSuffix(s) && !hasContext && !hasGenI) return { score: -999, value: '' }
+    return { score, value: s }
+  }
+
+  let best = null
+  let bestScore = -1
+  for (let i = 0; i < header.length; i++) {
+    const sc = scoreLine(header[i], i)
+    if (sc.score > bestScore) {
+      bestScore = sc.score
+      best = sc.value
+    }
+  }
+  const picked = bestScore >= 6 ? String(best || '').replace(/\s+/g, ' ').trim() : null
+  return picked || null
+}
+
+function extractPayerNameFromText(rawText, issuer) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return null
+  const issuerNorm = String(issuer || '').replace(/\s+/g, ' ').trim().toUpperCase()
+
+  const startRe = /^(?:kupec|odjemalec|pla\u010dnik|placnik|customer|buyer|bill\s*to|sold\s*to|recipient|destinatario|cliente|empf[a\u00e4]nger)\b\s*:?(.*)$/i
+  const stopRe = /\b(iban|trr|sklic|referenca|reference|model|rok\s*pla\S*|due\s*date|znesek|amount|total|invoice|ra\u010dun)\b/i
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]
+    const m = String(l || '').match(startRe)
+    if (!m) continue
+
+    const direct = String(m[1] || '').trim()
+    const candidates = []
+    if (direct) candidates.push(direct)
+
+    // Collect a few following lines until we hit another block.
+    for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) {
+      const x = String(lines[j] || '').trim()
+      if (!x) break
+      if (stopRe.test(x) && !hasLegalSuffix(x)) break
+      candidates.push(x)
+    }
+
+    for (const c of candidates) {
+      const v = String(c || '').replace(/\s+/g, ' ').trim()
+      if (!v) continue
+      if (isUrlOrEmailLike(v)) continue
+      if (looksLikeMisassignedName(v)) continue
+      if (isLikelyAddressOnly(v)) continue
+      const vNorm = v.toUpperCase()
+      if (issuerNorm && vNorm === issuerNorm) continue
+      // Avoid selecting obvious issuer lines.
+      if (issuerNorm && issuerNorm.includes(vNorm)) continue
+      if (v.length < 2 || v.length > 70) continue
+      return v
+    }
+  }
+
+  return null
+}
+
+function extractInvoiceNumberLabeled(rawText) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return null
+
+  const labelRe = /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+  const valueRe = /\b([A-Z0-9][A-Z0-9\-\/.]{2,})\b/i
+
+  const normalize = (s) => String(s || '').trim().toUpperCase().replace(/\s+/g, '')
+  const isBad = (v) => {
+    const s = normalize(v)
+    if (!s) return true
+    if (!/\d/.test(s)) return true
+    if (s.length < 3 || s.length > 32) return true
+    if (isValidIbanChecksum(s)) return true
+    if (/^(SI|RF)\d{2}[0-9A-Z\-\/]{4,}$/i.test(s)) return true
+    if (/^GEN\s*[-_]?\s*1$/i.test(v) || /^GEN\s*[-_]?\s*I$/i.test(v)) return true
+    if (isUrlOrEmailLike(v)) return true
+    return false
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').trim()
+    if (!l) continue
+    if (!labelRe.test(l)) continue
+    const after = String(l.split(/:\s*/, 2)[1] || '').trim()
+    const directToken = (after.match(valueRe) || [])[1] || after
+    if (directToken && !isBad(directToken)) return normalize(directToken)
+    const next = String(lines[i + 1] || '').trim()
+    const nxtTok = (next.match(valueRe) || [])[1]
+    if (nxtTok && !isBad(nxtTok)) return normalize(nxtTok)
+  }
+
+  return null
+}
+
+function extractMeaningfulDescription(rawText) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return null
+
+  // Prefer labeled purpose/description if present.
+  for (const l of lines) {
+    const m = l.match(/^(?:namen(?:\s+pla\S*)?|opis(?:\s+pla\S*)?|purpose|memo|description|payment\s*for)\s*:?\s*(.+)$/i)
+    if (!m) continue
+    const v = String(m[1] || '').replace(/\s+/g, ' ').trim()
+    if (v && v.length >= 4) return v
+  }
+
+  // Unlabeled: very conservative service+period line.
+  const monthSl = /(januar|februar|marec|april|maj|junij|julij|avgust|september|oktober|november|december)\s+20\d{2}/i
+  const monthEn = /(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+20\d{2}/i
+  const period = new RegExp(`(?:${monthSl.source})|(?:${monthEn.source})`, 'i')
+  const service = /(elektri\S*\s*energija|electric\S*\s*energy|electricity|power\b|plin\b|gas\b|internet\b|zavarovanj\S*|komunal\S*|voda\b|waste\b|heating|ogrevanj\S*)/i
+  const ignore = /(iban|trr|sklic|referenca|reference|model|rok\s*pla\S*|zapad|znesek|amount|total|ddv|vat|subtotal|grand\s*total|\btotal\b|invoice|ra\u010dun\s*(?:\u0161t|st|#))/i
+
+  let best = null
+  let bestScore = -1
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').replace(/\s+/g, ' ').trim()
+    if (!l || l.length < 6 || l.length > 90) continue
+    if (ignore.test(l)) continue
+    if (isUrlOrEmailLike(l)) continue
+    if (!/[A-Za-zÀ-žČŠŽčšž]/.test(l)) continue
+
+    let score = 0
+    if (service.test(l)) score += 3
+    if (period.test(l)) score += 3
+    if (score > bestScore) {
+      bestScore = score
+      best = l
+    }
+  }
+  if (bestScore >= 6 && best) return best
+  return null
+}
+
+function addDaysIso(isoDate, days) {
+  const base = new Date(`${String(isoDate).slice(0, 10)}T00:00:00.000Z`)
+  if (Number.isNaN(base.getTime())) return null
+  base.setUTCDate(base.getUTCDate() + Number(days || 0))
+  return base.toISOString().slice(0, 10)
+}
+
+function pickDocRefDateStamp(out) {
+  const due = String(out?.due_date || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(due)) return due.replace(/-/g, '')
+
+  // Try issue date labels.
+  const text = String(out?._rawTextForRef || '')
+  const m1 = text.match(/\b(?:datum\s*izdaje|issue\s*date|datum)\s*:?\s*(\d{4}[-\/]\d{2}[-\/]\d{2}|\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})\b/i)
+  if (m1) {
+    // Best-effort parse: reuse the extractFields date parser indirectly by accepting ISO-only; otherwise ignore.
+    const token = String(m1[1] || '').trim()
+    const iso = token.match(/^\d{4}-\d{2}-\d{2}$/) ? token : null
+    if (iso) return iso.replace(/-/g, '')
+  }
+
+  return new Date().toISOString().slice(0, 10).replace(/-/g, '')
+}
+
+function generateInternalDocRef(dateStamp, seq = '001') {
+  const ds = String(dateStamp || '').replace(/[^0-9]/g, '').slice(0, 8)
+  const safe = ds.length === 8 ? ds : new Date().toISOString().slice(0, 10).replace(/-/g, '')
+  const n = String(seq || '001').replace(/[^0-9]/g, '').padStart(3, '0').slice(0, 3)
+  return `DOC-${safe}-${n}`
+}
+
 function sanitizeFields(rawText, fields) {
   const out = { ...fields }
-  // IBAN: never guess. If multiple are present, only auto-pick a clearly best candidate.
-  const best = pickBestIbanFromText(rawText)
-  if (out.iban) {
-    const iban = normalizeIban(out.iban)
-    if (!isValidIbanChecksum(iban)) out.iban = null
-    else if (best.iban && iban === best.iban) out.iban = iban
-    else if (textContainsLabeledIban(rawText, iban) && best.reason !== 'ambiguous_multi') out.iban = iban
-    else out.iban = best.iban || null
+  out._rawTextForRef = rawText
+
+  const rawTextStr = String(rawText || '')
+  const firstLine = String(rawTextStr.split(/\r?\n/)[0] || '').trim()
+  const isQrText = firstLine === 'BCD' || /\bUPNQR\b/i.test(rawTextStr)
+
+  const reviewReasons = []
+
+  // IBAN
+  if (isQrText) {
+    // QR mapping is deterministic: validate what QR provided; do not attempt OCR heuristics.
+    if (out.iban) {
+      const iban = normalizeIban(out.iban)
+      out.iban = isValidIbanChecksum(iban) ? iban : null
+    } else {
+      out.iban = null
+    }
   } else {
-    out.iban = best.iban || null
+    // OCR/PDF: never guess. If multiple are present, only auto-pick a clearly best candidate.
+    const best = pickBestIbanFromText(rawText)
+    if (out.iban) {
+      const iban = normalizeIban(out.iban)
+      if (!isValidIbanChecksum(iban)) out.iban = null
+      else if (best.iban && iban === best.iban) out.iban = iban
+      else if (textContainsLabeledIban(rawText, iban) && best.reason !== 'ambiguous_multi') out.iban = iban
+      else out.iban = best.iban || null
+    } else {
+      out.iban = best.iban || null
+    }
+  }
+
+  // Reference: accept SIxx/RFxx; never discard valid references as “IBAN fragments”.
+  const bestRefs = isQrText ? [] : extractReferenceCandidates(rawText)
+  const normalizeRef = (r) => String(r || '').replace(/\s+/g, '').toUpperCase()
+  const isValidRef = (r) => {
+    const v = normalizeRef(r)
+    if (!v) return false
+    if (!/^(SI|RF)\d{2}/i.test(v)) return false
+    if (v.length < 6) return false
+    if (isValidIbanChecksum(v)) return false
+    return true
   }
   if (out.reference) {
-    const r = String(out.reference || '').replace(/\s+/g, '').toUpperCase()
-    // Keep conservative: must look like SI.. or be explicitly present in OCR text.
-    if (!(r.startsWith('SI') && r.length >= 6) && !textContainsReference(rawText, r)) out.reference = null
+    const r = normalizeRef(out.reference)
+    if (!isValidRef(r) && !textContainsReference(rawText, r)) out.reference = null
     else out.reference = r
   }
+  if (!out.reference && bestRefs.length) {
+    const cand = bestRefs.find(isValidRef) || null
+    out.reference = cand ? normalizeRef(cand) : null
+  }
+
+  // Amount: keep only reasonable numbers; if missing, try labeled amount candidates.
   if (typeof out.amount === 'number') {
     if (!Number.isFinite(out.amount) || out.amount <= 0 || out.amount > 1000000) out.amount = null
+  }
+  if (out.amount == null) {
+    const labeledAmounts = extractLabeledAmountCandidates(rawText)
+    const bestAmount = labeledAmounts.find((a) => a && typeof a.amount === 'number' && a.amount > 0 && a.currency) || null
+    if (bestAmount) {
+      out.amount = bestAmount.amount
+      out.currency = bestAmount.currency
+    }
   }
   // Amount without a currency is too error-prone in OCR; only keep when currency is present/evidenced.
   if (typeof out.amount === 'number' && !out.currency) {
@@ -474,32 +770,93 @@ function sanitizeFields(rawText, fields) {
     else out.amount = null
   }
   if (out.currency && !/^[A-Z]{3}$/.test(String(out.currency))) out.currency = null
-  if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(String(out.due_date))) out.due_date = null
-  if (out.supplier && typeof out.supplier === 'string') {
-    const s = out.supplier.trim()
-    if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) out.supplier = null
-    else out.supplier = s
-  }
-  if (out.creditor_name && typeof out.creditor_name === 'string') {
-    const s = out.creditor_name.trim()
-    if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) out.creditor_name = null
-    else out.creditor_name = s
-  }
-  if (out.creditor_name && looksLikeMisassignedName(out.creditor_name)) out.creditor_name = null
-  if (out.supplier && looksLikeMisassignedName(out.supplier)) out.supplier = null
 
-  // App rule: supplier and payee are the same entity.
-  // Prefer creditor_name if available (it tends to come from explicit "Prejemnik" labels).
-  const sameName = out.creditor_name || out.supplier || null
-  if (sameName) {
-    out.creditor_name = sameName
-    out.supplier = sameName
+  // Due date: ISO only; for non-QR sources default to today + 14 days and mark needsReview.
+  if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(String(out.due_date))) out.due_date = null
+  if (!out.due_date && !isQrText) {
+    const todayIso = new Date().toISOString().slice(0, 10)
+    const fallback = addDaysIso(todayIso, 14)
+    if (fallback) {
+      out.due_date = fallback
+      reviewReasons.push('due_date_defaulted')
+    }
   }
-  if (out.purpose && typeof out.purpose === 'string') out.purpose = out.purpose.trim() || null
+  if (!out.due_date) out.due_date = null
+
+  // Issuer (supplier/recipient): invoice issuer from header block (non-QR); never a domain/URL.
+  const issuerFromHeader = isQrText ? null : extractIssuerFromHeaderBlock(rawText)
+  const normalizeName = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+  const isAcceptableIssuerName = (s) => {
+    const v = normalizeName(s)
+    if (!v) return false
+    if (!/[A-Za-zÀ-žČŠŽčšž]/.test(v)) return false
+    if (looksLikeMisassignedName(v)) return false
+    if (isUrlOrEmailLike(v)) return false
+    return true
+  }
+  const cleanedSupplier = out.supplier && typeof out.supplier === 'string' ? normalizeName(out.supplier) : null
+  const cleanedCreditor = out.creditor_name && typeof out.creditor_name === 'string' ? normalizeName(out.creditor_name) : null
+
+  // Prefer evidence-based header issuer, then any upstream supplier, then creditor_name.
+  // Crucially: do not let a URL-like creditor_name wipe out a valid supplier/header.
+  const issuerCandidate = [issuerFromHeader, cleanedSupplier, cleanedCreditor].find((c) => isAcceptableIssuerName(c)) || null
+  const issuer = issuerCandidate ? normalizeName(issuerCandidate) : null
+  if (issuer) {
+    out.creditor_name = issuer
+    out.supplier = issuer
+  } else {
+    out.creditor_name = null
+    out.supplier = null
+  }
+
+  // Payer: invoice addressee (only for fallback purpose); never equal issuer.
+  const payer = isQrText ? null : extractPayerNameFromText(rawText, issuer)
+  out.payer_name = payer || null
+
+  // Invoice number: ONLY labeled extraction; for non-QR sources, generate internal DOC-YYYYMMDD-XXX when missing.
+  const invLabeled = isQrText ? null : extractInvoiceNumberLabeled(rawText)
+  out.invoice_number = invLabeled || (typeof out.invoice_number === 'string' ? String(out.invoice_number).trim() : null)
+  // If we have an invoice_number from upstream, accept it only if it appears in a labeled context.
+  if (out.invoice_number && !invLabeled) {
+    const probe = String(out.invoice_number || '').trim()
+    const found = extractInvoiceNumberLabeled(rawText)
+    if (!found || found !== probe.toUpperCase().replace(/\s+/g, '')) out.invoice_number = null
+  }
+  if (!out.invoice_number && !isQrText) {
+    const stamp = pickDocRefDateStamp(out)
+    out.invoice_number = generateInternalDocRef(stamp, '001')
+    reviewReasons.push('invoice_number_generated')
+  }
+
+  // Purpose MUST always be filled for OCR/PDF mapping. For QR, keep only what QR provided.
+  const meaningful = isQrText ? null : extractMeaningfulDescription(rawText)
+  const inv = String(out.invoice_number || '').trim()
+  const payerName = String(out.payer_name || '').trim()
+  if (meaningful) out.purpose = meaningful
+  else if (!isQrText && inv) out.purpose = `Plačilo ${inv}`
+  else if (!isQrText && payerName) out.purpose = `Plačilo ${payerName}`
+  else if (!isQrText) out.purpose = 'Plačilo'
+  else out.purpose = out.purpose ? String(out.purpose).trim() || null : null
+
   if (out.payment_details && typeof out.payment_details === 'string') {
     const s = out.payment_details.trim()
     out.payment_details = s ? (s.length > 1200 ? s.slice(0, 1200) : s) : null
   }
+
+  // Required (*) fields for the bill form (issuer, invoice, amount, due date, purpose)
+  const missingFields = []
+  if (!out.supplier) missingFields.push('supplier')
+  if (!out.invoice_number) missingFields.push('invoice_number')
+  const okAmt = typeof out.amount === 'number' && Number.isFinite(out.amount) && out.amount > 0
+  if (!okAmt) missingFields.push('amount')
+  if (!out.due_date) missingFields.push('due_date')
+  if (!out.purpose) missingFields.push('purpose')
+
+  out.missingFields = missingFields
+  out.reviewReasons = reviewReasons
+  out.needsReview = Boolean(missingFields.length > 0 || reviewReasons.length > 0)
+  delete out._rawTextForRef
+
   return out
 }
 
