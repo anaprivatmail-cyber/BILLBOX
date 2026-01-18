@@ -46,6 +46,11 @@ import { ENABLE_PUSH_NOTIFICATIONS, PUBLIC_SITE_URL, ENABLE_IAP } from './src/en
 import type { Space, SpacePlan } from './src/spaces'
 import { ensureDefaults as ensureSpacesDefaults, upsertSpace, removeSpace, loadCurrentSpaceId, saveCurrentSpaceId, loadSpaces } from './src/spaces'
 import { showUpgradeAlert, setUpgradeNavigation, setUpgradePrompt, type EntitlementsSnapshot, type PlanId, useEntitlements, EntitlementsProvider } from './src/entitlements'
+import {
+  DEFAULT_BILL_DRAFT_SELECTION,
+  archiveOnlyFromBillDraftSelection,
+  billDraftSelectionFromArchiveOnly,
+} from './src/billDraftMode'
 
 const BRAND_WORDMARK = require('./assets/logo/logo-wordmark.png')
 const BRAND_ICON = require('./assets/logo/logo-icon.png')
@@ -3025,7 +3030,7 @@ function ScanBillScreen() {
   const [currency, setCurrency] = useState('EUR')
   const [dueDate, setDueDate] = useState('')
   const [showDuePicker, setShowDuePicker] = useState(false)
-  const [archiveOnly, setArchiveOnly] = useState(false)
+  const [archiveOnly, setArchiveOnly] = useState(archiveOnlyFromBillDraftSelection(DEFAULT_BILL_DRAFT_SELECTION))
 
   const [creditorName, setCreditorName] = useState('')
   const [iban, setIban] = useState('')
@@ -3627,6 +3632,10 @@ function ScanBillScreen() {
 
     const isQr = incomingRank === 0
 
+    // FINAL GLOBAL FLOW: ARCHIVE-FIRST, PAYMENT-OPTIONAL
+    // Only map payment details when explicitly marked for payment.
+    const allowPaymentFields = !archiveOnly
+
     // Issuer (Dobavitelj/Prejemnik): invoice issuer. For non-QR sources, prefer header-block evidence.
     const creditorFromText = extractCreditorNameFromText(rawText)
     const supplierFromText = extractSupplierNameFromText(rawText)
@@ -3647,14 +3656,16 @@ function ScanBillScreen() {
     const payerFromDoc = !isQr ? extractPayerNameFromText(rawText, nameCandidate) : null
     if (nameCandidate) {
       const canOverwriteSupplier = !editedRef.current.supplier || !supplier.trim() || looksLikeMisassignedName(supplier)
-      const canOverwriteCreditor = !editedRef.current.creditorName || !creditorName.trim() || looksLikeMisassignedName(creditorName)
       if (canOverwriteSupplier && canSetField('supplier', nameCandidate, editedRef.current.supplier, supplier)) {
         setSupplier(nameCandidate)
         markFieldSource('supplier')
       }
-      if (canOverwriteCreditor && canSetField('creditor_name', nameCandidate, editedRef.current.creditorName, creditorName)) {
-        setCreditorName(nameCandidate)
-        markFieldSource('creditor_name')
+      if (allowPaymentFields) {
+        const canOverwriteCreditor = !editedRef.current.creditorName || !creditorName.trim() || looksLikeMisassignedName(creditorName)
+        if (canOverwriteCreditor && canSetField('creditor_name', nameCandidate, editedRef.current.creditorName, creditorName)) {
+          setCreditorName(nameCandidate)
+          markFieldSource('creditor_name')
+        }
       }
     }
 
@@ -3683,7 +3694,7 @@ function ScanBillScreen() {
     const invFromField = (rawInvoice || '').trim()
     let invCandidate = (invFromField && hasInvoiceLabelEvidence(rawText, invFromField) ? invFromField.toUpperCase().replace(/\s+/g, '') : '') || invFromDoc
     let invoiceGenerated = false
-    if (!invCandidate && !isQr) {
+    if (!invCandidate && !isQr && allowPaymentFields) {
       const baseIso = (String(rawDue || '').trim().match(/^\d{4}-\d{2}-\d{2}$/)?.[0]) || new Date().toISOString().slice(0, 10)
       const stamp = baseIso.replace(/-/g, '')
       invCandidate = `DOC-${stamp}-001`
@@ -3698,15 +3709,17 @@ function ScanBillScreen() {
     }
 
     // Bank-level rule: do not guess critical payment fields.
-    // Only fill IBAN/reference/purpose when they are explicitly extracted.
-    const foundIban = extractFirstValidIban(rawIban)
-    if (foundIban) {
-      if (canSetField('iban', foundIban, editedRef.current.iban, iban)) {
-        setIban(foundIban)
-        markFieldSource('iban')
+    // Only map payment details when explicitly marked for payment.
+    const foundIban = allowPaymentFields ? extractFirstValidIban(rawIban) : null
+    if (allowPaymentFields) {
+      if (foundIban) {
+        if (canSetField('iban', foundIban, editedRef.current.iban, iban)) {
+          setIban(foundIban)
+          markFieldSource('iban')
+        }
+      } else if (rawIban) {
+        warnings.push(tr('IBAN could not be validated. Please check it.'))
       }
-    } else if (rawIban) {
-      warnings.push(tr('IBAN could not be validated. Please check it.'))
     }
 
     const isValidReferenceFormat = (r: string): boolean => {
@@ -3720,38 +3733,42 @@ function ScanBillScreen() {
       if (looksLikeIban(v) && isValidIbanChecksum(v)) return false
       return true
     }
-    const refFromDoc = extractReferenceCandidate(rawText)
-    let ref = normalizeReference(rawRef) || ''
-    // If the extracted reference is missing or suspicious, fall back to labeled Sklic/Reference lines.
-    if (!ref || !isValidReferenceFormat(ref)) {
-      if (refFromDoc && isValidReferenceFormat(refFromDoc)) ref = refFromDoc
-    }
-    if (ref) {
-      if (foundIban && ref === foundIban) {
-        warnings.push(tr('Reference matched the IBAN; it was ignored.'))
-        ref = ''
+    if (allowPaymentFields) {
+      const refFromDoc = extractReferenceCandidate(rawText)
+      let ref = normalizeReference(rawRef) || ''
+      // If the extracted reference is missing or suspicious, fall back to labeled Sklic/Reference lines.
+      if (!ref || !isValidReferenceFormat(ref)) {
+        if (refFromDoc && isValidReferenceFormat(refFromDoc)) ref = refFromDoc
       }
-      // Only treat as IBAN fragment when it does NOT match a valid reference pattern.
-      if (foundIban && ref && !isValidReferenceFormat(ref) && ref.length < 10 && String(foundIban || '').startsWith(ref)) {
-        warnings.push(tr('Reference looked like an IBAN fragment; it was ignored.'))
-        ref = ''
+      if (ref) {
+        if (foundIban && ref === foundIban) {
+          warnings.push(tr('Reference matched the IBAN; it was ignored.'))
+          ref = ''
+        }
+        // Only treat as IBAN fragment when it does NOT match a valid reference pattern.
+        if (foundIban && ref && !isValidReferenceFormat(ref) && ref.length < 10 && String(foundIban || '').startsWith(ref)) {
+          warnings.push(tr('Reference looked like an IBAN fragment; it was ignored.'))
+          ref = ''
+        }
       }
-    }
-    if (ref && canSetField('reference', ref, editedRef.current.reference, reference)) {
-      setReference(ref)
-      markFieldSource('reference')
+      if (ref && canSetField('reference', ref, editedRef.current.reference, reference)) {
+        setReference(ref)
+        markFieldSource('reference')
+      }
     }
 
-    const purposeClean = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
-    const meaningfulPurpose = !isQr ? extractMeaningfulPurposeFromText(rawText) : null
-    const preferredPurpose = meaningfulPurpose || (purposeClean && purposeClean.toLowerCase() !== 'plačilo' ? purposeClean : '')
-    if (preferredPurpose && canSetField('purpose', preferredPurpose, editedRef.current.purpose, purpose)) {
-      setPurpose(preferredPurpose)
-      markFieldSource('purpose')
+    if (allowPaymentFields) {
+      const purposeClean = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
+      const meaningfulPurpose = !isQr ? extractMeaningfulPurposeFromText(rawText) : null
+      const preferredPurpose = meaningfulPurpose || (purposeClean && purposeClean.toLowerCase() !== 'plačilo' ? purposeClean : '')
+      if (preferredPurpose && canSetField('purpose', preferredPurpose, editedRef.current.purpose, purpose)) {
+        setPurpose(preferredPurpose)
+        markFieldSource('purpose')
+      }
     }
 
-    // Purpose is mandatory (non-QR): fill deterministic fallback in strict order.
-    if (!isQr && !editedRef.current.purpose && !purpose.trim()) {
+    // Purpose is mandatory for payment flows (non-QR): fill deterministic fallback in strict order.
+    if (allowPaymentFields && !isQr && !editedRef.current.purpose && !purpose.trim()) {
       const invForPurpose = String(invCandidate || invoiceNumber || '').trim()
       const payerForPurpose = String(payerFromDoc || '').trim()
       const fallbackPurpose = invForPurpose
@@ -3788,7 +3805,7 @@ function ScanBillScreen() {
       setDueDate(dueClean)
       markFieldSource('due_date')
     }
-    if (!isQr && !editedRef.current.dueDate && !dueDate.trim() && !dueClean) {
+    if (allowPaymentFields && !isQr && !editedRef.current.dueDate && !dueDate.trim() && !dueClean) {
       const base = new Date()
       base.setDate(base.getDate() + 14)
       const iso = base.toISOString().slice(0, 10)
@@ -3800,15 +3817,17 @@ function ScanBillScreen() {
     }
 
     // Payment details (non-IBAN systems): treat as informational; still respect precedence.
-    const detailsClean = String(rawPaymentDetails || '').trim()
-    if (detailsClean && canSetField('payment_details', detailsClean, editedRef.current.paymentDetails, paymentDetails)) {
-      setPaymentDetails(detailsClean)
-      markFieldSource('payment_details')
+    if (allowPaymentFields) {
+      const detailsClean = String(rawPaymentDetails || '').trim()
+      if (detailsClean && canSetField('payment_details', detailsClean, editedRef.current.paymentDetails, paymentDetails)) {
+        setPaymentDetails(detailsClean)
+        markFieldSource('payment_details')
+      }
     }
 
     setIbanHint(null)
     setReferenceHint(null)
-    if (warnings.length) {
+    if (allowPaymentFields && warnings.length) {
       // Keep hints lightweight and actionable.
       setIbanHint(warnings[0] || null)
       if (warnings.length > 1) setReferenceHint(warnings[1] || null)
@@ -3952,7 +3971,7 @@ function ScanBillScreen() {
     setAmountStr('')
     setCurrency('EUR')
     setDueDate('')
-    setArchiveOnly(false)
+    setArchiveOnly(archiveOnlyFromBillDraftSelection(DEFAULT_BILL_DRAFT_SELECTION))
     setCreditorName('')
     setIban('')
     setReference('')
@@ -3980,6 +3999,8 @@ function ScanBillScreen() {
   useEffect(() => {
     const payload = route.params?.inboxPrefill
     if (payload && payload.fields) {
+      // Inbox attachments are explicitly for payment.
+      setArchiveOnly(false)
       const f = payload.fields as ExtractedFields
       const raw = String((f as any)?.rawText || '')
       const supplierName = pickNameCandidate(f.creditor_name, f.supplier)
@@ -4018,8 +4039,8 @@ function ScanBillScreen() {
     if (decoded) {
       handleDecodedText(decoded)
     } else {
-      if (asset.base64) await extractWithOCRBase64(asset.base64, asset.mimeType || 'image/jpeg')
-      else await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg')
+      if (asset.base64) await extractWithOCRBase64(asset.base64, asset.mimeType || 'image/jpeg', { preferQr: true })
+      else await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg', { preferQr: true })
     }
   }
 
@@ -4033,7 +4054,7 @@ function ScanBillScreen() {
     const file = res.assets?.[0]
     if (!file?.uri) return
     setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
-    await extractWithOCR(file.uri, file.mimeType || 'application/pdf')
+    await extractWithOCR(file.uri, file.mimeType || 'application/pdf', { preferQr: true })
   }
 
   async function decodeImageQR(uri: string, retries: number): Promise<string | null> {
@@ -4090,7 +4111,7 @@ function ScanBillScreen() {
     setTorch('off')
   }
 
-  async function extractWithOCR(uri: string, contentType?: string) {
+  async function extractWithOCR(uri: string, contentType?: string, opts?: { preferQr?: boolean }) {
     if (!entitlements.canUseOCR) {
       showUpgradeAlert('ocr')
       return
@@ -4098,7 +4119,7 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: false, contentType })
+      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType })
       applyOcr(f, String(ocrText || ''), mode, meta)
       // Keep UX non-technical; the draft is already filled and still editable.
       if (summary && summary !== 'No fields found') {
@@ -4164,7 +4185,7 @@ function ScanBillScreen() {
     setTorch('off')
   }
 
-  async function extractWithOCRBase64(base64: string, contentType?: string) {
+  async function extractWithOCRBase64(base64: string, contentType?: string, opts?: { preferQr?: boolean }) {
     if (!entitlements.canUseOCR) {
       showUpgradeAlert('ocr')
       return
@@ -4172,7 +4193,7 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: false })
+      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr) })
       applyOcr(f, String(ocrText || ''), mode, meta)
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
@@ -4251,17 +4272,22 @@ function ScanBillScreen() {
   }
 
   const handleSaveBill = async () => {
-    if (!supplier.trim()) {
-      Alert.alert(tr('Supplier required'), tr('Enter the supplier or issuer of the bill.'))
-      return
-    }
-    if (!invoiceNumber.trim()) {
-      Alert.alert(tr('Invoice number required'), tr('Enter the invoice number from the bill (required for accounting).'))
-      return
-    }
-    if (!currency.trim()) {
-      Alert.alert(tr('Currency required'), tr('Enter a currency (for example EUR).'))
-      return
+    const supplierTrimmed = supplier.trim()
+    const invoiceTrimmed = invoiceNumber.trim()
+    const currencyTrimmed = currency.trim()
+    if (!archiveOnly) {
+      if (!supplierTrimmed) {
+        Alert.alert(tr('Supplier required'), tr('Enter the supplier or issuer of the bill.'))
+        return
+      }
+      if (!invoiceTrimmed) {
+        Alert.alert(tr('Invoice number required'), tr('Enter the invoice number from the bill (required for accounting).'))
+        return
+      }
+      if (!currencyTrimmed) {
+        Alert.alert(tr('Currency required'), tr('Enter a currency (for example EUR).'))
+        return
+      }
     }
     const amt = Number(String(amountStr).replace(',', '.'))
     if (!archiveOnly) {
@@ -4375,17 +4401,21 @@ function ScanBillScreen() {
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
           : effectivePurpose
+
+        const saveSupplier = supplierTrimmed || creditorName.trim() || (pendingAttachment?.name ? String(pendingAttachment.name).replace(/\.[^.]+$/, '') : '') || 'Archived bill'
+        const saveCurrency = currencyTrimmed || 'EUR'
+        const saveAmount = archiveOnly ? (Number.isFinite(amt) && amt > 0 ? amt : 0) : amt
         const { data, error } = await createBill(s, {
-          supplier: supplier.trim(),
-          amount: amt,
-          currency: currency.trim() || 'EUR',
+          supplier: saveSupplier,
+          amount: saveAmount,
+          currency: saveCurrency,
           due_date: effectiveDueDate,
           status: archiveOnly ? 'archived' : 'unpaid',
-          creditor_name: (creditorName.trim() || supplier.trim()) || null,
+          creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
           reference: reference.trim() || null,
           purpose: combinedPurpose || null,
-          invoice_number: invoiceNumber.trim() || null,
+          invoice_number: invoiceTrimmed || null,
           space_id: dbSpaceId,
         })
         if (error) {
@@ -4400,17 +4430,21 @@ function ScanBillScreen() {
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
           : effectivePurpose
+
+        const saveSupplier = supplierTrimmed || creditorName.trim() || (pendingAttachment?.name ? String(pendingAttachment.name).replace(/\.[^.]+$/, '') : '') || 'Archived bill'
+        const saveCurrency = currencyTrimmed || 'EUR'
+        const saveAmount = archiveOnly ? (Number.isFinite(amt) && amt > 0 ? amt : 0) : amt
         const local = await addLocalBill(spaceId, {
-          supplier: supplier.trim(),
-          amount: amt,
-          currency: currency.trim() || 'EUR',
+          supplier: saveSupplier,
+          amount: saveAmount,
+          currency: saveCurrency,
           due_date: effectiveDueDate,
           status: archiveOnly ? 'archived' : 'unpaid',
-          creditor_name: (creditorName.trim() || supplier.trim()) || null,
+          creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
           reference: reference.trim() || null,
           purpose: combinedPurpose || null,
-          invoice_number: invoiceNumber.trim() || null,
+          invoice_number: invoiceTrimmed || null,
         })
         savedId = local.id
       }
@@ -4659,15 +4693,33 @@ function ScanBillScreen() {
                 </View>
               </View>
 
-              <View style={styles.filterToggle}>
-                <Switch value={archiveOnly} onValueChange={setArchiveOnly} />
-                <Text style={styles.toggleLabel}>{tr('Archive / already paid (no payment)')}</Text>
+              <View style={{ marginTop: themeSpacing.xs }}>
+                <SegmentedControl
+                  value={billDraftSelectionFromArchiveOnly(archiveOnly)}
+                  onChange={(v) => {
+                    const nextArchive = String(v) === 'archive'
+                    setArchiveOnly(nextArchive)
+                  }}
+                  options={[
+                    { value: 'archive', label: tr('Bill is paid (save to archive)') },
+                    { value: 'pay', label: tr('Bill needs to be paid') },
+                  ]}
+                  style={{ marginTop: themeSpacing.xs }}
+                />
               </View>
-              {archiveOnly && (
+
+              {archiveOnly ? (
                 <InlineInfo
                   tone="info"
                   iconName="archive-outline"
-                  message={tr('Archived bills are excluded from Pay by default. Payment fields and attachments become optional.')}
+                  message={tr('Paid bill: save to archive. Payment fields will not be extracted automatically.')}
+                  style={styles.formNotice}
+                />
+              ) : (
+                <InlineInfo
+                  tone="info"
+                  iconName="card-outline"
+                  message={tr('Payment bill: we will extract IBAN, reference, due date, and amount when possible.')}
                   style={styles.formNotice}
                 />
               )}
@@ -5196,6 +5248,9 @@ function BillsListScreen() {
 
   const [exportBusy, setExportBusy] = useState(false)
   const [exportBusyLabel, setExportBusyLabel] = useState('')
+
+  const defaultExportScope: ExportPayerScope = spaceId === 'personal2' ? 'payer2' : 'payer1'
+  const canUsePayer2 = Number(entitlements?.payerLimit || 1) >= 2
 
   const [iosPickerVisible, setIosPickerVisible] = useState(false)
   const [iosPickerField, setIosPickerField] = useState<'from' | 'to' | null>(null)
@@ -5990,7 +6045,7 @@ function BillsListScreen() {
     else Alert.alert(tr('JSON saved'), file)
   }
 
-  async function exportPDFSelection() {
+  async function exportPDFSelection(scope: ExportPayerScope = defaultExportScope) {
     if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
       return
@@ -6000,18 +6055,22 @@ function BillsListScreen() {
       return
     }
 
-    const billIds = filteredBills.map((b) => b.id)
-    const dbSpaceId = supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null
-    if (!supabase || !dbSpaceId) {
+    if (!supabase) {
       Alert.alert(t(lang, 'Export'), t(lang, 'Exports require an online account.'))
       return
     }
+
+    const scopePayload = await resolveDbExportScopePayload(supabase!, entitlements, scope)
+    if (!scopePayload) {
+      Alert.alert(tr('Export'), tr('Selected profile scope is unavailable.'))
+      return
+    }
+
     const res = await callExportFunction(
       'export-pdf',
       {
         kind: 'range',
-        spaceId: dbSpaceId,
-        billIds,
+        ...scopePayload,
         filters: {
           start: dateFrom || '1900-01-01',
           end: dateTo || '2999-12-31',
@@ -6032,7 +6091,7 @@ function BillsListScreen() {
     await downloadAndShare(res.url, res.filename, res.contentType)
   }
 
-  async function exportZIPSelection() {
+  async function exportZIPSelection(scope: ExportPayerScope = defaultExportScope) {
     if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
       return
@@ -6042,17 +6101,21 @@ function BillsListScreen() {
       return
     }
 
-    const billIds = filteredBills.map((b) => b.id)
-    const dbSpaceId = supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null
-    if (!supabase || !dbSpaceId) {
+    if (!supabase) {
       Alert.alert(t(lang, 'Export'), t(lang, 'Exports require an online account.'))
       return
     }
+
+    const scopePayload = await resolveDbExportScopePayload(supabase!, entitlements, scope)
+    if (!scopePayload) {
+      Alert.alert(tr('Export'), tr('Selected profile scope is unavailable.'))
+      return
+    }
+
     const res = await callExportFunction(
       'export-zip',
       {
-        spaceId: dbSpaceId,
-        billIds,
+        ...scopePayload,
         filters: {
           start: dateFrom || '1900-01-01',
           end: dateTo || '2999-12-31',
@@ -6073,6 +6136,21 @@ function BillsListScreen() {
     await downloadAndShare(res.url, res.filename, res.contentType)
   }
 
+  const chooseExportScopeThen = useCallback((doExport: (scope: ExportPayerScope) => void) => {
+    if (!supabase || !canUsePayer2) {
+      doExport(defaultExportScope)
+      return
+    }
+
+    const currentLabel = defaultExportScope === 'payer2' ? 'Profil 2' : 'Profil 1'
+    Alert.alert(tr('Profile scope'), `${tr('Current')}: ${currentLabel}`, [
+      { text: 'Profil 1', onPress: () => doExport('payer1') },
+      { text: 'Profil 2', onPress: () => doExport('payer2') },
+      { text: 'Profil 1 + Profil 2', onPress: () => doExport('both') },
+      { text: tr('Cancel'), style: 'cancel' as const },
+    ])
+  }, [canUsePayer2, defaultExportScope, supabase])
+
   const chooseExportFormat = useCallback(() => {
     if (!entitlements.exportsEnabled) {
       showUpgradeAlert('export')
@@ -6081,12 +6159,23 @@ function BillsListScreen() {
     Alert.alert(tr('Export'), `${resultsLabel}\n${tr('Choose export format')}`, [
       { text: tr('Export Accounting CSV'), onPress: () => { void exportAccountingCSVSelection() } },
       { text: tr('Export CSV'), onPress: () => { void exportCSVSelection() } },
-      { text: tr('Export PDF report'), onPress: () => { void exportPDFSelection() } },
-      { text: tr('Export attachments'), onPress: () => { void exportZIPSelection() } },
+      {
+        text: tr('Export PDF report'),
+        onPress: () => {
+          chooseExportScopeThen((scope) => { void exportPDFSelection(scope) })
+        },
+      },
+      {
+        text: tr('Export attachments'),
+        onPress: () => {
+          chooseExportScopeThen((scope) => { void exportZIPSelection(scope) })
+        },
+      },
       { text: tr('Export JSON (backup)'), onPress: () => { void exportJSONSelection() } },
       { text: tr('Cancel'), style: 'cancel' as const },
     ])
   }, [
+    chooseExportScopeThen,
     entitlements.exportsEnabled,
     exportAccountingCSVSelection,
     exportCSVSelection,

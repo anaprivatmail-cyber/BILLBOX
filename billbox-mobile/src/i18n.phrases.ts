@@ -1,6 +1,19 @@
 export const phraseDict = {
-  en: {},
+  en: {
+    'Bill is paid (save to archive)': 'Bill is paid (save to archive)',
+    'Bill needs to be paid': 'Bill needs to be paid',
+    'Paid bill: save to archive. Payment fields will not be extracted automatically.':
+      'Paid bill: save to archive. Payment fields will not be extracted automatically.',
+    'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
+      'Payment bill: we will extract IBAN, reference, due date, and amount when possible.',
+  },
   sl: {
+    'Bill is paid (save to archive)': 'Račun je plačan (shrani v arhiv)',
+    'Bill needs to be paid': 'Račun je treba plačati',
+    'Paid bill: save to archive. Payment fields will not be extracted automatically.':
+      'Račun je plačan. Shrani se v arhiv. Plačilnih podatkov ne bomo samodejno izluščili.',
+    'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
+      'Račun je za plačilo. Po potrebi bomo izluščili IBAN, sklic, rok plačila in znesek.',
           'Open legal pages': 'Odpri pravne strani',
         'In 1 month': 'Čez 1 mesec',
       Payments: 'Plačila',
@@ -678,6 +691,12 @@ export const phraseDict = {
   },
 
   hr: {
+    'Bill is paid (save to archive)': 'Račun je plaćen (spremi u arhivu)',
+    'Bill needs to be paid': 'Račun treba platiti',
+    'Paid bill: save to archive. Payment fields will not be extracted automatically.':
+      'Račun je plaćen. Sprema se u arhivu. Podaci za plaćanje neće se automatski izdvajati.',
+    'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
+      'Račun je za plaćanje. Po potrebi ćemo izdvojiti IBAN, poziv na broj, rok plaćanja i iznos.',
     'Open legal pages': 'Otvori pravne stranice',
     'In 1 month': 'Za 1 mjesec',
     Payments: 'Plaćanja',
@@ -1354,6 +1373,12 @@ export const phraseDict = {
   },
 
   it: {
+    'Bill is paid (save to archive)': "La bolletta è pagata (salva nell'archivio)",
+    'Bill needs to be paid': 'La bolletta deve essere pagata',
+    'Paid bill: save to archive. Payment fields will not be extracted automatically.':
+      "Bolletta pagata: salva nell'archivio. I dati di pagamento non verranno estratti automaticamente.",
+    'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
+      "Bolletta da pagare: estrarremo IBAN, riferimento, scadenza e importo quando possibile.",
     'Open legal pages': 'Apri pagine legali',
     'In 1 month': 'Tra 1 mese',
     Payments: 'Pagamenti',
@@ -2034,6 +2059,12 @@ export const phraseDict = {
   },
 
   de: {
+    'Bill is paid (save to archive)': 'Rechnung ist bezahlt (im Archiv speichern)',
+    'Bill needs to be paid': 'Rechnung muss bezahlt werden',
+    'Paid bill: save to archive. Payment fields will not be extracted automatically.':
+      'Bezahlte Rechnung: im Archiv speichern. Zahlungsfelder werden nicht automatisch extrahiert.',
+    'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
+      'Zu zahlende Rechnung: Wir extrahieren IBAN, Referenz, Fälligkeitsdatum und Betrag, wenn möglich.',
     'Open legal pages': 'Rechtliche Seiten öffnen',
     'In 1 month': 'In 1 Monat',
     Payments: 'Zahlungen',
