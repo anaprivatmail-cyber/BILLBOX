@@ -55,6 +55,14 @@ export async function handler(event) {
     const body = await safeJsonBody(event)
     const kind = String(body.kind || body.type || 'range') // 'range' | 'single'
     const spaceId = body.spaceId ? String(body.spaceId) : null
+    const spaceIdsRaw = Array.isArray(body.spaceIds)
+      ? body.spaceIds
+      : Array.isArray(body.space_ids)
+        ? body.space_ids
+        : null
+    const spaceIds = spaceIdsRaw
+      ? spaceIdsRaw.map((v) => String(v || '').trim()).filter(Boolean).slice(0, 5)
+      : []
     const filters = body.filters || {}
     const billId = body.billId ? String(body.billId) : null
     const billIdsRaw = Array.isArray(body.billIds)
@@ -76,10 +84,12 @@ export async function handler(event) {
     if (!isExportAllowed(ent.plan, 'pdf')) {
       return jsonResponse(403, { ok: false, error: 'upgrade_required', code: 'upgrade_required' })
     }
-    const payerCheck = assertPayerScope(ent, spaceId)
+    const payerCheck = assertPayerScope(ent, spaceIds.length ? spaceIds : spaceId)
     if (!payerCheck.ok) {
       return jsonResponse(403, { ok: false, error: 'upgrade_required', code: payerCheck.code || 'upgrade_required' })
     }
+
+    const requestedSpaceIds = spaceIds.length ? spaceIds : (spaceId ? [spaceId] : [])
 
     let bills = []
     let queryError = null
@@ -89,7 +99,8 @@ export async function handler(event) {
         return jsonResponse(400, { ok: false, error: 'missing_bill_id', code: 'missing_bill_id' })
       }
       let q = supabase.from('bills').select('*').eq('user_id', userId).eq('id', billId).limit(1).maybeSingle()
-      if (spaceId) q = q.eq('space_id', spaceId)
+      if (requestedSpaceIds.length === 1) q = q.eq('space_id', requestedSpaceIds[0])
+      else if (requestedSpaceIds.length > 1) q = q.in('space_id', requestedSpaceIds)
       const { data, error } = await q
       if (error || !data) {
         return jsonResponse(404, { ok: false, error: 'bill_not_found', code: 'bill_not_found' })
@@ -98,12 +109,13 @@ export async function handler(event) {
     } else {
       if (billIds.length) {
         let q = supabase.from('bills').select('*').eq('user_id', userId).in('id', billIds)
-        if (spaceId) q = q.eq('space_id', spaceId)
+        if (requestedSpaceIds.length === 1) q = q.eq('space_id', requestedSpaceIds[0])
+        else if (requestedSpaceIds.length > 1) q = q.in('space_id', requestedSpaceIds)
         const { data, error } = await q
         queryError = error || null
         bills = data || []
       } else {
-        const { query, hasAttachmentsOnly } = buildBillQueryWithFilters({ supabase, userId, spaceId, filters })
+        const { query, hasAttachmentsOnly } = buildBillQueryWithFilters({ supabase, userId, spaceId, spaceIds: requestedSpaceIds, filters })
         const { data, error } = await query.order('due_date', { ascending: true })
         queryError = error || null
         bills = data || []

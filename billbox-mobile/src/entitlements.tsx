@@ -22,6 +22,10 @@ export type EntitlementsSnapshot = {
   payerLimit: number
   canUseOCR: boolean
   exportsEnabled: boolean
+  // UUID scope(s) for remote storage.
+  // Must never be the local labels like "personal" / "personal2".
+  spaceId: string | null
+  spaceId2: string | null
 }
 
 type EntitlementsContextValue = {
@@ -32,22 +36,25 @@ type EntitlementsContextValue = {
 }
 
 const LS_PLAN = 'billbox.entitlements.plan'
+const LS_SNAPSHOT = 'billbox.entitlements.snapshot'
 
 const DEFAULT: EntitlementsSnapshot = {
   plan: 'free',
   payerLimit: 1,
   canUseOCR: true, // app separately limits OCR usage if desired
   exportsEnabled: false,
+  spaceId: null,
+  spaceId2: null,
 }
 
 const Ctx = React.createContext<EntitlementsContextValue | undefined>(undefined)
 
 function snapshotForPlan(plan: PlanId): EntitlementsSnapshot {
   if (plan === 'pro') {
-    return { plan, payerLimit: 2, canUseOCR: true, exportsEnabled: true }
+    return { plan, payerLimit: 2, canUseOCR: true, exportsEnabled: true, spaceId: null, spaceId2: null }
   }
   if (plan === 'basic') {
-    return { plan, payerLimit: 1, canUseOCR: true, exportsEnabled: false }
+    return { plan, payerLimit: 1, canUseOCR: true, exportsEnabled: false, spaceId: null, spaceId2: null }
   }
   return { ...DEFAULT, plan: 'free' }
 }
@@ -148,6 +155,8 @@ export function EntitlementsProvider({
       const normalizedPlan: PlanId = plan === 'basic' || plan === 'pro' || plan === 'free' ? plan : 'free'
       const payerLimit = typeof e.payerLimit === 'number' ? e.payerLimit : normalizedPlan === 'pro' ? 2 : 1
       const exportsEnabled = normalizedPlan === 'pro' ? Boolean(e.exportsEnabled) : false
+      const spaceId = typeof e.spaceId === 'string' ? e.spaceId.trim() : ''
+      const spaceId2 = typeof e.spaceId2 === 'string' ? e.spaceId2.trim() : ''
 
       // Free includes OCR (limited), so canUseOCR stays true.
       return {
@@ -155,6 +164,8 @@ export function EntitlementsProvider({
         payerLimit,
         canUseOCR: true,
         exportsEnabled,
+        spaceId: spaceId || null,
+        spaceId2: spaceId2 || null,
       }
     } catch {
       return null
@@ -165,18 +176,31 @@ export function EntitlementsProvider({
     try {
       const fromBackend = await loadFromBackend()
       if (fromBackend) {
-        try { await AsyncStorage.setItem(LS_PLAN, fromBackend.plan) } catch {}
+        try {
+          await AsyncStorage.setItem(LS_PLAN, fromBackend.plan)
+          await AsyncStorage.setItem(LS_SNAPSHOT, JSON.stringify(fromBackend))
+        } catch {}
         setSnapshot(fromBackend)
         return
       }
 
-      const raw = await AsyncStorage.getItem(LS_PLAN)
-      const plan = (raw || '').trim() as PlanId
-      if (plan === 'basic' || plan === 'pro' || plan === 'free') {
-        setSnapshot(snapshotForPlan(plan))
-      } else {
-        setSnapshot(DEFAULT)
+      const rawSnap = await AsyncStorage.getItem(LS_SNAPSHOT)
+      const parsed = rawSnap ? JSON.parse(rawSnap) : null
+      if (parsed && typeof parsed === 'object' && (parsed.plan === 'basic' || parsed.plan === 'pro' || parsed.plan === 'free')) {
+        setSnapshot({
+          plan: parsed.plan,
+          payerLimit: typeof parsed.payerLimit === 'number' ? parsed.payerLimit : parsed.plan === 'pro' ? 2 : 1,
+          canUseOCR: true,
+          exportsEnabled: Boolean(parsed.exportsEnabled),
+          spaceId: typeof parsed.spaceId === 'string' ? parsed.spaceId : null,
+          spaceId2: typeof parsed.spaceId2 === 'string' ? parsed.spaceId2 : null,
+        })
+        return
       }
+
+      const rawPlan = await AsyncStorage.getItem(LS_PLAN)
+      const plan = (rawPlan || '').trim() as PlanId
+      setSnapshot(plan === 'basic' || plan === 'pro' || plan === 'free' ? snapshotForPlan(plan) : DEFAULT)
     } catch {
       setSnapshot(DEFAULT)
     }

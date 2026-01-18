@@ -65,6 +65,15 @@ export async function handler(event) {
     const from = String(body.from || '')
     const to = String(body.to || '')
     const dateField = String(body.dateField || 'due_date') // due_date | created_at
+    const spaceId = body.spaceId ? String(body.spaceId) : null
+    const spaceIdsRaw = Array.isArray(body.spaceIds)
+      ? body.spaceIds
+      : Array.isArray(body.space_ids)
+        ? body.space_ids
+        : null
+    const spaceIds = spaceIdsRaw
+      ? spaceIdsRaw.map((v) => String(v || '').trim()).filter(Boolean).slice(0, 5)
+      : []
 
     if (!from || !to) {
       return jsonResponse(400, { ok: false, error: 'missing_range', message: 'from/to required' })
@@ -92,15 +101,37 @@ export async function handler(event) {
       return jsonResponse(403, { ok: false, error: 'export_not_allowed', message: 'Exports not available on your plan.' })
     }
 
+    const requestedSpaceIds = spaceIds.length ? spaceIds : (spaceId ? [spaceId] : [])
+    if (requestedSpaceIds.length) {
+      const allowed1 = ent?.space_id ? String(ent.space_id) : ''
+      const allowed2 = ent?.space_id2 ? String(ent.space_id2) : (ent?.space_id_2 ? String(ent.space_id_2) : '')
+      const payerLimit = typeof ent?.payer_limit === 'number' ? ent.payer_limit : String(ent?.plan || '') === 'pro' ? 2 : 1
+
+      for (const sid of requestedSpaceIds) {
+        if (allowed1 && sid === allowed1) continue
+        if (allowed2 && sid === allowed2) {
+          if (payerLimit < 2) {
+            return jsonResponse(403, { ok: false, error: 'payer_limit', message: 'Upgrade required for Profil 2.' })
+          }
+          continue
+        }
+        return jsonResponse(403, { ok: false, error: 'invalid_space', message: 'Invalid profile scope.' })
+      }
+    }
+
     // Query bills
     const field = dateField === 'created_at' ? 'created_at' : 'due_date'
-    const { data: bills, error } = await supabase
+    let q = supabase
       .from('bills')
       .select('*')
       .eq('user_id', userId)
       .gte(field, from)
       .lte(field, to)
       .order(field, { ascending: true })
+    if (requestedSpaceIds.length === 1) q = q.eq('space_id', requestedSpaceIds[0])
+    else if (requestedSpaceIds.length > 1) q = q.in('space_id', requestedSpaceIds)
+
+    const { data: bills, error } = await q
 
     if (error) {
       return jsonResponse(500, { ok: false, error: 'query_failed', detail: error.message })

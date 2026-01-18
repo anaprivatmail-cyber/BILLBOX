@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { randomUUID } from 'crypto'
 
 function jsonResponse(statusCode, payload) {
   return {
@@ -36,13 +37,39 @@ async function getUserFromAuthHeader(event) {
 
 function normalizeEntitlements(row) {
   const plan = String(row?.plan || 'free')
+  const spaceId = row?.space_id ? String(row.space_id) : null
+  const spaceId2 = row?.space_id2 ? String(row.space_id2) : (row?.space_id_2 ? String(row.space_id_2) : null)
   return {
     plan: plan === 'basic' || plan === 'pro' ? plan : 'free',
     payerLimit: typeof row?.payer_limit === 'number' ? row.payer_limit : plan === 'pro' ? 2 : 1,
     exportsEnabled: Boolean(row?.exports_enabled),
     ocrQuotaMonthly: typeof row?.ocr_quota_monthly === 'number' ? row.ocr_quota_monthly : plan === 'free' ? 3 : null,
     ocrUsedThisMonth: typeof row?.ocr_used_this_month === 'number' ? row.ocr_used_this_month : 0,
+    spaceId,
+    spaceId2,
     updatedAt: row?.updated_at || null,
+  }
+}
+
+async function ensureEntitlementsSpaceIds(supabase, userId, row) {
+  if (!row) return row
+  const updates = {}
+  if (!row.space_id) updates.space_id = randomUUID()
+
+  const payerLimit = typeof row?.payer_limit === 'number' ? row.payer_limit : 1
+  const hasSpaceId2 = Object.prototype.hasOwnProperty.call(row, 'space_id2')
+  const hasSpaceId_2 = Object.prototype.hasOwnProperty.call(row, 'space_id_2')
+  if (payerLimit >= 2) {
+    if (hasSpaceId2 && !row.space_id2) updates.space_id2 = randomUUID()
+    if (hasSpaceId_2 && !row.space_id_2) updates.space_id_2 = randomUUID()
+  }
+
+  if (!Object.keys(updates).length) return row
+  try {
+    await supabase.from('entitlements').update(updates).eq('user_id', userId)
+    return { ...row, ...updates }
+  } catch {
+    return { ...row, ...updates }
   }
 }
 
@@ -82,6 +109,7 @@ export async function handler(event) {
         ocr_used_this_month: 0,
         subscription_source: 'free',
         status: 'active',
+        space_id: randomUUID(),
         updated_at: nowIso,
       }
       await supabase.from('entitlements').upsert(payload, { onConflict: 'user_id' })
@@ -94,6 +122,8 @@ export async function handler(event) {
         .maybeSingle()
       row = created || payload
     }
+
+    row = await ensureEntitlementsSpaceIds(supabase, userId, row)
 
     return jsonResponse(200, { ok: true, entitlements: normalizeEntitlements(row) })
   } catch (err) {

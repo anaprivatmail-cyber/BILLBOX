@@ -1023,20 +1023,124 @@ async function getCurrentUserId(supabase: SupabaseClient): Promise<string> {
   return id
 }
 
-async function listBills(supabase: SupabaseClient, _spaceId?: string | null): Promise<{ data: Bill[]; error: PostgrestError | null }>{
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+function isUuidString(value: unknown): boolean {
+  return typeof value === 'string' && UUID_RE.test(value)
+}
+
+type EntitlementsSpaceScope = { spaceId: string | null; spaceId2: string | null; payerLimit: number }
+const entitlementsSpaceScopeCache = new Map<string, EntitlementsSpaceScope>()
+
+async function loadEntitlementsSpaceScope(supabase: SupabaseClient): Promise<EntitlementsSpaceScope> {
+  const userId = await getCurrentUserId(supabase)
+  const cached = entitlementsSpaceScopeCache.get(userId)
+  if (cached) return cached
+
+  try {
+    const { data } = await supabase
+      .from('entitlements')
+      .select('payer_limit,space_id,space_id2,space_id_2,plan')
+      .eq('user_id', userId)
+      .order('active_until', { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle()
+
+    const payerLimit = typeof (data as any)?.payer_limit === 'number'
+      ? (data as any).payer_limit
+      : String((data as any)?.plan || '') === 'pro' ? 2 : 1
+    const s1 = typeof (data as any)?.space_id === 'string' ? String((data as any).space_id).trim() : ''
+    const s2raw = (data as any)?.space_id2 || (data as any)?.space_id_2
+    const s2 = typeof s2raw === 'string' ? String(s2raw).trim() : ''
+
+    const scope: EntitlementsSpaceScope = {
+      payerLimit,
+      spaceId: isUuidString(s1) ? s1 : null,
+      spaceId2: isUuidString(s2) ? s2 : null,
+    }
+    entitlementsSpaceScopeCache.set(userId, scope)
+    return scope
+  } catch {
+    const scope: EntitlementsSpaceScope = { payerLimit: 1, spaceId: null, spaceId2: null }
+    entitlementsSpaceScopeCache.set(userId, scope)
+    return scope
+  }
+}
+
+function resolveDbSpaceIdFromEntitlements(
+  entitlements: EntitlementsSnapshot | null | undefined,
+  localSpaceId: string | null | undefined,
+): string | null {
+  const local = typeof localSpaceId === 'string' ? localSpaceId.trim() : ''
+  if (!local) return null
+  const candidate = local === 'personal2' ? entitlements?.spaceId2 : entitlements?.spaceId
+  const raw = typeof candidate === 'string' ? candidate.trim() : ''
+  return isUuidString(raw) ? raw : null
+}
+
+function localPayerIdFromDbSpaceId(
+  entitlements: EntitlementsSnapshot | null | undefined,
+  dbSpaceId: string | null | undefined,
+): 'personal' | 'personal2' | null {
+  const raw = typeof dbSpaceId === 'string' ? dbSpaceId.trim() : ''
+  if (!isUuidString(raw)) return null
+  if (entitlements?.spaceId && raw === entitlements.spaceId) return 'personal'
+  if (entitlements?.spaceId2 && raw === entitlements.spaceId2) return 'personal2'
+  return null
+}
+
+async function resolveDbSpaceId(
+  supabase: SupabaseClient,
+  localSpaceId: string | null | undefined,
+  entitlements?: EntitlementsSnapshot | null,
+): Promise<string | null> {
+  const raw = typeof localSpaceId === 'string' ? localSpaceId.trim() : ''
+  if (!raw) return null
+  if (isUuidString(raw)) return raw
+
+  const viaSnapshot = resolveDbSpaceIdFromEntitlements(entitlements || null, raw)
+  if (viaSnapshot) return viaSnapshot
+
+  const scope = await loadEntitlementsSpaceScope(supabase)
+  if (raw === 'personal2') return scope.spaceId2
+  return scope.spaceId
+}
+
+async function listBills(
+  supabase: SupabaseClient,
+  _spaceId?: string | string[] | null,
+  entitlements?: EntitlementsSnapshot | null,
+): Promise<{ data: Bill[]; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
   let q = supabase
     .from('bills')
     .select('*')
     .eq('user_id', userId)
-  if (_spaceId) q = q.eq('space_id', _spaceId)
+
+  const requested = Array.isArray(_spaceId)
+    ? (_spaceId || []).filter(Boolean).length > 0
+    : Boolean(String(_spaceId || '').trim())
+
+  const rawIds = Array.isArray(_spaceId) ? (_spaceId || []) : [(_spaceId || null)]
+  const resolved = (await Promise.all(
+    rawIds
+      .map((v) => (typeof v === 'string' ? v.trim() : ''))
+      .filter(Boolean)
+      .map((sid) => resolveDbSpaceId(supabase, sid, entitlements || null)),
+  )).filter((v): v is string => Boolean(v && isUuidString(v)))
+
+  const unique = Array.from(new Set(resolved))
+  if (requested && unique.length === 0) return { data: [], error: null }
+  if (unique.length === 1) q = q.eq('space_id', unique[0])
+  else if (unique.length > 1) q = q.in('space_id', unique)
+
   const { data, error } = await q.order('due_date', { ascending: true })
   return { data: (data as Bill[]) || [], error }
 }
 
 async function createBill(supabase: SupabaseClient, input: CreateBillInput): Promise<{ data: Bill | null; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
-  const payload: any = { ...input, user_id: userId, status: input.status || 'unpaid' }
+  const dbSpaceId = await resolveDbSpaceId(supabase, input.space_id || null)
+  const payload: any = { ...input, user_id: userId, status: input.status || 'unpaid', space_id: dbSpaceId }
   const { data, error } = await supabase.from('bills').insert(payload).select().single()
   return { data: (data as Bill) || null, error }
 }
@@ -1044,7 +1148,8 @@ async function createBill(supabase: SupabaseClient, input: CreateBillInput): Pro
 async function deleteBill(supabase: SupabaseClient, id: string, _spaceId?: string | null): Promise<{ error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
   let q = supabase.from('bills').delete().eq('user_id', userId).eq('id', id)
-  if (_spaceId) q = q.eq('space_id', _spaceId)
+  const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
+  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
   const { error } = await q
   return { error }
 }
@@ -1056,7 +1161,8 @@ async function setBillStatus(supabase: SupabaseClient, id: string, status: BillS
     .update({ status })
     .eq('user_id', userId)
     .eq('id', id)
-  if (_spaceId) q = q.eq('space_id', _spaceId)
+  const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
+  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
   const { data, error } = await q.select().single()
   return { data: (data as Bill) || null, error }
 }
@@ -1073,7 +1179,8 @@ async function setBillDueDate(
     .update({ due_date })
     .eq('user_id', userId)
     .eq('id', id)
-  if (_spaceId) q = q.eq('space_id', _spaceId)
+  const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
+  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
   const { data, error } = await q.select().single()
   return { data: (data as Bill) || null, error }
 }
@@ -1090,7 +1197,8 @@ async function setBillInvoiceNumber(
     .update({ invoice_number })
     .eq('user_id', userId)
     .eq('id', id)
-  if (_spaceId) q = q.eq('space_id', _spaceId)
+  const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
+  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
   const { data, error } = await q.select().single()
   return { data: (data as Bill) || null, error }
 }
@@ -1101,14 +1209,16 @@ async function listWarranties(supabase: SupabaseClient, _spaceId?: string | null
     .from('warranties')
     .select('*')
     .eq('user_id', userId)
-  if (_spaceId) q = q.eq('space_id', _spaceId)
+  const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
+  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
   const { data, error } = await q.order('created_at', { ascending: false })
   return { data: (data as Warranty[]) || [], error }
 }
 
 async function createWarranty(supabase: SupabaseClient, input: CreateWarrantyInput): Promise<{ data: Warranty | null; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
-  const payload: any = { ...input, user_id: userId }
+  const dbSpaceId = await resolveDbSpaceId(supabase, input.space_id || null)
+  const payload: any = { ...input, user_id: userId, space_id: dbSpaceId }
   const { data, error } = await supabase.from('warranties').insert(payload).select().single()
   return { data: (data as Warranty) || null, error }
 }
@@ -1116,7 +1226,8 @@ async function createWarranty(supabase: SupabaseClient, input: CreateWarrantyInp
 async function deleteWarranty(supabase: SupabaseClient, id: string, _spaceId?: string | null): Promise<{ error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
   let q = supabase.from('warranties').delete().eq('user_id', userId).eq('id', id)
-  if (_spaceId) q = q.eq('space_id', _spaceId)
+  const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
+  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
   const { error } = await q
   return { error }
 }
@@ -4171,6 +4282,16 @@ function ScanBillScreen() {
     try {
       setSaving(true)
       const s = supabase
+
+      // Resolve payer/profile scope to a UUID for the database.
+      // Prevent sending labels like "personal" into UUID columns.
+      const dbSpaceId = s ? await resolveDbSpaceId(s, spaceId, entitlements) : null
+      if (s && spaceId && !dbSpaceId) {
+        Alert.alert(tr('Save failed'), tr('Active profile ID is invalid. Please sign out and sign in again.'))
+        setSaving(false)
+        return
+      }
+
       if (entitlements.plan === 'free') {
         try {
           const now = new Date()
@@ -4183,7 +4304,7 @@ function ScanBillScreen() {
               .select('created_at')
               .gte('created_at', monthStart.toISOString())
               .lt('created_at', nextMonthStart.toISOString())
-            if (spaceId) q = q.eq('space_id', spaceId)
+            if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
             const { data } = await q
             currentCount = Array.isArray(data) ? data.length : 0
           } else {
@@ -4219,7 +4340,7 @@ function ScanBillScreen() {
           reference: reference.trim() || null,
           purpose: combinedPurpose || null,
           invoice_number: invoiceNumber.trim() || null,
-          space_id: spaceId,
+          space_id: dbSpaceId,
         })
         if (error) {
           Alert.alert(tr('Save failed'), error.message)
@@ -5834,11 +5955,16 @@ function BillsListScreen() {
     }
 
     const billIds = filteredBills.map((b) => b.id)
+    const dbSpaceId = supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null
+    if (!supabase || !dbSpaceId) {
+      Alert.alert(t(lang, 'Export'), t(lang, 'Exports require an online account.'))
+      return
+    }
     const res = await callExportFunction(
       'export-pdf',
       {
         kind: 'range',
-        spaceId,
+        spaceId: dbSpaceId,
         billIds,
         filters: {
           start: dateFrom || '1900-01-01',
@@ -5871,10 +5997,15 @@ function BillsListScreen() {
     }
 
     const billIds = filteredBills.map((b) => b.id)
+    const dbSpaceId = supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null
+    if (!supabase || !dbSpaceId) {
+      Alert.alert(t(lang, 'Export'), t(lang, 'Exports require an online account.'))
+      return
+    }
     const res = await callExportFunction(
       'export-zip',
       {
-        spaceId,
+        spaceId: dbSpaceId,
         billIds,
         filters: {
           start: dateFrom || '1900-01-01',
@@ -8307,11 +8438,20 @@ function ReportsScreen() {
     try {
       const ids = (selectedPayerIds || []).filter(Boolean)
       const next: (Bill & { __spaceId?: string })[] = []
-      for (const sid of ids) {
-        if (supabase) {
-          const { data } = await listBills(supabase, sid)
-          for (const b of ((data as any) || []) as any[]) next.push({ ...(b as any), __spaceId: sid })
+      if (supabase) {
+        if (ids.length > 1) {
+          const { data } = await listBills(supabase, ids, entitlements)
+          for (const b of ((data as any) || []) as any[]) {
+            const local = localPayerIdFromDbSpaceId(entitlements, (b as any)?.space_id) || ids[0]
+            next.push({ ...(b as any), __spaceId: local })
+          }
         } else {
+          const sid = ids[0]
+          const { data } = await listBills(supabase, sid, entitlements)
+          for (const b of ((data as any) || []) as any[]) next.push({ ...(b as any), __spaceId: sid })
+        }
+      } else {
+        for (const sid of ids) {
           const locals = await loadLocalBills(sid)
           for (const b of (((locals as any) || []) as any[])) next.push({ ...(b as any), __spaceId: sid })
         }
@@ -8320,7 +8460,7 @@ function ReportsScreen() {
     } finally {
       setLoadingReports(false)
     }
-  })() }, [supabase, spaceLoading, space, selectedPayerIds])
+  })() }, [supabase, spaceLoading, space, selectedPayerIds, entitlements])
 
   const filtered = useMemo(() => {
     const supplierTerm = supplierQuery.trim().toLowerCase()
@@ -9207,9 +9347,10 @@ function ExportsScreen() {
 
     const base = getFunctionsBase()
     const s = getSupabase()
+    const dbSpaceId = s ? await resolveDbSpaceId(s, spaceId, entitlements) : null
 
     // Prefer server-side export only when status is not filtering
-    if (status === 'all' && base && s) {
+    if (status === 'all' && base && s && dbSpaceId) {
       try {
         const { data } = await s.auth.getSession()
         const token = data?.session?.access_token
@@ -9217,7 +9358,7 @@ function ExportsScreen() {
           const resp = await fetch(`${base}/.netlify/functions/export-csv`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ from: range.start, to: range.end, dateField: 'due_date' }),
+            body: JSON.stringify({ from: range.start, to: range.end, dateField: 'due_date', spaceId: dbSpaceId }),
           })
           const json = await resp.json().catch(() => null)
           if (resp.ok && json?.ok && typeof json.csv === 'string') {
@@ -9277,7 +9418,7 @@ function ExportsScreen() {
       'export-pdf',
       {
         kind: 'range',
-        spaceId,
+        spaceId: (supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null),
         filters: {
           start: range.start,
           end: range.end,
@@ -9304,7 +9445,7 @@ function ExportsScreen() {
       'export-pdf',
       {
         kind: 'single',
-        spaceId,
+        spaceId: (supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null),
         billId: bill.id,
       },
       tr('Preparing PDF…')
@@ -9325,7 +9466,7 @@ function ExportsScreen() {
     const res = await callExportFunction(
       'export-zip',
       {
-        spaceId,
+        spaceId: (supabase ? await resolveDbSpaceId(supabase!, spaceId, entitlements) : null),
         filters: {
           start: range.start,
           end: range.end,

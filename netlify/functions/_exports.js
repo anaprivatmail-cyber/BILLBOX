@@ -61,9 +61,11 @@ export async function loadEntitlements(supabase, userId) {
     const plan = normalizePlan(row?.plan)
     const payerLimit = typeof row?.payer_limit === 'number' ? row.payer_limit : plan === 'pro' ? 2 : 1
     const exportsEnabled = Boolean(row?.exports_enabled)
-    return { plan, payerLimit, exportsEnabled }
+    const spaceId = row?.space_id ? String(row.space_id) : null
+    const spaceId2 = row?.space_id2 ? String(row.space_id2) : (row?.space_id_2 ? String(row.space_id_2) : null)
+    return { plan, payerLimit, exportsEnabled, spaceId, spaceId2 }
   } catch {
-    return { plan: 'free', payerLimit: 1, exportsEnabled: false }
+    return { plan: 'free', payerLimit: 1, exportsEnabled: false, spaceId: null, spaceId2: null }
   }
 }
 
@@ -77,12 +79,25 @@ export function isExportAllowed(plan, exportKind) {
   return false
 }
 
-export function assertPayerScope(entitlements, spaceId) {
-  const sid = String(spaceId || '')
-  if (!sid) return { ok: true }
-  // Payer 2 is reserved for Pro (payerLimit >= 2)
-  if (sid === 'personal2' && (entitlements?.payerLimit || 1) < 2) {
-    return { ok: false, code: 'payer_limit' }
+export function assertPayerScope(entitlements, spaceIdOrIds) {
+  const ids = Array.isArray(spaceIdOrIds)
+    ? spaceIdOrIds.map((v) => String(v || '').trim()).filter(Boolean)
+    : [String(spaceIdOrIds || '').trim()].filter(Boolean)
+
+  if (!ids.length) return { ok: true }
+
+  const e = entitlements || {}
+  const payerLimit = Number(e.payerLimit || 1)
+  const allowed1 = e.spaceId ? String(e.spaceId) : ''
+  const allowed2 = e.spaceId2 ? String(e.spaceId2) : ''
+
+  for (const sid of ids) {
+    if (allowed1 && sid === allowed1) continue
+    if (allowed2 && sid === allowed2) {
+      if (payerLimit < 2) return { ok: false, code: 'payer_limit' }
+      continue
+    }
+    return { ok: false, code: 'invalid_space' }
   }
   return { ok: true }
 }
@@ -121,7 +136,7 @@ export async function uploadAndSign({ supabase, bucket, path, buffer, contentTyp
   }
 }
 
-export function buildBillQueryWithFilters({ supabase, userId, spaceId, filters }) {
+export function buildBillQueryWithFilters({ supabase, userId, spaceId, spaceIds, filters }) {
   const f = filters || {}
   const start = String(f.start || '')
   const end = String(f.end || '')
@@ -139,8 +154,13 @@ export function buildBillQueryWithFilters({ supabase, userId, spaceId, filters }
     ? Number(String(amountMaxRaw).replace(',', '.'))
     : null
 
+  const ids = Array.isArray(spaceIds)
+    ? spaceIds.map((v) => String(v || '').trim()).filter(Boolean)
+    : []
+
   let q = supabase.from('bills').select('*').eq('user_id', userId)
-  if (spaceId) q = q.eq('space_id', spaceId)
+  if (ids.length) q = q.in('space_id', ids)
+  else if (spaceId) q = q.eq('space_id', spaceId)
 
   if (status !== 'all') q = q.eq('status', status)
   if (supplierQuery) {

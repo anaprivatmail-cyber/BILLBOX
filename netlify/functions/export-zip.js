@@ -67,6 +67,14 @@ export async function handler(event) {
 
     const body = await safeJsonBody(event)
     const spaceId = body.spaceId ? String(body.spaceId) : null
+    const spaceIdsRaw = Array.isArray(body.spaceIds)
+      ? body.spaceIds
+      : Array.isArray(body.space_ids)
+        ? body.space_ids
+        : null
+    const spaceIds = spaceIdsRaw
+      ? spaceIdsRaw.map((v) => String(v || '').trim()).filter(Boolean).slice(0, 5)
+      : []
     const filters = body.filters || {}
     const billIdsRaw = Array.isArray(body.billIds)
       ? body.billIds
@@ -87,16 +95,19 @@ export async function handler(event) {
     if (!isExportAllowed(ent.plan, 'zip')) {
       return jsonResponse(403, { ok: false, error: 'upgrade_required', code: 'upgrade_required' })
     }
-    const payerCheck = assertPayerScope(ent, spaceId)
+    const payerCheck = assertPayerScope(ent, spaceIds.length ? spaceIds : spaceId)
     if (!payerCheck.ok) {
       return jsonResponse(403, { ok: false, error: 'upgrade_required', code: payerCheck.code || 'upgrade_required' })
     }
+
+    const requestedSpaceIds = spaceIds.length ? spaceIds : (spaceId ? [spaceId] : [])
 
     let billList = []
     let hasAttachmentsOnly = false
     if (billIds.length) {
       let q = supabase.from('bills').select('*').eq('user_id', userId).in('id', billIds)
-      if (spaceId) q = q.eq('space_id', spaceId)
+      if (requestedSpaceIds.length === 1) q = q.eq('space_id', requestedSpaceIds[0])
+      else if (requestedSpaceIds.length > 1) q = q.in('space_id', requestedSpaceIds)
       const { data, error } = await q
       if (error) {
         return jsonResponse(500, { ok: false, error: 'query_failed', code: 'query_failed' })
@@ -104,7 +115,7 @@ export async function handler(event) {
       billList = data || []
       hasAttachmentsOnly = Boolean(filters?.hasAttachmentsOnly)
     } else {
-      const built = buildBillQueryWithFilters({ supabase, userId, spaceId, filters })
+      const built = buildBillQueryWithFilters({ supabase, userId, spaceId, spaceIds: requestedSpaceIds, filters })
       hasAttachmentsOnly = Boolean(built.hasAttachmentsOnly)
       const { data: bills, error } = await built.query.order('due_date', { ascending: true })
       if (error) {
@@ -122,7 +133,8 @@ export async function handler(event) {
     let warranties = []
     try {
       let wq = supabase.from('warranties').select('*').eq('user_id', userId)
-      if (spaceId) wq = wq.eq('space_id', spaceId)
+      if (requestedSpaceIds.length === 1) wq = wq.eq('space_id', requestedSpaceIds[0])
+      else if (requestedSpaceIds.length > 1) wq = wq.in('space_id', requestedSpaceIds)
       if (billIdList.length) wq = wq.in('bill_id', billIdList)
       const { data } = await wq
       warranties = data || []
