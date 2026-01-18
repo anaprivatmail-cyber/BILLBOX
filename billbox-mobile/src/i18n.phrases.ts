@@ -6,6 +6,10 @@ export const phraseDict = {
       'Paid bill: save to archive. Payment fields will not be extracted automatically.',
     'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
       'Payment bill: we will extract IBAN, reference, due date, and amount when possible.',
+    Archive: 'Archive',
+    'To pay': 'To pay',
+    'Archive: no payment extraction.': 'Archive: no payment extraction.',
+    'To pay: extract payment fields.': 'To pay: extract payment fields.',
   },
   sl: {
     'Bill is paid (save to archive)': 'Račun je plačan (shrani v arhiv)',
@@ -14,6 +18,10 @@ export const phraseDict = {
       'Račun je plačan. Shrani se v arhiv. Plačilnih podatkov ne bomo samodejno izluščili.',
     'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
       'Račun je za plačilo. Po potrebi bomo izluščili IBAN, sklic, rok plačila in znesek.',
+    Archive: 'V arhiv',
+    'To pay': 'Za plačilo',
+    'Archive: no payment extraction.': 'V arhiv: brez plačilnih podatkov.',
+    'To pay: extract payment fields.': 'Za plačilo: izluščimo plačilne podatke.',
           'Open legal pages': 'Odpri pravne strani',
         'In 1 month': 'Čez 1 mesec',
       Payments: 'Plačila',
@@ -697,6 +705,10 @@ export const phraseDict = {
       'Račun je plaćen. Sprema se u arhivu. Podaci za plaćanje neće se automatski izdvajati.',
     'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
       'Račun je za plaćanje. Po potrebi ćemo izdvojiti IBAN, poziv na broj, rok plaćanja i iznos.',
+    Archive: 'U arhiv',
+    'To pay': 'Za plaćanje',
+    'Archive: no payment extraction.': 'U arhiv: bez plaćanja.',
+    'To pay: extract payment fields.': 'Za plaćanje: izdvoji podatke.',
     'Open legal pages': 'Otvori pravne stranice',
     'In 1 month': 'Za 1 mjesec',
     Payments: 'Plaćanja',
@@ -1379,6 +1391,10 @@ export const phraseDict = {
       "Bolletta pagata: salva nell'archivio. I dati di pagamento non verranno estratti automaticamente.",
     'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
       "Bolletta da pagare: estrarremo IBAN, riferimento, scadenza e importo quando possibile.",
+    Archive: 'Archivio',
+    'To pay': 'Da pagare',
+    'Archive: no payment extraction.': 'Archivio: senza dati di pagamento.',
+    'To pay: extract payment fields.': 'Da pagare: estrai dati di pagamento.',
     'Open legal pages': 'Apri pagine legali',
     'In 1 month': 'Tra 1 mese',
     Payments: 'Pagamenti',
@@ -2065,6 +2081,10 @@ export const phraseDict = {
       'Bezahlte Rechnung: im Archiv speichern. Zahlungsfelder werden nicht automatisch extrahiert.',
     'Payment bill: we will extract IBAN, reference, due date, and amount when possible.':
       'Zu zahlende Rechnung: Wir extrahieren IBAN, Referenz, Fälligkeitsdatum und Betrag, wenn möglich.',
+    Archive: 'Archiv',
+    'To pay': 'Zu zahlen',
+    'Archive: no payment extraction.': 'Archiv: keine Zahlungsdaten.',
+    'To pay: extract payment fields.': 'Zu zahlen: Zahlungsdaten extrahieren.',
     'Open legal pages': 'Rechtliche Seiten öffnen',
     'In 1 month': 'In 1 Monat',
     Payments: 'Zahlungen',

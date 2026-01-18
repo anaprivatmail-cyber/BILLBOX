@@ -51,6 +51,7 @@ import {
   archiveOnlyFromBillDraftSelection,
   billDraftSelectionFromArchiveOnly,
 } from './src/billDraftMode'
+import { isUuidString, localPayerIdFromDbSpaceId, resolveDbSpaceIdFromEntitlements } from './src/space-id'
 
 const BRAND_WORDMARK = require('./assets/logo/logo-wordmark.png')
 const BRAND_ICON = require('./assets/logo/logo-icon.png')
@@ -1028,11 +1029,6 @@ async function getCurrentUserId(supabase: SupabaseClient): Promise<string> {
   return id
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-function isUuidString(value: unknown): boolean {
-  return typeof value === 'string' && UUID_RE.test(value)
-}
-
 type EntitlementsSpaceScope = { spaceId: string | null; spaceId2: string | null; payerLimit: number }
 const entitlementsSpaceScopeCache = new Map<string, EntitlementsSpaceScope>()
 
@@ -1071,26 +1067,11 @@ async function loadEntitlementsSpaceScope(supabase: SupabaseClient): Promise<Ent
   }
 }
 
-function resolveDbSpaceIdFromEntitlements(
+function resolveDbSpaceIdFromSnapshot(
   entitlements: EntitlementsSnapshot | null | undefined,
   localSpaceId: string | null | undefined,
 ): string | null {
-  const local = typeof localSpaceId === 'string' ? localSpaceId.trim() : ''
-  if (!local) return null
-  const candidate = local === 'personal2' ? entitlements?.spaceId2 : entitlements?.spaceId
-  const raw = typeof candidate === 'string' ? candidate.trim() : ''
-  return isUuidString(raw) ? raw : null
-}
-
-function localPayerIdFromDbSpaceId(
-  entitlements: EntitlementsSnapshot | null | undefined,
-  dbSpaceId: string | null | undefined,
-): 'personal' | 'personal2' | null {
-  const raw = typeof dbSpaceId === 'string' ? dbSpaceId.trim() : ''
-  if (!isUuidString(raw)) return null
-  if (entitlements?.spaceId && raw === entitlements.spaceId) return 'personal'
-  if (entitlements?.spaceId2 && raw === entitlements.spaceId2) return 'personal2'
-  return null
+  return resolveDbSpaceIdFromEntitlements(entitlements || null, localSpaceId)
 }
 
 async function resolveDbSpaceId(
@@ -1102,7 +1083,7 @@ async function resolveDbSpaceId(
   if (!raw) return null
   if (isUuidString(raw)) return raw
 
-  const viaSnapshot = resolveDbSpaceIdFromEntitlements(entitlements || null, raw)
+  const viaSnapshot = resolveDbSpaceIdFromSnapshot(entitlements || null, raw)
   if (viaSnapshot) return viaSnapshot
 
   const scope = await loadEntitlementsSpaceScope(supabase)
@@ -1741,7 +1722,7 @@ async function deleteAllAttachmentsForRecord(spaceId: string | null | undefined,
 async function performOCRFromBase64(
   base64: string,
   contentType: string,
-  opts?: { preferQr?: boolean },
+  opts?: { preferQr?: boolean; allowAi?: boolean; aiMode?: string; languageHint?: string },
 ): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any }> {
   const base = getFunctionsBase()
   if (!base) {
@@ -1777,8 +1758,8 @@ async function performOCRFromBase64(
     headers: { 'Content-Type': 'application/json', ...authHeader },
     body: JSON.stringify(
       ct === 'application/pdf'
-        ? { pdfBase64: raw, contentType: ct, preferQr: Boolean(opts?.preferQr) }
-        : { imageBase64: `data:${ct};base64,${raw}`, contentType: ct, preferQr: Boolean(opts?.preferQr) },
+        ? { pdfBase64: raw, contentType: ct, preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, language: opts?.languageHint }
+        : { imageBase64: `data:${ct};base64,${raw}`, contentType: ct, preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, language: opts?.languageHint },
     ),
   })
   const data = await resp.json().catch(() => null as any)
@@ -1808,7 +1789,7 @@ async function performOCRFromBase64(
 // --- OCR helper (Netlify function wrapper) ---
 async function performOCR(
   uri: string,
-  opts?: { preferQr?: boolean; contentType?: string; filename?: string },
+  opts?: { preferQr?: boolean; contentType?: string; filename?: string; allowAi?: boolean; aiMode?: string; languageHint?: string },
 ): Promise<{ fields: any; summary: string; rawText?: string; mode?: string; meta?: any }>{
   const base = getFunctionsBase()
   if (!base) {
@@ -1929,8 +1910,8 @@ async function performOCR(
     headers: { 'Content-Type': 'application/json', ...authHeader },
     body: JSON.stringify(
       contentType === 'application/pdf'
-        ? { pdfBase64: base64, contentType, preferQr: Boolean(opts?.preferQr) }
-        : { imageBase64: `data:${contentType};base64,${base64}`, contentType, preferQr: Boolean(opts?.preferQr) },
+        ? { pdfBase64: base64, contentType, preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, language: opts?.languageHint }
+        : { imageBase64: `data:${contentType};base64,${base64}`, contentType, preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, language: opts?.languageHint },
     ),
   })
   const data = await resp.json().catch(() => null as any)
@@ -3120,6 +3101,32 @@ function ScanBillScreen() {
     return ''
   }
 
+  function normalizeCompanyName(input: string): string {
+    const raw = String(input || '').replace(/\s+/g, ' ').trim()
+    if (!raw) return ''
+    const prefixRe = /^(?:uporabnik|obrazec|ra\u010dun|racun|dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|customer|payer)\s*[:\-]?\s*/i
+    const splitRe = /[|•·]/
+    const legalSuffixRe = /\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|s\.r\.l\.|srl|sas|sa|bv|oy|ab|kg|ltd|llc|inc|plc)\b/i
+    const addressRe = /\b(ulica|cesta|street|st\.?|road|rd\.?|avenue|ave\.?|strasse|stra\u00dfe|via|trg|naselje|posta|po\u0161t\S*|zip)\b/i
+
+    const parts = raw
+      .split(splitRe)
+      .map((p) => p.replace(prefixRe, '').replace(/^[\s:,-]+|[\s:,-]+$/g, '').trim())
+      .filter(Boolean)
+
+    const cleaned = parts
+      .map((p) => p.replace(/\s+/g, ' ').trim())
+      .filter((p) => !/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b|@)/i.test(p))
+      .filter((p) => !addressRe.test(p) || !/\d/.test(p))
+      .filter((p) => /[A-Za-zÀ-žČŠŽčšž]/.test(p))
+
+    if (!cleaned.length) return raw
+    const withSuffix = cleaned.filter((p) => legalSuffixRe.test(p))
+    const pickFrom = withSuffix.length ? withSuffix : cleaned
+    pickFrom.sort((a, b) => a.length - b.length)
+    return pickFrom[0]
+  }
+
   async function extractTextWithAI(text: string) {
     const base = getFunctionsBase()
     if (!base) throw new Error('OCR unavailable: missing EXPO_PUBLIC_FUNCTIONS_BASE')
@@ -3651,7 +3658,7 @@ function ScanBillScreen() {
       return v
     }
     const nameCandidateRaw = pickNameCandidate(issuerFromHeader, creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
-    const nameCandidate = normalizeIssuerName(nameCandidateRaw)
+    const nameCandidate = normalizeCompanyName(normalizeIssuerName(nameCandidateRaw))
 
     const payerFromDoc = !isQr ? extractPayerNameFromText(rawText, nameCandidate) : null
     if (nameCandidate) {
@@ -3768,7 +3775,7 @@ function ScanBillScreen() {
     }
 
     // Purpose is mandatory for payment flows (non-QR): fill deterministic fallback in strict order.
-    if (allowPaymentFields && !isQr && !editedRef.current.purpose && !purpose.trim()) {
+    if (allowPaymentFields && !editedRef.current.purpose && !purpose.trim()) {
       const invForPurpose = String(invCandidate || invoiceNumber || '').trim()
       const payerForPurpose = String(payerFromDoc || '').trim()
       const fallbackPurpose = invForPurpose
@@ -4039,8 +4046,10 @@ function ScanBillScreen() {
     if (decoded) {
       handleDecodedText(decoded)
     } else {
-      if (asset.base64) await extractWithOCRBase64(asset.base64, asset.mimeType || 'image/jpeg', { preferQr: true })
-      else await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg', { preferQr: true })
+      const languageHint = getCurrentLang()
+      const allowAi = !archiveOnly
+      if (asset.base64) await extractWithOCRBase64(asset.base64, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi, aiMode: 'document', languageHint })
+      else await extractWithOCR(asset.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi, aiMode: 'document', languageHint })
     }
   }
 
@@ -4054,7 +4063,9 @@ function ScanBillScreen() {
     const file = res.assets?.[0]
     if (!file?.uri) return
     setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
-    await extractWithOCR(file.uri, file.mimeType || 'application/pdf', { preferQr: true })
+    const languageHint = getCurrentLang()
+    const allowAi = !archiveOnly
+    await extractWithOCR(file.uri, file.mimeType || 'application/pdf', { preferQr: true, allowAi, aiMode: 'document', languageHint })
   }
 
   async function decodeImageQR(uri: string, retries: number): Promise<string | null> {
@@ -4111,7 +4122,7 @@ function ScanBillScreen() {
     setTorch('off')
   }
 
-  async function extractWithOCR(uri: string, contentType?: string, opts?: { preferQr?: boolean }) {
+  async function extractWithOCR(uri: string, contentType?: string, opts?: { preferQr?: boolean; allowAi?: boolean; aiMode?: string; languageHint?: string }) {
     if (!entitlements.canUseOCR) {
       showUpgradeAlert('ocr')
       return
@@ -4119,7 +4130,7 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType })
+      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
       applyOcr(f, String(ocrText || ''), mode, meta)
       // Keep UX non-technical; the draft is already filled and still editable.
       if (summary && summary !== 'No fields found') {
@@ -4185,7 +4196,7 @@ function ScanBillScreen() {
     setTorch('off')
   }
 
-  async function extractWithOCRBase64(base64: string, contentType?: string, opts?: { preferQr?: boolean }) {
+  async function extractWithOCRBase64(base64: string, contentType?: string, opts?: { preferQr?: boolean; allowAi?: boolean; aiMode?: string; languageHint?: string }) {
     if (!entitlements.canUseOCR) {
       showUpgradeAlert('ocr')
       return
@@ -4193,7 +4204,7 @@ function ScanBillScreen() {
     try {
       setOcrError(null)
       setOcrBusy(true)
-      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr) })
+      const { fields: f, summary, rawText: ocrText, mode, meta } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
       applyOcr(f, String(ocrText || ''), mode, meta)
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
@@ -4357,9 +4368,18 @@ function ScanBillScreen() {
 
       // Resolve payer/profile scope to a UUID for the database.
       // Prevent sending labels like "personal" into UUID columns.
-      const dbSpaceId = s ? await resolveDbSpaceId(s, spaceId, entitlements) : null
-      if (s && spaceId && !dbSpaceId) {
-        Alert.alert(tr('Save failed'), tr('Active profile ID is invalid. Please sign out and sign in again.'))
+      let dbSpaceId = s ? await resolveDbSpaceId(s, spaceId, entitlements) : null
+      if (s && !dbSpaceId) {
+        const fallback = await resolveDbSpaceId(s, 'personal', entitlements)
+        if (fallback && isUuidString(fallback)) {
+          if (spaceId !== 'personal') {
+            try { await spacesCtx.setCurrent('personal') } catch {}
+          }
+          dbSpaceId = fallback
+        }
+      }
+      if (s && !dbSpaceId) {
+        Alert.alert(tr('Save failed'), tr('Active profile is not available. Please try again.'))
         setSaving(false)
         return
       }
@@ -4699,10 +4719,18 @@ function ScanBillScreen() {
                   onChange={(v) => {
                     const nextArchive = String(v) === 'archive'
                     setArchiveOnly(nextArchive)
+                    if (!nextArchive && archiveOnly && pendingAttachment?.uri) {
+                      const languageHint = getCurrentLang()
+                      void extractWithOCR(
+                        pendingAttachment.uri,
+                        pendingAttachment.type || undefined,
+                        { preferQr: true, allowAi: true, aiMode: 'document', languageHint },
+                      )
+                    }
                   }}
                   options={[
-                    { value: 'archive', label: tr('Bill is paid (save to archive)') },
-                    { value: 'pay', label: tr('Bill needs to be paid') },
+                    { value: 'archive', label: tr('Archive') },
+                    { value: 'pay', label: tr('To pay') },
                   ]}
                   style={{ marginTop: themeSpacing.xs }}
                 />
@@ -4712,14 +4740,14 @@ function ScanBillScreen() {
                 <InlineInfo
                   tone="info"
                   iconName="archive-outline"
-                  message={tr('Paid bill: save to archive. Payment fields will not be extracted automatically.')}
+                  message={tr('Archive: no payment extraction.')}
                   style={styles.formNotice}
                 />
               ) : (
                 <InlineInfo
                   tone="info"
                   iconName="card-outline"
-                  message={tr('Payment bill: we will extract IBAN, reference, due date, and amount when possible.')}
+                  message={tr('To pay: extract payment fields.')}
                   style={styles.formNotice}
                 />
               )}
@@ -5027,7 +5055,7 @@ function InboxScreen() {
           try {
             // Quiet auto-OCR for newly received email items so "Attach to bill" is immediately useful.
             const sourceUri = (it as any).localPath || it.uri
-            const { fields, summary } = await performOCR(sourceUri, { preferQr: false })
+            const { fields, summary } = await performOCR(sourceUri, { preferQr: false, allowAi: false })
             const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
             await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : (it.status || 'new') })
             if (looksLikeBill) await cancelInboxReviewReminder(it.id, effectiveSpaceId)
@@ -5091,7 +5119,7 @@ function InboxScreen() {
     try {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
-      const { fields, summary, rawText } = await performOCR(sourceUri, { preferQr: false })
+      const { fields, summary, rawText } = await performOCR(sourceUri, { preferQr: false, allowAi: false })
 
       const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
       const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '' } : fields

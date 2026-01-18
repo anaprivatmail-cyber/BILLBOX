@@ -482,6 +482,73 @@ function isLikelyAddressOnly(input) {
   return false
 }
 
+function parseDateToken(token, hintIsEnglish) {
+  const t = String(token || '').trim()
+  if (!t) return null
+  const compact = t.replace(/\s/g, '')
+  if (/^\d{4}-\d{2}-\d{2}$/.test(compact)) return compact
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(compact)) return compact.replace(/\//g, '-')
+
+  const m = compact.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/)
+  if (!m) return null
+  let a = Number(m[1])
+  let b = Number(m[2])
+  let y = Number(m[3])
+  if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(y)) return null
+  if (y < 100) y = y >= 70 ? 1900 + y : 2000 + y
+
+  const delim = compact.includes('/') ? '/' : (compact.includes('.') ? '.' : '-')
+  const aIsDay = a > 12 && a <= 31
+  const bIsDay = b > 12 && b <= 31
+
+  let day
+  let month
+  if (aIsDay && !bIsDay) {
+    day = a
+    month = b
+  } else if (bIsDay && !aIsDay) {
+    day = b
+    month = a
+  } else {
+    const assumeMonthFirst = hintIsEnglish && delim === '/'
+    if (assumeMonthFirst) {
+      month = a
+      day = b
+    } else {
+      day = a
+      month = b
+    }
+  }
+
+  if (!(month >= 1 && month <= 12 && day >= 1 && day <= 31)) return null
+  const mm = String(month).padStart(2, '0')
+  const dd = String(day).padStart(2, '0')
+  return `${y}-${mm}-${dd}`
+}
+
+function normalizeCompanyNameCandidate(input) {
+  const raw = String(input || '').replace(/\s+/g, ' ').trim()
+  if (!raw) return null
+
+  const prefixRe = /^(?:uporabnik|obrazec|ra\u010dun|racun|dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|customer|payer|bill\s*to|sold\s*to)\s*[:\-]?\s*/i
+  const parts = raw
+    .split(/[|•·]/)
+    .map((p) => p.replace(prefixRe, '').replace(/^[\s:,-]+|[\s:,-]+$/g, '').trim())
+    .filter(Boolean)
+
+  const cleaned = parts
+    .map((p) => p.replace(/\s+/g, ' ').trim())
+    .filter((p) => !isUrlOrEmailLike(p))
+    .filter((p) => !isLikelyAddressOnly(p))
+    .filter((p) => /[A-Za-zÀ-žČŠŽčšž]/.test(p))
+
+  if (!cleaned.length) return null
+  const withSuffix = cleaned.filter((p) => hasLegalSuffix(p))
+  const pickFrom = withSuffix.length ? withSuffix : cleaned
+  pickFrom.sort((a, b) => a.length - b.length)
+  return pickFrom[0] || null
+}
+
 function extractIssuerFromHeaderBlock(rawText) {
   const lines = splitLines(rawText)
   if (!lines.length) return null
@@ -666,6 +733,166 @@ function extractMeaningfulDescription(rawText) {
   return null
 }
 
+function extractInvoiceNumberCandidates(rawText) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return []
+
+  const labelRe = /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+  const valueRe = /\b([A-Z0-9][A-Z0-9\-\/.]{2,})\b/i
+
+  const normalize = (s) => String(s || '').trim().toUpperCase().replace(/\s+/g, '')
+  const isBad = (v) => {
+    const s = normalize(v)
+    if (!s) return true
+    if (!/\d/.test(s)) return true
+    if (s.length < 3 || s.length > 32) return true
+    if (isValidIbanChecksum(s)) return true
+    if (/^(SI|RF)\d{2}[0-9A-Z\-\/]{4,}$/i.test(s)) return true
+    if (/^GEN\s*[-_]?\s*1$/i.test(v) || /^GEN\s*[-_]?\s*I$/i.test(v)) return true
+    if (isUrlOrEmailLike(v)) return true
+    return false
+  }
+
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').trim()
+    if (!l || !labelRe.test(l)) continue
+    const after = String(l.split(/:\s*/, 2)[1] || '').trim()
+    const directToken = (after.match(valueRe) || [])[1] || after
+    if (directToken && !isBad(directToken)) out.push({ value: normalize(directToken), evidence: l })
+    const next = String(lines[i + 1] || '').trim()
+    const nxtTok = (next.match(valueRe) || [])[1]
+    if (nxtTok && !isBad(nxtTok)) out.push({ value: normalize(nxtTok), evidence: next })
+  }
+  const uniq = new Map()
+  for (const c of out) {
+    const key = c.value
+    if (!uniq.has(key)) uniq.set(key, c)
+  }
+  return Array.from(uniq.values())
+}
+
+function extractDueDateCandidates(rawText) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return []
+  const dueLabel = /(rok\s*pla[^\s:]*|zapad[^\s:]*|due\s*date|date\s*due|payment\s*due|pay\s*by|payable\s*by|f[äa]llig[^\s:]*|zahlbar\s*bis|scadenza|scad\.?\b|[ée]ch[ée]ance|vencim\S*|vencimiento)/i
+  const dateToken = /(\d{4}[-\/]\d{2}[-\/]\d{2}|\d{1,2}[\.\/-]\d{1,2}[\.\/-]\d{2,4})/
+  const out = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').trim()
+    if (!l) continue
+    if (!dueLabel.test(l)) continue
+    const inline = l.match(dateToken)
+    const hintEnglish = /(due\s*date|date\s*due|payment\s*due|pay\s*by|payable\s*by)/i.test(l)
+    if (inline?.[1]) {
+      const iso = parseDateToken(inline[1], hintEnglish)
+      if (iso) out.push({ value: iso, evidence: l })
+    } else {
+      const next = String(lines[i + 1] || '').trim()
+      const m = next.match(dateToken)
+      if (m?.[1]) {
+        const iso = parseDateToken(m[1], hintEnglish)
+        if (iso) out.push({ value: iso, evidence: `${l} ${next}` })
+      }
+    }
+  }
+
+  const uniq = new Map()
+  for (const c of out) {
+    const key = c.value
+    if (!uniq.has(key)) uniq.set(key, c)
+  }
+  return Array.from(uniq.values())
+}
+
+function buildCompanyNameCandidates(rawText) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return []
+
+  const out = []
+  const labelRe = /^(?:dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|uporabnik)\b\s*:?\s*(.+)$/i
+  const headerCount = Math.max(1, Math.min(40, Math.ceil(lines.length * 0.25)))
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').trim()
+    if (!l) continue
+    const m = l.match(labelRe)
+    if (m?.[1]) {
+      const normalized = normalizeCompanyNameCandidate(m[1])
+      if (normalized) out.push({ value: normalized, evidence: l })
+    }
+  }
+
+  const header = lines.slice(0, headerCount)
+  for (const h of header) {
+    const normalized = normalizeCompanyNameCandidate(h)
+    if (normalized && hasLegalSuffix(normalized)) out.push({ value: normalized, evidence: h })
+  }
+
+  const issuerHeader = extractIssuerFromHeaderBlock(rawText)
+  if (issuerHeader) {
+    const normalized = normalizeCompanyNameCandidate(issuerHeader)
+    if (normalized) out.push({ value: normalized, evidence: issuerHeader })
+  }
+
+  const uniq = new Map()
+  for (const c of out) {
+    const key = c.value.toUpperCase()
+    if (!uniq.has(key)) uniq.set(key, c)
+  }
+  return Array.from(uniq.values())
+}
+
+function buildFieldCandidates(rawText) {
+  const candidates = {
+    supplier: [],
+    creditor_name: [],
+    invoice_number: [],
+    amount: [],
+    due_date: [],
+    iban: [],
+    reference: [],
+    payer_name: [],
+    purpose: [],
+  }
+
+  const add = (list, value, evidence) => {
+    if (!value) return
+    list.push({ value, evidence: evidence || String(value || '') })
+  }
+
+  const companyCandidates = buildCompanyNameCandidates(rawText)
+  for (const c of companyCandidates) {
+    add(candidates.supplier, c.value, c.evidence)
+    add(candidates.creditor_name, c.value, c.evidence)
+  }
+
+  for (const c of extractInvoiceNumberCandidates(rawText)) add(candidates.invoice_number, c.value, c.evidence)
+  for (const c of extractDueDateCandidates(rawText)) add(candidates.due_date, c.value, c.evidence)
+
+  const ibanCandidates = extractIbanCandidates(rawText).map((x) => x.iban)
+  for (const v of ibanCandidates) add(candidates.iban, v, v)
+
+  const refCandidates = extractReferenceCandidates(rawText)
+  for (const v of refCandidates) add(candidates.reference, v, v)
+
+  const amountCandidates = extractLabeledAmountCandidates(rawText)
+  for (const c of amountCandidates) {
+    if (!c || typeof c.amount !== 'number' || !c.currency) continue
+    add(candidates.amount, { amount: c.amount, currency: c.currency }, c.line || `${c.amount} ${c.currency}`)
+  }
+
+  const issuer = extractIssuerFromHeaderBlock(rawText)
+  const payer = extractPayerNameFromText(rawText, issuer)
+  if (payer) add(candidates.payer_name, payer, payer)
+
+  const meaningful = extractMeaningfulDescription(rawText)
+  if (meaningful) add(candidates.purpose, meaningful, meaningful)
+
+  return candidates
+}
+
 function addDaysIso(isoDate, days) {
   const base = new Date(`${String(isoDate).slice(0, 10)}T00:00:00.000Z`)
   if (Number.isNaN(base.getTime())) return null
@@ -785,7 +1012,7 @@ function sanitizeFields(rawText, fields) {
 
   // Issuer (supplier/recipient): invoice issuer from header block (non-QR); never a domain/URL.
   const issuerFromHeader = isQrText ? null : extractIssuerFromHeaderBlock(rawText)
-  const normalizeName = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+  const normalizeName = (s) => normalizeCompanyNameCandidate(s)
   const isAcceptableIssuerName = (s) => {
     const v = normalizeName(s)
     if (!v) return false
@@ -1102,55 +1329,6 @@ function extractFields(rawText) {
     normalized = normalized.replace(/(?!^)-/g, '')
     const num = Number(normalized)
     return Number.isFinite(num) ? num : null
-  }
-
-  function parseDateToken(token, hintIsEnglish) {
-    const t = String(token || '').trim()
-    if (!t) return null
-    const compact = t.replace(/\s/g, '')
-    if (/^\d{4}-\d{2}-\d{2}$/.test(compact)) return compact
-    if (/^\d{4}\/\d{2}\/\d{2}$/.test(compact)) return compact.replace(/\//g, '-')
-
-    const m = compact.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/)
-    if (!m) return null
-    let a = Number(m[1])
-    let b = Number(m[2])
-    let y = Number(m[3])
-    if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(y)) return null
-    if (y < 100) y = y >= 70 ? 1900 + y : 2000 + y
-
-    const delim = compact.includes('/') ? '/' : (compact.includes('.') ? '.' : '-')
-
-    // Heuristics:
-    // - If one side > 12, it must be the day.
-    // - If ambiguous (<=12 both), assume MM/DD for English labels when delimiter is '/', else DD/MM.
-    const aIsDay = a > 12 && a <= 31
-    const bIsDay = b > 12 && b <= 31
-
-    let day
-    let month
-    if (aIsDay && !bIsDay) {
-      day = a
-      month = b
-    } else if (bIsDay && !aIsDay) {
-      // MM/DD
-      day = b
-      month = a
-    } else {
-      const assumeMonthFirst = hintIsEnglish && delim === '/'
-      if (assumeMonthFirst) {
-        month = a
-        day = b
-      } else {
-        day = a
-        month = b
-      }
-    }
-
-    if (!(month >= 1 && month <= 12 && day >= 1 && day <= 31)) return null
-    const mm = String(month).padStart(2, '0')
-    const dd = String(day).padStart(2, '0')
-    return `${y}-${mm}-${dd}`
   }
 
   function hasLetters(s) {
@@ -1657,29 +1835,44 @@ function extractFields(rawText) {
   return out
 }
 
-async function extractFieldsWithAI(rawText) {
+async function extractFieldsWithAI(rawText, candidates, languageHint) {
   if (!isAiOcrEnabled()) return null
   const text = String(rawText || '').trim()
   if (!text) return null
 
+  const flatten = (list, max = 8) =>
+    (Array.isArray(list) ? list : [])
+      .filter((c) => c && c.value)
+      .slice(0, max)
+      .map((c) => ({ value: c.value, evidence: c.evidence || String(c.value || '') }))
+
+  const candidatePayload = {
+    issuer_name: flatten(candidates?.supplier),
+    payer_name: flatten(candidates?.payer_name),
+    invoice_number: flatten(candidates?.invoice_number),
+    amount: flatten(candidates?.amount),
+    currency: flatten(candidates?.amount),
+    due_date: flatten(candidates?.due_date),
+    iban: flatten(candidates?.iban),
+    reference: flatten(candidates?.reference),
+    purpose: flatten(candidates?.purpose),
+  }
+
   const system =
-    'You extract structured payment/invoice fields from OCR text for a bill-tracking app. ' +
-    'Return JSON ONLY with schema: ' +
-    '{"supplier": string|null, "creditor_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "payment_details": string|null}. ' +
+    'You are a document understanding assistant. Return JSON ONLY with this schema: ' +
+    '{"issuer_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null}. ' +
     'Rules: ' +
-    '- Do NOT guess. Use null if uncertain. ' +
-    '- supplier and creditor_name must be clean names only (no dates, references, amounts, or “rok plačila” text). ' +
-    '- Prefer extracting invoice_number when present (invoice no / račun št / dokument št). ' +
-    '- supplier is the issuer/seller; creditor_name is the payee on the payment instruction (often same as supplier). ' +
-    '- due_date must be ISO YYYY-MM-DD if present, else null. ' +
-    '- currency must be 3-letter uppercase (e.g., EUR) if present. ' +
-    '- iban should be compact (no spaces) if present. ' +
-    '- amount should be numeric (e.g., 12.34). ' +
-    '- If the payment system is non-IBAN (routing/SWIFT/account), put those instructions into payment_details as a short multiline string, else null.'
+    '- Values MUST exist verbatim in OCR text. If not found confidently, return null. ' +
+    '- Use the candidates below as your only source of possible values. ' +
+    '- issuer_name must be a clean company name only (no labels, emails, URLs). ' +
+    '- purpose fallback: "Plačilo <invoice_number>" else "Plačilo <payer_name>" only if that exact phrase appears in text.'
 
   const user =
+    'Language hint: ' + String(languageHint || 'unknown') + '\n' +
     'OCR text (may be messy):\n' +
-    text.slice(0, 8000)
+    text.slice(0, 6000) +
+    '\n\nCandidates:\n' +
+    JSON.stringify(candidatePayload, null, 2)
 
   try {
     const model = resolveModel()
@@ -1692,7 +1885,7 @@ async function extractFieldsWithAI(rawText) {
       body: JSON.stringify({
         model,
         temperature: 0.1,
-        max_tokens: 220,
+        max_tokens: 320,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: system },
@@ -1707,17 +1900,51 @@ async function extractFieldsWithAI(rawText) {
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return null
 
+    const normalize = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+    const matchCandidate = (value, list) => {
+      const v = normalize(value)
+      if (!v) return null
+      const options = Array.isArray(list) ? list : []
+      for (const c of options) {
+        const candidate = normalize(c?.value)
+        if (candidate && candidate.toUpperCase() === v.toUpperCase()) return candidate
+      }
+      return null
+    }
+
+    const matchAmount = (amount, currency, list) => {
+      const amt = typeof amount === 'number' ? amount : null
+      const cur = typeof currency === 'string' ? currency.toUpperCase() : null
+      if (!amt || !cur) return null
+      const options = Array.isArray(list) ? list : []
+      for (const c of options) {
+        const cand = c?.value
+        if (!cand || typeof cand.amount !== 'number' || typeof cand.currency !== 'string') continue
+        if (Math.abs(cand.amount - amt) < 0.005 && String(cand.currency).toUpperCase() === cur) return { amount: cand.amount, currency: cur }
+      }
+      return null
+    }
+
+    const issuer = matchCandidate(parsed.issuer_name, candidatePayload.issuer_name)
+    const payer = matchCandidate(parsed.payer_name, candidatePayload.payer_name)
+    const invoice = matchCandidate(parsed.invoice_number, candidatePayload.invoice_number)
+    const due = matchCandidate(parsed.due_date, candidatePayload.due_date)
+    const iban = matchCandidate(parsed.iban, candidatePayload.iban)
+    const reference = matchCandidate(parsed.reference, candidatePayload.reference)
+    const purpose = matchCandidate(parsed.purpose, candidatePayload.purpose)
+    const amt = matchAmount(parsed.amount, parsed.currency, candidatePayload.amount)
+
     const out = {
-      supplier: typeof parsed.supplier === 'string' ? parsed.supplier.trim() || null : null,
-      creditor_name: typeof parsed.creditor_name === 'string' ? parsed.creditor_name.trim() || null : null,
-      invoice_number: typeof parsed.invoice_number === 'string' ? parsed.invoice_number.trim() || null : null,
-      amount: typeof parsed.amount === 'number' && Number.isFinite(parsed.amount) ? parsed.amount : null,
-      currency: typeof parsed.currency === 'string' ? parsed.currency.trim().toUpperCase() || null : null,
-      due_date: typeof parsed.due_date === 'string' ? parsed.due_date.trim() || null : null,
-      iban: typeof parsed.iban === 'string' ? parsed.iban.replace(/\s+/g, '').trim() || null : null,
-      reference: typeof parsed.reference === 'string' ? parsed.reference.trim() || null : null,
-      purpose: typeof parsed.purpose === 'string' ? parsed.purpose.trim() || null : null,
-      payment_details: typeof parsed.payment_details === 'string' ? parsed.payment_details.trim() || null : null,
+      supplier: issuer || null,
+      creditor_name: issuer || null,
+      payer_name: payer || null,
+      invoice_number: invoice || null,
+      amount: amt ? amt.amount : null,
+      currency: amt ? amt.currency : null,
+      due_date: due || null,
+      iban: iban || null,
+      reference: reference || null,
+      purpose: purpose || null,
     }
 
     if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(out.due_date)) out.due_date = null
@@ -1728,7 +1955,7 @@ async function extractFieldsWithAI(rawText) {
       else out.iban = iban
     }
 
-    return out
+    return { fields: out }
   } catch {
     return null
   }
@@ -1737,6 +1964,8 @@ async function extractFieldsWithAI(rawText) {
 function mergeFields(base, ai, rawText) {
   const out = { ...base }
   if (!ai) return sanitizeFields(rawText, out)
+
+  const aiFields = ai?.fields && typeof ai.fields === 'object' ? ai.fields : ai
 
   const containsNorm = (hay, needle) => {
     const h = String(hay || '').toUpperCase().replace(/\s+/g, ' ').trim()
@@ -1787,41 +2016,47 @@ function mergeFields(base, ai, rawText) {
   // Also allow AI to override clearly misassigned heuristic names.
   if (
     (out.supplier == null || looksLikeMisassignedName(out.supplier)) &&
-    ai.supplier &&
-    !looksLikeMisassignedName(ai.supplier) &&
-    containsNorm(rawText, ai.supplier) &&
-    appearsOnLabeledLine(rawText, ai.supplier, supplierLabelRe) &&
-    !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(ai.supplier || '')) &&
-    !appearsOnPayerLine(rawText, ai.supplier) &&
-    !looksLikePersonName(ai.supplier)
+    aiFields.supplier &&
+    !looksLikeMisassignedName(aiFields.supplier) &&
+    containsNorm(rawText, aiFields.supplier) &&
+    appearsOnLabeledLine(rawText, aiFields.supplier, supplierLabelRe) &&
+    !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(aiFields.supplier || '')) &&
+    !appearsOnPayerLine(rawText, aiFields.supplier) &&
+    !looksLikePersonName(aiFields.supplier)
   ) {
-    out.supplier = ai.supplier
+    out.supplier = aiFields.supplier
   }
   if (
     (out.creditor_name == null || looksLikeMisassignedName(out.creditor_name)) &&
-    ai.creditor_name &&
-    !looksLikeMisassignedName(ai.creditor_name) &&
-    containsNorm(rawText, ai.creditor_name) &&
-    appearsOnLabeledLine(rawText, ai.creditor_name, creditorLabelRe) &&
-    !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(ai.creditor_name || '')) &&
-    !appearsOnPayerLine(rawText, ai.creditor_name) &&
-    !looksLikePersonName(ai.creditor_name)
+    aiFields.creditor_name &&
+    !looksLikeMisassignedName(aiFields.creditor_name) &&
+    containsNorm(rawText, aiFields.creditor_name) &&
+    appearsOnLabeledLine(rawText, aiFields.creditor_name, creditorLabelRe) &&
+    !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(aiFields.creditor_name || '')) &&
+    !appearsOnPayerLine(rawText, aiFields.creditor_name) &&
+    !looksLikePersonName(aiFields.creditor_name)
   ) {
-    out.creditor_name = ai.creditor_name
+    out.creditor_name = aiFields.creditor_name
   }
-  if (!out.invoice_number && ai.invoice_number && containsNorm(rawText, ai.invoice_number)) out.invoice_number = ai.invoice_number
-  if (!out.purpose && ai.purpose && containsNorm(rawText, ai.purpose)) out.purpose = ai.purpose
-  // Do not take AI-proposed due dates or payment details; too easy to hallucinate/misread.
+  if (!out.invoice_number && aiFields.invoice_number && containsNorm(rawText, aiFields.invoice_number)) out.invoice_number = aiFields.invoice_number
+  if (!out.purpose && aiFields.purpose && containsNorm(rawText, aiFields.purpose)) out.purpose = aiFields.purpose
+
+  if (out.amount == null && typeof aiFields.amount === 'number' && Number.isFinite(aiFields.amount)) {
+    out.amount = aiFields.amount
+  }
+  if (!out.currency && aiFields.currency && /^[A-Z]{3}$/.test(String(aiFields.currency))) out.currency = aiFields.currency
+  if (!out.due_date && aiFields.due_date && /^\d{4}-\d{2}-\d{2}$/.test(String(aiFields.due_date))) out.due_date = aiFields.due_date
+  // Do not take AI-proposed payment details; too easy to hallucinate/misread.
 
   // Payment-critical: only fill if base is missing AND the value is verifiable.
   // IBAN is chosen from OCR text via sanitizeFields (AI may misread digits).
-  if (!out.reference && ai.reference) {
-    const r = String(ai.reference || '').replace(/\s+/g, '').toUpperCase()
+  if (!out.reference && aiFields.reference) {
+    const r = String(aiFields.reference || '').replace(/\s+/g, '').toUpperCase()
     const compact = String(rawText || '').toUpperCase()
     const allRefs = [...new Set((compact.match(/SI\d{2}\s*[0-9A-Z\-\/]{4,}/g) || []).map((x) => String(x || '').replace(/\s+/g, '').toUpperCase()))]
     if (textContainsReference(rawText, r) || allRefs.length === 1) out.reference = r
   }
-  if (out.currency == null && ai.currency && /^[A-Z]{3}$/.test(String(ai.currency))) out.currency = ai.currency
+  if (out.currency == null && aiFields.currency && /^[A-Z]{3}$/.test(String(aiFields.currency))) out.currency = aiFields.currency
   // Do not take AI-proposed amounts. OCR amounts must be text-evidenced (handled in extractFields + sanitizeFields).
 
   return sanitizeFields(rawText, out)
@@ -1847,7 +2082,10 @@ function normalizeReferenceSimple(input) {
 
 function parseEPC_QR(text) {
   try {
-    const lines = normalizeQrText(text).split(/\n+/).map((l) => l.trim())
+    const lines = normalizeQrText(text)
+      .split(/\n/)
+      .map((l) => l.trim())
+    while (lines.length && lines[lines.length - 1] === '') lines.pop()
     if (lines.length < 7) return null
     if (lines[0] !== 'BCD') return null
     const serviceTag = lines[3]
@@ -1982,7 +2220,29 @@ function parseUPN_QR(text) {
       break
     }
 
+    let due_date = null
+    const dueLabel = /(rok\s*pla[^\s:]*|zapad[^\s:]*|due\s*date|date\s*due|payment\s*due|pay\s*by|payable\s*by)/i
+    const dateToken = /(\d{4}[-\/]\d{2}[-\/]\d{2}|\d{1,2}[\.\/-]\d{1,2}[\.\/-]\d{2,4})/
+    for (let i = 0; i < lines.length; i++) {
+      const l = String(lines[i] || '').trim()
+      if (!l || !dueLabel.test(l)) continue
+      const hintEnglish = /(due\s*date|date\s*due|payment\s*due|pay\s*by|payable\s*by)/i.test(l)
+      const inline = l.match(dateToken)
+      if (inline?.[1]) {
+        const iso = parseDateToken(inline[1], hintEnglish)
+        if (iso) { due_date = iso; break }
+      } else {
+        const next = String(lines[i + 1] || '').trim()
+        const m = next.match(dateToken)
+        if (m?.[1]) {
+          const iso = parseDateToken(m[1], hintEnglish)
+          if (iso) { due_date = iso; break }
+        }
+      }
+    }
+
     const result = { iban: iban || null, amount, currency, purpose, reference, creditor_name }
+    if (due_date) result.due_date = due_date
     if (result.iban || typeof result.amount === 'number') return result
     return null
   } catch {
@@ -2011,6 +2271,9 @@ export async function handler(event) {
 
     const contentType = getContentType(event)
 
+    let allowAi = true
+    let languageHint = null
+
     const isText = /^text\/plain\b/i.test(contentType)
     let isPdf = /application\/pdf/i.test(contentType)
 
@@ -2021,7 +2284,8 @@ export async function handler(event) {
       const text = String(buf?.toString('utf8') || '').trim()
       if (!text) return jsonResponse(400, { ok: false, error: 'missing_text' })
       const fields0 = extractFields(text)
-      const aiFields = await extractFieldsWithAI(text)
+      const candidates = buildFieldCandidates(text)
+      const aiFields = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
       const fields = mergeFields(fields0, aiFields, text)
       return jsonResponse(200, { ok: true, rawText: text, fields, ai: !!aiFields, mode: 'text' })
     }
@@ -2044,6 +2308,8 @@ export async function handler(event) {
       try {
         const body = JSON.parse(event.body || '{}')
         if (typeof body.preferQr === 'boolean') preferQr = body.preferQr
+        if (typeof body.allowAi === 'boolean') allowAi = body.allowAi
+        if (typeof body.language === 'string') languageHint = String(body.language || '').trim()
         const pdf = String(body.pdfBase64 || '')
         if (pdf) {
           // Allow mobile clients to send PDFs as base64 JSON to avoid flaky local URI uploads.
@@ -2158,12 +2424,19 @@ export async function handler(event) {
         if (preferQr) {
           const parsedQr = parsePaymentQR_QR(text)
           if (parsedQr) {
+            console.log('[OCR] QR found:', true, { mode: 'qr_text' })
             return jsonResponse(200, { ok: true, rawText: text, fields: sanitizeFields(text, parsedQr), ai: false, mode: 'qr_text' })
           }
         }
 
+        console.log('[OCR] QR found:', false, { mode: 'pdf_text', ocrLength: text.length })
         const fields0 = extractFields(text)
-        const aiFields = await extractFieldsWithAI(text)
+        const candidates = buildFieldCandidates(text)
+        const aiFields = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
+        if (aiFields?.fields) {
+          const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
+          console.log('[OCR] AI extracted fields:', keys)
+        }
         const fields = mergeFields(fields0, aiFields, text)
         const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null } }
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, mode: 'pdf_text' })
@@ -2233,8 +2506,14 @@ export async function handler(event) {
         }
       } catch {}
 
+      console.log('[OCR] QR found:', false, { mode: 'pdf_vision', ocrLength: ocrText.length })
       const fields0 = extractFields(ocrText)
-      const aiFields = await extractFieldsWithAI(ocrText)
+      const candidates = buildFieldCandidates(ocrText)
+      const aiFields = allowAi ? await extractFieldsWithAI(ocrText, candidates, languageHint) : null
+      if (aiFields?.fields) {
+        const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
+        console.log('[OCR] AI extracted fields:', keys)
+      }
       const fields = mergeFields(fields0, aiFields, ocrText)
       const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null } }
       return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, mode: 'pdf_vision' })
@@ -2362,6 +2641,7 @@ export async function handler(event) {
           if (qrText) {
             const parsedQr = parsePaymentQR_QR(qrText)
             if (parsedQr) {
+              console.log('[OCR] QR found:', true, { mode: 'qr_barcode' })
               // Increment OCR usage on success before returning
               try {
                 const newUsed = used + 1
@@ -2424,8 +2704,14 @@ export async function handler(event) {
     const annotation = raw?.responses?.[0]
     const fullText = annotation?.fullTextAnnotation?.text || annotation?.textAnnotations?.[0]?.description || ''
     const full = fullText || ''
+    console.log('[OCR] QR found:', false, { mode: 'vision_text', ocrLength: full.length })
     const fields0 = extractFields(full)
-    const aiFields = await extractFieldsWithAI(full)
+    const candidates = buildFieldCandidates(full)
+    const aiFields = allowAi ? await extractFieldsWithAI(full, candidates, languageHint) : null
+    if (aiFields?.fields) {
+      const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
+      console.log('[OCR] AI extracted fields:', keys)
+    }
     const fields = mergeFields(fields0, aiFields, full)
     const meta = buildExtractionMeta(full, fields)
 
@@ -2436,4 +2722,4 @@ export async function handler(event) {
 }
 
 // Exported for unit tests (pure helpers; safe to import without invoking handler).
-export { extractFields, sanitizeFields }
+export { extractFields, sanitizeFields, parsePaymentQR_QR, buildFieldCandidates }

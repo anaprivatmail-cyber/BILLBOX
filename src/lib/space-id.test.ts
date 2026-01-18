@@ -1,8 +1,25 @@
 import { describe, expect, it } from 'vitest'
 
 import { assertPayerScope } from '../../netlify/functions/_exports.js'
+import { isUuidString, resolveDbSpaceIdFromEntitlements } from '../../billbox-mobile/src/space-id'
 
 describe('payer scope (space_id) validation', () => {
+  it('maps active payer label to entitlement UUID for save payload', () => {
+    const ent = {
+      payerLimit: 2,
+      spaceId: '00000000-0000-4000-8000-000000000001',
+      spaceId2: '00000000-0000-4000-8000-000000000002',
+    }
+
+    const db1 = resolveDbSpaceIdFromEntitlements(ent, 'personal')
+    const db2 = resolveDbSpaceIdFromEntitlements(ent, 'personal2')
+
+    expect(isUuidString(db1)).toBe(true)
+    expect(isUuidString(db2)).toBe(true)
+    expect(db1).toBe(ent.spaceId)
+    expect(db2).toBe(ent.spaceId2)
+  })
+
   it('rejects labels like "personal" / "personal2" as invalid scope', () => {
     const ent = {
       payerLimit: 2,

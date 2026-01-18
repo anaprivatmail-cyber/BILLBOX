@@ -1,8 +1,57 @@
 import { describe, expect, it, vi } from 'vitest'
-import { extractFields, sanitizeFields } from '../../netlify/functions/ocr.js'
+import { extractFields, sanitizeFields, parsePaymentQR_QR } from '../../netlify/functions/ocr.js'
 import { parseEPC } from './epc'
 
 describe('OCR extraction (text heuristics)', () => {
+  it('imported image with QR uses deterministic QR mapping', () => {
+    const qr = [
+      'BCD',
+      '001',
+      '1',
+      'SCT',
+      '',
+      'OPTIPRINT d.o.o.',
+      'SI56192001234567892',
+      'EUR12.34',
+      'INV',
+      'SI99 1234567890',
+      'Invoice 2026-001',
+    ].join('\n')
+
+    const parsed = parsePaymentQR_QR(qr)
+    expect(parsed).not.toBeNull()
+    const sanitized = sanitizeFields(qr, parsed as any)
+
+    expect(sanitized.creditor_name).toBe('OPTIPRINT d.o.o.')
+    expect(sanitized.iban).toBe('SI56192001234567892')
+    expect(sanitized.reference).toBe('SI991234567890')
+    expect(sanitized.amount).toBe(12.34)
+    expect(sanitized.currency).toBe('EUR')
+  })
+
+  it('imported PDF with QR uses deterministic QR mapping', () => {
+    const qr = [
+      'UPNQR',
+      'Prejemnik: Komunalno podjetje d.o.o.',
+      'IBAN: SI56 1920 0123 4567 892',
+      'Sklic: SI99 1234567890',
+      'Namen: Voda januar',
+      'EUR 10,55',
+      'Rok plačila: 12.03.2026',
+    ].join('\n')
+
+    const parsed = parsePaymentQR_QR(qr)
+    expect(parsed).not.toBeNull()
+    const sanitized = sanitizeFields(qr, parsed as any)
+
+    expect(sanitized.creditor_name).toBe('Komunalno podjetje d.o.o.')
+    expect(sanitized.iban).toBe('SI56192001234567892')
+    expect(sanitized.reference).toBe('SI991234567890')
+    expect(sanitized.amount).toBe(10.55)
+    expect(sanitized.currency).toBe('EUR')
+    expect(sanitized.due_date).toBe('2026-03-12')
+  })
+
   it('does not confuse IBAN for SI reference, and prefers labeled due date', () => {
     // Known-valid example IBAN (Slovenia, 19 chars)
     const iban = 'SI56192001234567892'
@@ -128,6 +177,30 @@ describe('OCR extraction (text heuristics)', () => {
     expect(sanitized.iban).toBe('SI56192001234567892')
     expect(sanitized.reference).toBe('SI995555555555')
     expect(String(sanitized.purpose || '')).toMatch(/januar\s+2026/i)
+  })
+
+  it('OCR-only invoice chooses payable amount and clean issuer', () => {
+    const rawText = [
+      'Uporabnik: OPTIPRINT d.o.o. | Obrazec: AOT',
+      'www.optiprint.si',
+      'Račun št: 2026-010',
+      'Osnova: 80,00 €',
+      'DDV 22%: 17,60 €',
+      'Za plačilo: 97,60 €',
+      'Rok plačila: 15.02.2026',
+      'IBAN: SI56 1920 0123 4567 892',
+      'Sklic: SI99 1111111111',
+    ].join('\n')
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.supplier).toBe('OPTIPRINT d.o.o.')
+    expect(sanitized.creditor_name).toBe('OPTIPRINT d.o.o.')
+    expect(String(sanitized.supplier || '')).not.toMatch(/obrazec|www|http|@|\.si/i)
+    expect(sanitized.amount).toBe(97.6)
+    expect(sanitized.currency).toBe('EUR')
+    expect(sanitized.due_date).toBe('2026-02-15')
   })
 })
 
