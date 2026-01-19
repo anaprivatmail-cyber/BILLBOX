@@ -693,6 +693,42 @@ function extractInvoiceNumberLabeled(rawText) {
   return null
 }
 
+function hasInvoiceLabelEvidence(rawText, invoiceNumber) {
+  const inv = String(invoiceNumber || '').trim()
+  if (!inv) return false
+  const invNorm = inv.toUpperCase().replace(/\s+/g, '')
+  const lines = splitLines(rawText)
+  if (!lines.length) return false
+
+  const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').trim()
+    if (!l) continue
+    const lineNorm = l.toUpperCase().replace(/\s+/g, '')
+    if (!lineNorm.includes(invNorm)) continue
+    if (labelRe.test(l)) return true
+    for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) {
+      if (labelRe.test(String(lines[j] || ''))) return true
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').trim()
+    if (!l) continue
+    if (!labelRe.test(l)) continue
+    const after = String(l.split(/:\s*/, 2)[1] || '').trim()
+    const directToken = (after.match(/\b([A-Z0-9][A-Z0-9\-\/.]{2,})\b/i) || [])[1] || after
+    const directNorm = String(directToken || '').toUpperCase().replace(/\s+/g, '')
+    if (directNorm && directNorm.includes(invNorm)) return true
+    const next = String(lines[i + 1] || '').trim()
+    const nextNorm = next.toUpperCase().replace(/\s+/g, '')
+    if (nextNorm && nextNorm.includes(invNorm)) return true
+  }
+
+  return false
+}
+
 function extractMeaningfulDescription(rawText) {
   const lines = splitLines(rawText)
   if (!lines.length) return null
@@ -730,6 +766,29 @@ function extractMeaningfulDescription(rawText) {
     }
   }
   if (bestScore >= 6 && best) return best
+  return null
+}
+
+function extractItemNameFromText(rawText) {
+  const lines = splitLines(rawText)
+  if (!lines.length) return null
+
+  const labelRe = /^(?:naziv\s+izdelka|izdelek|artikel|artikl|opis|description|product|item|storitev|service)\b\s*:?-?\s*(.+)$/i
+  const badRe = /(iban|trr|sklic|referenca|reference|model|rok\s*pla\S*|zapad|znesek|amount|total|ddv|vat|subtotal|grand\s*total|\btotal\b|invoice|ra\u010dun)/i
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = String(lines[i] || '').trim()
+    if (!l) continue
+    const m = l.match(labelRe)
+    if (m && m[1]) {
+      const v = String(m[1]).replace(/\s+/g, ' ').trim()
+      if (v && v.length >= 4 && v.length <= 120 && !badRe.test(v) && !isUrlOrEmailLike(v)) return v
+    }
+  }
+
+  const meaningful = extractMeaningfulDescription(rawText)
+  if (meaningful && meaningful.length >= 4 && meaningful.length <= 120) return meaningful
+
   return null
 }
 
@@ -855,6 +914,7 @@ function buildFieldCandidates(rawText) {
     reference: [],
     payer_name: [],
     purpose: [],
+    item_name: [],
   }
 
   const add = (list, value, evidence) => {
@@ -889,6 +949,9 @@ function buildFieldCandidates(rawText) {
 
   const meaningful = extractMeaningfulDescription(rawText)
   if (meaningful) add(candidates.purpose, meaningful, meaningful)
+
+  const item = extractItemNameFromText(rawText)
+  if (item) add(candidates.item_name, item, item)
 
   return candidates
 }
@@ -1045,9 +1108,9 @@ function sanitizeFields(rawText, fields) {
   out.invoice_number = invLabeled || (typeof out.invoice_number === 'string' ? String(out.invoice_number).trim() : null)
   // If we have an invoice_number from upstream, accept it only if it appears in a labeled context.
   if (out.invoice_number && !invLabeled) {
-    const probe = String(out.invoice_number || '').trim()
-    const found = extractInvoiceNumberLabeled(rawText)
-    if (!found || found !== probe.toUpperCase().replace(/\s+/g, '')) out.invoice_number = null
+    const probe = String(out.invoice_number || '').trim().toUpperCase().replace(/\s+/g, '')
+    if (!hasInvoiceLabelEvidence(rawText, probe)) out.invoice_number = null
+    else out.invoice_number = probe
   }
   if (!out.invoice_number && !isQrText) {
     const stamp = pickDocRefDateStamp(out)
@@ -1296,7 +1359,7 @@ async function visionAnnotatePdfAllPages({ accessToken, pdfBuffer, numpages, tim
 
 function extractFields(rawText) {
   const text = (rawText || '').replace(/\r/g, '')
-  const out = { supplier: null, creditor_name: null, invoice_number: null, amount: null, currency: null, due_date: null, iban: null, reference: null, purpose: null, payment_details: null }
+  const out = { supplier: null, creditor_name: null, invoice_number: null, amount: null, currency: null, due_date: null, iban: null, reference: null, purpose: null, payment_details: null, item_name: null }
 
   function isPayerLine(line) {
     return /\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b\s*:?/i.test(String(line || ''))
@@ -1685,6 +1748,14 @@ function extractFields(rawText) {
     } catch {}
   }
 
+  // Item / purchase subject (non-payment): labeled product/service name or a meaningful description.
+  if (!out.item_name) {
+    try {
+      const item = extractItemNameFromText(rawText)
+      if (item) out.item_name = item
+    } catch {}
+  }
+
   // Creditor/payee name (often same as supplier)
   const cred = text.match(/(prejemnik|recipient|payee|beneficiary|creditor|to\s*:|upravi[^\s:]*)\s*:?\s*(.+)/i)
   if (cred) {
@@ -1856,16 +1927,19 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
     iban: flatten(candidates?.iban),
     reference: flatten(candidates?.reference),
     purpose: flatten(candidates?.purpose),
+    item_name: flatten(candidates?.item_name),
   }
 
   const system =
     'You are a document understanding assistant. Return JSON ONLY with this schema: ' +
-    '{"issuer_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null}. ' +
+    '{"issuer_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null}. ' +
     'Rules: ' +
     '- Values MUST exist verbatim in OCR text. If not found confidently, return null. ' +
-    '- Use the candidates below as your only source of possible values. ' +
+    '- Candidates below are hints; you may select any exact substring from the OCR text. ' +
     '- issuer_name must be a clean company name only (no labels, emails, URLs). ' +
-    '- purpose fallback: "Plačilo <invoice_number>" else "Plačilo <payer_name>" only if that exact phrase appears in text.'
+    '- purpose should be a short description of goods/services if present; otherwise null. ' +
+    '- item_name is the purchase subject (product/service name) if present; otherwise null. ' +
+    '- Never fabricate values.'
 
   const user =
     'Language hint: ' + String(languageHint || 'unknown') + '\n' +
@@ -1901,6 +1975,13 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
     if (!parsed || typeof parsed !== 'object') return null
 
     const normalize = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+    const normalizeForSearch = (s) => normalize(s).toUpperCase()
+    const appearsInText = (value) => {
+      const v = normalizeForSearch(value)
+      if (!v) return false
+      const t = normalizeForSearch(text)
+      return Boolean(t && v && t.includes(v))
+    }
     const matchCandidate = (value, list) => {
       const v = normalize(value)
       if (!v) return null
@@ -1911,6 +1992,7 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
       }
       return null
     }
+    const matchCandidateOrText = (value, list) => matchCandidate(value, list) || (appearsInText(value) ? normalize(value) : null)
 
     const matchAmount = (amount, currency, list) => {
       const amt = typeof amount === 'number' ? amount : null
@@ -1925,13 +2007,14 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
       return null
     }
 
-    const issuer = matchCandidate(parsed.issuer_name, candidatePayload.issuer_name)
-    const payer = matchCandidate(parsed.payer_name, candidatePayload.payer_name)
-    const invoice = matchCandidate(parsed.invoice_number, candidatePayload.invoice_number)
+    const issuer = matchCandidateOrText(parsed.issuer_name, candidatePayload.issuer_name)
+    const payer = matchCandidateOrText(parsed.payer_name, candidatePayload.payer_name)
+    const invoice = matchCandidateOrText(parsed.invoice_number, candidatePayload.invoice_number)
     const due = matchCandidate(parsed.due_date, candidatePayload.due_date)
     const iban = matchCandidate(parsed.iban, candidatePayload.iban)
     const reference = matchCandidate(parsed.reference, candidatePayload.reference)
-    const purpose = matchCandidate(parsed.purpose, candidatePayload.purpose)
+    const purpose = matchCandidateOrText(parsed.purpose, candidatePayload.purpose)
+    const itemName = matchCandidateOrText(parsed.item_name, candidatePayload.item_name)
     const amt = matchAmount(parsed.amount, parsed.currency, candidatePayload.amount)
 
     const out = {
@@ -1945,6 +2028,7 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
       iban: iban || null,
       reference: reference || null,
       purpose: purpose || null,
+      item_name: itemName || null,
     }
 
     if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(out.due_date)) out.due_date = null
@@ -2009,8 +2093,28 @@ function mergeFields(base, ai, rawText) {
     return false
   }
 
+  const appearsInTopLines = (text, value, maxLines = 12) => {
+    const v = String(value || '').toUpperCase().replace(/\s+/g, ' ').trim()
+    if (!v) return false
+    const lines = String(text || '').replace(/\r/g, '').split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    const top = lines.slice(0, Math.max(1, maxLines))
+    for (const l of top) {
+      const ln = l.toUpperCase().replace(/\s+/g, ' ')
+      if (ln.includes(v)) return true
+    }
+    return false
+  }
+
   const supplierLabelRe = /\b(dobavitelj|supplier|vendor|seller|issuer|bill\s*from|izdajatelj(?:\s+ra\u010duna)?|prodajalec|izdal)\b/i
   const creditorLabelRe = /\b(prejemnik|recipient|payee|beneficiary|creditor|upravi\S*|to)\b/i
+  const headerIssuer = extractIssuerFromHeaderBlock(rawText)
+  const normalizeNameCandidate = (s) => normalizeCompanyNameCandidate(s) || String(s || '').replace(/\s+/g, ' ').trim()
+  const headerMatch = (name) => {
+    const h = normalizeNameCandidate(headerIssuer)
+    const n = normalizeNameCandidate(name)
+    if (!h || !n) return false
+    return h.toUpperCase() === n.toUpperCase()
+  }
 
   // AI is allowed to help with non-payment-critical fields.
   // Also allow AI to override clearly misassigned heuristic names.
@@ -2019,7 +2123,7 @@ function mergeFields(base, ai, rawText) {
     aiFields.supplier &&
     !looksLikeMisassignedName(aiFields.supplier) &&
     containsNorm(rawText, aiFields.supplier) &&
-    appearsOnLabeledLine(rawText, aiFields.supplier, supplierLabelRe) &&
+    (appearsOnLabeledLine(rawText, aiFields.supplier, supplierLabelRe) || headerMatch(aiFields.supplier) || (appearsInTopLines(rawText, aiFields.supplier, 12) && hasLegalSuffix(aiFields.supplier))) &&
     !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(aiFields.supplier || '')) &&
     !appearsOnPayerLine(rawText, aiFields.supplier) &&
     !looksLikePersonName(aiFields.supplier)
@@ -2031,7 +2135,7 @@ function mergeFields(base, ai, rawText) {
     aiFields.creditor_name &&
     !looksLikeMisassignedName(aiFields.creditor_name) &&
     containsNorm(rawText, aiFields.creditor_name) &&
-    appearsOnLabeledLine(rawText, aiFields.creditor_name, creditorLabelRe) &&
+    (appearsOnLabeledLine(rawText, aiFields.creditor_name, creditorLabelRe) || headerMatch(aiFields.creditor_name) || (appearsInTopLines(rawText, aiFields.creditor_name, 12) && hasLegalSuffix(aiFields.creditor_name))) &&
     !/\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b/i.test(String(aiFields.creditor_name || '')) &&
     !appearsOnPayerLine(rawText, aiFields.creditor_name) &&
     !looksLikePersonName(aiFields.creditor_name)
@@ -2040,6 +2144,7 @@ function mergeFields(base, ai, rawText) {
   }
   if (!out.invoice_number && aiFields.invoice_number && containsNorm(rawText, aiFields.invoice_number)) out.invoice_number = aiFields.invoice_number
   if (!out.purpose && aiFields.purpose && containsNorm(rawText, aiFields.purpose)) out.purpose = aiFields.purpose
+  if (!out.item_name && aiFields.item_name && containsNorm(rawText, aiFields.item_name)) out.item_name = aiFields.item_name
 
   if (out.amount == null && typeof aiFields.amount === 'number' && Number.isFinite(aiFields.amount)) {
     out.amount = aiFields.amount

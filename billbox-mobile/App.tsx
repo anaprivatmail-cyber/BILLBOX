@@ -3631,7 +3631,7 @@ function ScanBillScreen() {
     // IMPORTANT: Invoice number must ONLY come from labeled fields.
     // Allowed labels (multilingual): "Račun št", "Številka računa", "Račun številka", "Invoice No/#", "Document No".
     const cand = extractLabeledValueFromText(rawText, [
-      /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\s*:?\s*(.+)$/i,
+      /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b\s*:?\s*(.+)$/i,
     ])
     const v = String(cand || '').trim()
     if (!v) return null
@@ -3685,6 +3685,7 @@ function ScanBillScreen() {
     const rawIban = fields?.iban ? String(fields.iban) : ''
     const rawRef = fields?.reference ? String(fields.reference) : ''
     const rawPurpose = fields?.purpose ? String(fields.purpose) : ''
+    const rawItem = fields?.item_name ? String(fields.item_name) : ''
     const rawPaymentDetails = fields?.payment_details ? String(fields.payment_details) : ''
     const rawDue = fields?.due_date ? String(fields.due_date) : ''
     const rawText = fields?.rawText ? String(fields.rawText) : ''
@@ -3761,12 +3762,24 @@ function ScanBillScreen() {
       if (!inv) return false
       const invNorm = inv.toUpperCase().replace(/\s+/g, '')
       const lines = String(text || '').replace(/\r/g, '').split(/\n+/)
-      const labelRe = /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+      const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+
+      for (let i = 0; i < lines.length; i++) {
+        const l = String(lines[i] || '').trim()
+        if (!l) continue
+        const lineNorm = l.toUpperCase().replace(/\s+/g, '')
+        if (!lineNorm || !lineNorm.includes(invNorm)) continue
+        if (labelRe.test(l)) return true
+        for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) {
+          if (labelRe.test(String(lines[j] || ''))) return true
+        }
+      }
+
       for (let i = 0; i < lines.length; i++) {
         const l = String(lines[i] || '').trim()
         if (!l) continue
         if (!labelRe.test(l)) continue
-        const m = l.match(/^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\s*:?\s*(.+)$/i)
+        const m = l.match(/\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|ra\u010dun\s*\u0161tevilka|\u0161tevilka\s*ra\u010duna|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b\s*:?\s*(.+)$/i)
         const direct = String(m?.[1] || '').trim()
         const directNorm = direct.toUpperCase().replace(/\s+/g, '')
         if (directNorm && directNorm.includes(invNorm)) return true
@@ -3791,6 +3804,20 @@ function ScanBillScreen() {
         setInvoiceNumber(invCandidate)
         // Generated invoice numbers are low-priority fallbacks and must be overwritable.
         markFieldSource('invoice_number', invoiceGenerated ? 999 : undefined)
+      }
+    }
+
+    // Purchase item / subject (archive-friendly): use AI item_name or a meaningful description.
+    if (!editedRef.current.purchaseItem) {
+      const purposeCandidate = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
+      const purposeLooksLikeItem = purposeCandidate && !/^pla\u010dilo\b/i.test(purposeCandidate)
+      const itemCandidate =
+        String(rawItem || '').replace(/\s+/g, ' ').trim() ||
+        (!isQr ? (extractMeaningfulPurposeFromText(rawText) || '') : '') ||
+        (purposeLooksLikeItem ? purposeCandidate : '')
+      if (itemCandidate && canSetField('purchase_item', itemCandidate, editedRef.current.purchaseItem, purchaseItem)) {
+        setPurchaseItem(itemCandidate)
+        markFieldSource('purchase_item')
       }
     }
 
