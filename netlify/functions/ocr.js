@@ -549,6 +549,24 @@ function normalizeCompanyNameCandidate(input) {
   return pickFrom[0] || null
 }
 
+function isStrongCompanyNameCandidate(input) {
+  const s = String(input || '').replace(/\s+/g, ' ').trim()
+  if (!s) return false
+  if (isUrlOrEmailLike(s)) return false
+  if (isLikelyAddressOnly(s)) return false
+  if (isCustomerLabelLine(s)) return false
+  if (looksLikeMisassignedName(s)) return false
+  if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) return false
+  const digits = (s.match(/\d/g) || []).length
+  const letters = (s.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
+  if (letters < 4) return false
+  if (digits > letters) return false
+  if (s.length < 3 || s.length > 60) return false
+  const words = s.split(' ').filter(Boolean)
+  if (words.length > 6) return false
+  return true
+}
+
 function extractIssuerFromHeaderBlock(rawText) {
   const lines = splitLines(rawText)
   if (!lines.length) return null
@@ -596,9 +614,11 @@ function extractIssuerFromHeaderBlock(rawText) {
     // If GEN-I appears, boost (safe brand/company marker).
     const hasGenI = /\bGEN\s*-?\s*I\b/i.test(s)
     if (hasGenI) score += 8
+    const strongName = isStrongCompanyNameCandidate(s)
+    if (strongName) score += 2
 
-    // Hard requirement: issuer must have either a legal suffix, a strong header context, or GEN-I marker.
-    if (!hasLegalSuffix(s) && !hasContext && !hasGenI) return { score: -999, value: '' }
+    // Hard requirement: issuer must have either a legal suffix, a strong header context, GEN-I marker, or a strong company-like line.
+    if (!hasLegalSuffix(s) && !hasContext && !hasGenI && !strongName) return { score: -999, value: '' }
     return { score, value: s }
   }
 
@@ -662,7 +682,7 @@ function extractInvoiceNumberLabeled(rawText) {
   const lines = splitLines(rawText)
   if (!lines.length) return null
 
-  const labelRe = /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+  const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
   const valueRe = /\b([A-Z0-9][A-Z0-9\-\/.]{2,})\b/i
 
   const normalize = (s) => String(s || '').trim().toUpperCase().replace(/\s+/g, '')
@@ -682,6 +702,8 @@ function extractInvoiceNumberLabeled(rawText) {
     const l = String(lines[i] || '').trim()
     if (!l) continue
     if (!labelRe.test(l)) continue
+    const inline = l.match(new RegExp(`${labelRe.source}\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9\\-\\/.]{2,})`, 'i'))
+    if (inline?.[1] && !isBad(inline[1])) return normalize(inline[1])
     const after = String(l.split(/:\s*/, 2)[1] || '').trim()
     const directToken = (after.match(valueRe) || [])[1] || after
     if (directToken && !isBad(directToken)) return normalize(directToken)
@@ -796,7 +818,7 @@ function extractInvoiceNumberCandidates(rawText) {
   const lines = splitLines(rawText)
   if (!lines.length) return []
 
-  const labelRe = /^(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+  const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
   const valueRe = /\b([A-Z0-9][A-Z0-9\-\/.]{2,})\b/i
 
   const normalize = (s) => String(s || '').trim().toUpperCase().replace(/\s+/g, '')
@@ -816,6 +838,8 @@ function extractInvoiceNumberCandidates(rawText) {
   for (let i = 0; i < lines.length; i++) {
     const l = String(lines[i] || '').trim()
     if (!l || !labelRe.test(l)) continue
+    const inline = l.match(new RegExp(`${labelRe.source}\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9\\-\\/.]{2,})`, 'i'))
+    if (inline?.[1] && !isBad(inline[1])) out.push({ value: normalize(inline[1]), evidence: l })
     const after = String(l.split(/:\s*/, 2)[1] || '').trim()
     const directToken = (after.match(valueRe) || [])[1] || after
     if (directToken && !isBad(directToken)) out.push({ value: normalize(directToken), evidence: l })
@@ -886,7 +910,7 @@ function buildCompanyNameCandidates(rawText) {
   const header = lines.slice(0, headerCount)
   for (const h of header) {
     const normalized = normalizeCompanyNameCandidate(h)
-    if (normalized && hasLegalSuffix(normalized)) out.push({ value: normalized, evidence: h })
+    if (normalized && (hasLegalSuffix(normalized) || isStrongCompanyNameCandidate(normalized))) out.push({ value: normalized, evidence: h })
   }
 
   const issuerHeader = extractIssuerFromHeaderBlock(rawText)
