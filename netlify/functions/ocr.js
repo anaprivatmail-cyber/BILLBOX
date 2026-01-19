@@ -530,7 +530,7 @@ function normalizeCompanyNameCandidate(input) {
   const raw = String(input || '').replace(/\s+/g, ' ').trim()
   if (!raw) return null
 
-  const prefixRe = /^(?:uporabnik|obrazec|ra\u010dun|racun|dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|customer|payer|bill\s*to|sold\s*to)\s*[:\-]?\s*/i
+  const prefixRe = /^(?:uporabnik|obrazec|ra\u010dun|racun|dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|customer|payer|bill\s*to|sold\s*to|izdajatelj|prodajalec|izdal)\s*[:\-]?\s*/i
   const parts = raw
     .split(/[|•·]/)
     .map((p) => p.replace(prefixRe, '').replace(/^[\s:,-]+|[\s:,-]+$/g, '').trim())
@@ -682,7 +682,7 @@ function extractInvoiceNumberLabeled(rawText) {
   const lines = splitLines(rawText)
   if (!lines.length) return null
 
-  const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+  const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#|nr\.?|no\.?)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number|nr\.?)?|document\s*(?:no\.?|#|number|nr\.?)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka|nr\.?)?)\b/i
   const valueRe = /\b([A-Z0-9][A-Z0-9\-\/.]{2,})\b/i
 
   const normalize = (s) => String(s || '').trim().toUpperCase().replace(/\s+/g, '')
@@ -722,7 +722,7 @@ function hasInvoiceLabelEvidence(rawText, invoiceNumber) {
   const lines = splitLines(rawText)
   if (!lines.length) return false
 
-  const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number)?|document\s*(?:no\.?|#|number)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka)?)\b/i
+  const labelRe = /\b(?:ra\u010dun\s*(?:\u0161t\.?|st\.?|#|nr\.?|no\.?)|\u0161tevilka\s*ra\u010duna|ra\u010dun\s*\u0161tevilka|invoice\s*(?:no\.?|#|number|nr\.?)?|document\s*(?:no\.?|#|number|nr\.?)?|dokument\s*(?:\u0161t\.?|st\.?|#|\u0161tevilka|nr\.?)?)\b/i
 
   for (let i = 0; i < lines.length; i++) {
     const l = String(lines[i] || '').trim()
@@ -894,7 +894,7 @@ function buildCompanyNameCandidates(rawText) {
   if (!lines.length) return []
 
   const out = []
-  const labelRe = /^(?:dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|uporabnik)\b\s*:?\s*(.+)$/i
+  const labelRe = /^(?:dobavitelj|supplier|vendor|seller|issuer|prejemnik|recipient|payee|beneficiary|creditor|uporabnik|izdajatelj|prodajalec|izdal)\b\s*:?\s*(.+)$/i
   const headerCount = Math.max(1, Math.min(40, Math.ceil(lines.length * 0.25)))
 
   for (let i = 0; i < lines.length; i++) {
@@ -911,6 +911,12 @@ function buildCompanyNameCandidates(rawText) {
   for (const h of header) {
     const normalized = normalizeCompanyNameCandidate(h)
     if (normalized && (hasLegalSuffix(normalized) || isStrongCompanyNameCandidate(normalized))) out.push({ value: normalized, evidence: h })
+  }
+
+  // Broader pass: any line with a legal suffix (often company name), even outside header.
+  for (const l of lines) {
+    const normalized = normalizeCompanyNameCandidate(l)
+    if (normalized && hasLegalSuffix(normalized)) out.push({ value: normalized, evidence: l })
   }
 
   const issuerHeader = extractIssuerFromHeaderBlock(rawText)
@@ -1931,9 +1937,9 @@ function extractFields(rawText) {
 }
 
 async function extractFieldsWithAI(rawText, candidates, languageHint) {
-  if (!isAiOcrEnabled()) return null
+  if (!isAiOcrEnabled()) return { error: 'ai_disabled' }
   const text = String(rawText || '').trim()
-  if (!text) return null
+  if (!text) return { error: 'empty_text' }
 
   const flatten = (list, max = 8) =>
     (Array.isArray(list) ? list : [])
@@ -1993,10 +1999,10 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
     })
 
     const data = await resp.json().catch(() => null)
-    if (!resp.ok) return null
+    if (!resp.ok) return { error: `ai_call_failed_${resp.status}` }
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
-    if (!parsed || typeof parsed !== 'object') return null
+    if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
 
     const normalize = (s) => String(s || '').replace(/\s+/g, ' ').trim()
     const normalizeForSearch = (s) => normalize(s).toUpperCase()
@@ -2065,7 +2071,7 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
 
     return { fields: out }
   } catch {
-    return null
+    return { error: 'ai_exception' }
   }
 }
 
@@ -2414,11 +2420,14 @@ export async function handler(event) {
       if (!text) return jsonResponse(400, { ok: false, error: 'missing_text' })
       const fields0 = extractFields(text)
       const candidates = buildFieldCandidates(text)
-      const aiFields = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
+      const aiResult = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
+      const aiFields = aiResult && aiResult.fields ? aiResult : null
+      const aiError = aiResult && aiResult.error ? aiResult.error : null
       const fields = mergeFields(fields0, aiFields, text)
       const aiModel = aiFields ? resolveModel() : null
       const aiTier = aiFields ? 'document' : null
-      return jsonResponse(200, { ok: true, rawText: text, fields, ai: !!aiFields, aiModel, aiTier, mode: 'text' })
+      const meta = { ...buildExtractionMeta(text, fields), ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
+      return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'text' })
     }
 
     let base64Image
@@ -2563,13 +2572,15 @@ export async function handler(event) {
         console.log('[OCR] QR found:', false, { mode: 'pdf_text', ocrLength: text.length })
         const fields0 = extractFields(text)
         const candidates = buildFieldCandidates(text)
-        const aiFields = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
+        const aiResult = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
+        const aiFields = aiResult && aiResult.fields ? aiResult : null
+        const aiError = aiResult && aiResult.error ? aiResult.error : null
         if (aiFields?.fields) {
           const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
           console.log('[OCR] AI extracted fields:', keys)
         }
         const fields = mergeFields(fields0, aiFields, text)
-        const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null } }
+        const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
         const aiModel = aiFields ? resolveModel() : null
         const aiTier = aiFields ? 'document' : null
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
@@ -2642,13 +2653,15 @@ export async function handler(event) {
       console.log('[OCR] QR found:', false, { mode: 'pdf_vision', ocrLength: ocrText.length })
       const fields0 = extractFields(ocrText)
       const candidates = buildFieldCandidates(ocrText)
-      const aiFields = allowAi ? await extractFieldsWithAI(ocrText, candidates, languageHint) : null
+      const aiResult = allowAi ? await extractFieldsWithAI(ocrText, candidates, languageHint) : null
+      const aiFields = aiResult && aiResult.fields ? aiResult : null
+      const aiError = aiResult && aiResult.error ? aiResult.error : null
       if (aiFields?.fields) {
         const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
         console.log('[OCR] AI extracted fields:', keys)
       }
       const fields = mergeFields(fields0, aiFields, ocrText)
-      const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null } }
+      const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
       const aiModel = aiFields ? resolveModel() : null
       const aiTier = aiFields ? 'document' : null
       return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_vision' })
@@ -2842,13 +2855,15 @@ export async function handler(event) {
     console.log('[OCR] QR found:', false, { mode: 'vision_text', ocrLength: full.length })
     const fields0 = extractFields(full)
     const candidates = buildFieldCandidates(full)
-    const aiFields = allowAi ? await extractFieldsWithAI(full, candidates, languageHint) : null
+    const aiResult = allowAi ? await extractFieldsWithAI(full, candidates, languageHint) : null
+    const aiFields = aiResult && aiResult.fields ? aiResult : null
+    const aiError = aiResult && aiResult.error ? aiResult.error : null
     if (aiFields?.fields) {
       const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
       console.log('[OCR] AI extracted fields:', keys)
     }
     const fields = mergeFields(fields0, aiFields, full)
-    const meta = buildExtractionMeta(full, fields)
+    const meta = { ...buildExtractionMeta(full, fields), ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
 
     const aiModel = aiFields ? resolveModel() : null
     const aiTier = aiFields ? 'document' : null
