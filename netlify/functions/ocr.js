@@ -1180,6 +1180,155 @@ function sanitizeFields(rawText, fields) {
   return out
 }
 
+function sanitizeFieldsAiOnly(fields) {
+  const out = { ...fields }
+
+  const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim()
+  const upper = (v) => clean(v).toUpperCase()
+
+  // Supplier / creditor
+  const issuerCandidate = normalizeCompanyNameCandidate(out.supplier || out.creditor_name || '')
+  if (issuerCandidate && !looksLikeMisassignedName(issuerCandidate)) {
+    out.supplier = issuerCandidate
+    out.creditor_name = issuerCandidate
+  } else {
+    out.supplier = null
+    out.creditor_name = null
+  }
+
+  // Payer
+  out.payer_name = clean(out.payer_name) || null
+
+  // Invoice number
+  if (out.invoice_number) {
+    const v = upper(out.invoice_number).replace(/\s+/g, '')
+    const bad =
+      !/\d/.test(v) ||
+      v.length < 3 ||
+      v.length > 32 ||
+      isValidIbanChecksum(v) ||
+      /^(SI|RF)\d{2}[0-9A-Z\-\/]{4,}$/i.test(v) ||
+      /^\d{4}-\d{2}-\d{2}$/.test(v)
+    out.invoice_number = bad ? null : v
+  } else {
+    out.invoice_number = null
+  }
+
+  // Amount / currency
+  if (typeof out.amount !== 'number' || !Number.isFinite(out.amount) || out.amount <= 0 || out.amount > 1000000) out.amount = null
+  if (out.currency) {
+    const cur = upper(out.currency)
+    out.currency = /^[A-Z]{3}$/.test(cur) ? cur : null
+  } else {
+    out.currency = null
+  }
+
+  // Due date
+  if (out.due_date) {
+    const d = clean(out.due_date)
+    out.due_date = /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : (parseDateToken(d, false) || null)
+  } else {
+    out.due_date = null
+  }
+
+  // IBAN
+  if (out.iban) {
+    const iban = normalizeIban(out.iban)
+    out.iban = isValidIbanChecksum(iban) ? iban : null
+  } else {
+    out.iban = null
+  }
+
+  // Reference
+  if (out.reference) {
+    const r = normalizeReferenceSimple(out.reference)
+    if (!/^(SI|RF)\d{2}/i.test(r || '') || (r || '').length < 6 || (r && isValidIbanChecksum(r))) out.reference = null
+    else out.reference = r
+  } else {
+    out.reference = null
+  }
+
+  // Purpose / item
+  out.purpose = clean(out.purpose) || null
+  out.item_name = clean(out.item_name) || null
+
+  // Payment details: keep only if short and non-empty
+  if (out.payment_details && typeof out.payment_details === 'string') {
+    const s = out.payment_details.trim()
+    out.payment_details = s ? (s.length > 1200 ? s.slice(0, 1200) : s) : null
+  } else {
+    out.payment_details = null
+  }
+
+  // Required fields
+  const missingFields = []
+  if (!out.supplier) missingFields.push('supplier')
+  if (!out.invoice_number) missingFields.push('invoice_number')
+  const okAmt = typeof out.amount === 'number' && Number.isFinite(out.amount) && out.amount > 0
+  if (!okAmt) missingFields.push('amount')
+  if (!out.due_date) missingFields.push('due_date')
+  if (!out.purpose) missingFields.push('purpose')
+
+  out.missingFields = missingFields
+  out.reviewReasons = []
+  out.needsReview = Boolean(missingFields.length > 0)
+
+  return out
+}
+
+async function extractFieldsFromImageWithAI({ base64Image, contentType, languageHint }) {
+  if (!isAiOcrEnabled()) return { error: 'ai_disabled' }
+  if (!base64Image) return { error: 'missing_image' }
+
+  const dataUrl = base64Image.startsWith('data:') ? base64Image : `data:${contentType || 'image/jpeg'};base64,${base64Image}`
+
+  const system =
+    'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY with this schema: ' +
+    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null}. ' +
+    'Rules: ' +
+    '- Extract the issuer/supplier company name only (no labels, no addresses, no emails, no URLs). ' +
+    '- invoice_number must be the invoice/document number. ' +
+    '- due_date must be in YYYY-MM-DD. ' +
+    '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
+    '- Return null if uncertain. Do not guess. Do not include extra fields.'
+
+  const user = [
+    { type: 'text', text: `Language hint: ${String(languageHint || 'unknown')}` },
+    { type: 'image_url', image_url: { url: dataUrl } },
+  ]
+
+  try {
+    const model = resolveModel()
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 400,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+    })
+
+    const data = await resp.json().catch(() => null)
+    if (!resp.ok) return { error: `ai_call_failed_${resp.status}` }
+    const content = data?.choices?.[0]?.message?.content
+    const parsed = safeParseJson(content)
+    if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
+
+    return { fields: parsed }
+  } catch {
+    return { error: 'ai_exception' }
+  }
+}
+
 function jsonResponse(statusCode, payload) {
   return {
     statusCode,
@@ -2432,6 +2581,7 @@ export async function handler(event) {
 
     let base64Image
     let pdfBuffer
+    let imageContentType = null
     // preferQr: when true, we attempt to decode EPC/UPN payload from barcodes/QRs inside images/PDF text.
     // Mobile upload flow wants document OCR, so it will send preferQr=false.
     let preferQr = true
@@ -2450,6 +2600,7 @@ export async function handler(event) {
         if (typeof body.preferQr === 'boolean') preferQr = body.preferQr
         if (typeof body.allowAi === 'boolean') allowAi = body.allowAi
         if (typeof body.language === 'string') languageHint = String(body.language || '').trim()
+        if (typeof body.contentType === 'string') imageContentType = String(body.contentType || '').trim()
         const pdf = String(body.pdfBase64 || '')
         if (pdf) {
           // Allow mobile clients to send PDFs as base64 JSON to avoid flaky local URI uploads.
@@ -2515,6 +2666,8 @@ export async function handler(event) {
     if (quota !== null && used >= quota) {
       return jsonResponse(403, { ok: false, error: 'ocr_quota_exceeded', message: 'OCR monthly quota exceeded for your plan.' })
     }
+
+    const aiVisionOnly = Boolean(allowAi && isAiOcrEnabled())
 
     // PDF path: try extracting selectable text; if missing, fall back to Vision PDF OCR.
     if (isPdf) {
@@ -2584,6 +2737,11 @@ export async function handler(event) {
         const aiModel = aiFields ? resolveModel() : null
         const aiTier = aiFields ? 'document' : null
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
+      }
+
+      // Scanned PDF: in AI-vision-only mode we cannot render PDF pages here.
+      if (aiVisionOnly) {
+        return jsonResponse(400, { ok: false, error: 'pdf_scanned_ai_only', message: 'Scanned PDF not supported in AI-only mode. Please upload an image.' })
       }
 
       // Scanned PDF: use Vision PDF OCR on the first page.
@@ -2665,6 +2823,46 @@ export async function handler(event) {
       const aiModel = aiFields ? resolveModel() : null
       const aiTier = aiFields ? 'document' : null
       return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_vision' })
+    }
+
+    // Image path: AI-vision-only extraction (cheapest + closest to chat behavior).
+    if (aiVisionOnly) {
+      const effectiveContentType = imageContentType || contentType
+      // Increment usage (counts as OCR/document extraction)
+      try {
+        const newUsed = used + 1
+        if (hasEntRow) {
+          await supabase
+            .from('entitlements')
+            .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+            .eq('user_id', userId)
+        } else {
+          await supabase
+            .from('entitlements')
+            .upsert({
+              user_id: userId,
+              plan: 'free',
+              payer_limit: 1,
+              exports_enabled: false,
+              ocr_quota_monthly: 3,
+              ocr_used_this_month: newUsed,
+              subscription_source: 'free',
+              status: 'active',
+              updated_at: now.toISOString(),
+            }, { onConflict: 'user_id' })
+        }
+      } catch {}
+
+      const aiResult = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint })
+      const aiError = aiResult && aiResult.error ? aiResult.error : null
+      const aiFields = aiResult && aiResult.fields ? aiResult.fields : null
+      if (!aiFields) {
+        return jsonResponse(500, { ok: false, error: 'ai_vision_failed', detail: aiError || 'unknown' })
+      }
+
+      const fields = sanitizeFieldsAiOnly(aiFields)
+      const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+      return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
     }
 
     const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
