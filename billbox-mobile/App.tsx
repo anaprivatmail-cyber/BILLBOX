@@ -3701,6 +3701,7 @@ function ScanBillScreen() {
       return 3
     }
     const incomingRank = rankForSource(sourceKey)
+    const isAiOnly = sourceKey.startsWith('ai_')
     const canSetField = (key: string, nextValue: string, edited: boolean, currentValue: string) => {
       const v = String(nextValue || '').trim()
       if (!v) return false
@@ -3734,7 +3735,9 @@ function ScanBillScreen() {
       }
       return v
     }
-    const nameCandidateRaw = pickNameCandidate(issuerFromHeader, creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
+    const nameCandidateRaw = isAiOnly
+      ? pickNameCandidate(rawSupplier, rawCreditor)
+      : pickNameCandidate(issuerFromHeader, creditorFromText, supplierFromText, bestFromText, rawCreditor, rawSupplier)
     const nameCandidate = normalizeCompanyName(normalizeIssuerName(nameCandidateRaw))
 
     const payerFromDoc = !isQr ? extractPayerNameFromText(rawText, nameCandidate) : null
@@ -3789,9 +3792,26 @@ function ScanBillScreen() {
       }
       return false
     }
+    const looksLikeInvoiceId = (s: string): boolean => {
+      const v = String(s || '').trim()
+      if (!v) return false
+      if (v.length < 3 || v.length > 32) return false
+      if (!/\d/.test(v)) return false
+      const compact = v.toUpperCase().replace(/\s+/g, '')
+      if (/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(compact)) return false
+      if (/^(SI|RF)\d{2}[0-9A-Z\-\/]{4,}$/i.test(compact)) return false
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return false
+      return true
+    }
+
     const invFromDoc = extractInvoiceNumberFromText(rawText) || ''
     const invFromField = (rawInvoice || '').trim()
-    let invCandidate = (invFromField && hasInvoiceLabelEvidence(rawText, invFromField) ? invFromField.toUpperCase().replace(/\s+/g, '') : '') || invFromDoc
+    let invCandidate = ''
+    if (isAiOnly && invFromField && looksLikeInvoiceId(invFromField)) {
+      invCandidate = invFromField.toUpperCase().replace(/\s+/g, '')
+    } else {
+      invCandidate = (invFromField && hasInvoiceLabelEvidence(rawText, invFromField) ? invFromField.toUpperCase().replace(/\s+/g, '') : '') || invFromDoc
+    }
     let invoiceGenerated = false
     if (!invCandidate && !isQr && allowPaymentFields) {
       const baseIso = (String(rawDue || '').trim().match(/^\d{4}-\d{2}-\d{2}$/)?.[0]) || new Date().toISOString().slice(0, 10)
@@ -3851,7 +3871,8 @@ function ScanBillScreen() {
       let ref = normalizeReference(rawRef) || ''
       // If the extracted reference is missing or suspicious, fall back to labeled Sklic/Reference lines.
       if (!ref || !isValidReferenceFormat(ref)) {
-        if (refFromDoc && isValidReferenceFormat(refFromDoc)) ref = refFromDoc
+        if (isAiOnly && rawRef && isValidReferenceFormat(rawRef)) ref = normalizeReference(rawRef)
+        else if (refFromDoc && isValidReferenceFormat(refFromDoc)) ref = refFromDoc
       }
       if (ref) {
         if (foundIban && ref === foundIban) {

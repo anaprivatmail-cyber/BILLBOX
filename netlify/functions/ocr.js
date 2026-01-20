@@ -1187,10 +1187,16 @@ function sanitizeFieldsAiOnly(fields) {
   const upper = (v) => clean(v).toUpperCase()
 
   // Supplier / creditor
-  const issuerCandidate = normalizeCompanyNameCandidate(out.supplier || out.creditor_name || '')
+  const rawIssuer = clean(out.supplier || out.creditor_name || '')
+  const issuerCandidate = normalizeCompanyNameCandidate(rawIssuer)
   if (issuerCandidate && !looksLikeMisassignedName(issuerCandidate)) {
     out.supplier = issuerCandidate
     out.creditor_name = issuerCandidate
+  } else if (rawIssuer) {
+    const compact = rawIssuer.split(/\n+/)[0].trim()
+    const trimmed = compact.length > 80 ? compact.slice(0, 80).trim() : compact
+    out.supplier = trimmed || null
+    out.creditor_name = trimmed || null
   } else {
     out.supplier = null
     out.creditor_name = null
@@ -1204,8 +1210,8 @@ function sanitizeFieldsAiOnly(fields) {
     const v = upper(out.invoice_number).replace(/\s+/g, '')
     const bad =
       !/\d/.test(v) ||
-      v.length < 3 ||
-      v.length > 32 ||
+      v.length < 2 ||
+      v.length > 40 ||
       isValidIbanChecksum(v) ||
       /^(SI|RF)\d{2}[0-9A-Z\-\/]{4,}$/i.test(v) ||
       /^\d{4}-\d{2}-\d{2}$/.test(v)
@@ -1242,7 +1248,7 @@ function sanitizeFieldsAiOnly(fields) {
   // Reference
   if (out.reference) {
     const r = normalizeReferenceSimple(out.reference)
-    if (!/^(SI|RF)\d{2}/i.test(r || '') || (r || '').length < 6 || (r && isValidIbanChecksum(r))) out.reference = null
+    if ((r || '').length < 6 || (r && isValidIbanChecksum(r))) out.reference = null
     else out.reference = r
   } else {
     out.reference = null
@@ -1251,6 +1257,7 @@ function sanitizeFieldsAiOnly(fields) {
   // Purpose / item
   out.purpose = clean(out.purpose) || null
   out.item_name = clean(out.item_name) || null
+  if (!out.purpose && out.item_name) out.purpose = out.item_name
 
   // Payment details: keep only if short and non-empty
   if (out.payment_details && typeof out.payment_details === 'string') {
@@ -1290,7 +1297,7 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
     '- invoice_number must be the invoice/document number. ' +
     '- due_date must be in YYYY-MM-DD. ' +
     '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
-    '- Return null if uncertain. Do not guess. Do not include extra fields.'
+    '- If a value is unclear, return null. Prefer best-effort extraction over strict verbatim matching.'
 
   const user = [
     { type: 'text', text: `Language hint: ${String(languageHint || 'unknown')}` },
@@ -1338,11 +1345,11 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint) {
     'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY with this schema: ' +
     '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null}. ' +
     'Rules: ' +
-    '- Values MUST exist verbatim in the text. ' +
+    '- Use best-effort extraction from the text (may normalize spacing/case). ' +
     '- issuer/supplier must be a clean company name only (no labels, no addresses, no emails, no URLs). ' +
     '- due_date must be in YYYY-MM-DD if present. ' +
     '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
-    '- Return null if uncertain. Do not guess.'
+    '- If uncertain, return null.'
 
   const user =
     'Language hint: ' + String(languageHint || 'unknown') + '\n' +
