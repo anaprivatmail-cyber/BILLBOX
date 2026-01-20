@@ -556,6 +556,7 @@ function isStrongCompanyNameCandidate(input) {
   if (isLikelyAddressOnly(s)) return false
   if (isCustomerLabelLine(s)) return false
   if (looksLikeMisassignedName(s)) return false
+  if (/\b(intro|marketing|advert|promo|page|stran|header|obvestilo)\b/i.test(s)) return false
   if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) return false
   const digits = (s.match(/\d/g) || []).length
   const letters = (s.match(/[A-Za-zÀ-žČŠŽčšž]/g) || []).length
