@@ -1329,6 +1329,56 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
   }
 }
 
+async function extractFieldsFromTextWithAIOnly(text, languageHint) {
+  if (!isAiOcrEnabled()) return { error: 'ai_disabled' }
+  const input = String(text || '').trim()
+  if (!input) return { error: 'empty_text' }
+
+  const system =
+    'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY with this schema: ' +
+    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null}. ' +
+    'Rules: ' +
+    '- Values MUST exist verbatim in the text. ' +
+    '- issuer/supplier must be a clean company name only (no labels, no addresses, no emails, no URLs). ' +
+    '- due_date must be in YYYY-MM-DD if present. ' +
+    '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
+    '- Return null if uncertain. Do not guess.'
+
+  const user =
+    'Language hint: ' + String(languageHint || 'unknown') + '\n' +
+    'Document text:\n' + input.slice(0, 12000)
+
+  try {
+    const model = resolveModel()
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 400,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+    })
+
+    const data = await resp.json().catch(() => null)
+    if (!resp.ok) return { error: `ai_call_failed_${resp.status}` }
+    const content = data?.choices?.[0]?.message?.content
+    const parsed = safeParseJson(content)
+    if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
+    return { fields: parsed }
+  } catch {
+    return { error: 'ai_exception' }
+  }
+}
+
 function jsonResponse(statusCode, payload) {
   return {
     statusCode,
@@ -2567,6 +2617,15 @@ export async function handler(event) {
       const buf = bodyToBuffer(event)
       const text = String(buf?.toString('utf8') || '').trim()
       if (!text) return jsonResponse(400, { ok: false, error: 'missing_text' })
+      if (aiVisionOnly) {
+        const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint)
+        const aiError = aiResult && aiResult.error ? aiResult.error : null
+        if (!aiResult?.fields) return jsonResponse(500, { ok: false, error: 'ai_text_failed', detail: aiError || 'unknown' })
+        const fields = sanitizeFieldsAiOnly(aiResult.fields)
+        const meta = { ...buildExtractionMeta(text, fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+        return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_text' })
+      }
+
       const fields0 = extractFields(text)
       const candidates = buildFieldCandidates(text)
       const aiResult = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
@@ -2722,6 +2781,16 @@ export async function handler(event) {
           }
         }
 
+        if (aiVisionOnly) {
+          console.log('[OCR] AI-only PDF text:', { mode: 'ai_pdf_text', ocrLength: text.length })
+          const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint)
+          const aiError = aiResult && aiResult.error ? aiResult.error : null
+          if (!aiResult?.fields) return jsonResponse(500, { ok: false, error: 'ai_pdf_text_failed', detail: aiError || 'unknown' })
+          const fields = sanitizeFieldsAiOnly(aiResult.fields)
+          const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+          return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
+        }
+
         console.log('[OCR] QR found:', false, { mode: 'pdf_text', ocrLength: text.length })
         const fields0 = extractFields(text)
         const candidates = buildFieldCandidates(text)
@@ -2739,12 +2808,7 @@ export async function handler(event) {
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
       }
 
-      // Scanned PDF: in AI-vision-only mode we cannot render PDF pages here.
-      if (aiVisionOnly) {
-        return jsonResponse(400, { ok: false, error: 'pdf_scanned_ai_only', message: 'Scanned PDF not supported in AI-only mode. Please upload an image.' })
-      }
-
-      // Scanned PDF: use Vision PDF OCR on the first page.
+      // Scanned PDF: use Vision PDF OCR to get text, then AI-only parse (no rules).
       const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
       if (!rawCreds || String(rawCreds).trim() === '') {
         return jsonResponse(500, { ok: false, step: 'env', error: 'missing_google_credentials_json' })
@@ -2807,6 +2871,16 @@ export async function handler(event) {
             }, { onConflict: 'user_id' })
         }
       } catch {}
+
+      if (aiVisionOnly) {
+        console.log('[OCR] AI-only PDF scan:', { mode: 'ai_pdf_vision', ocrLength: ocrText.length })
+        const aiResult = await extractFieldsFromTextWithAIOnly(ocrText, languageHint)
+        const aiError = aiResult && aiResult.error ? aiResult.error : null
+        if (!aiResult?.fields) return jsonResponse(500, { ok: false, error: 'ai_pdf_vision_failed', detail: aiError || 'unknown' })
+        const fields = sanitizeFieldsAiOnly(aiResult.fields)
+        const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+        return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
+      }
 
       console.log('[OCR] QR found:', false, { mode: 'pdf_vision', ocrLength: ocrText.length })
       const fields0 = extractFields(ocrText)
