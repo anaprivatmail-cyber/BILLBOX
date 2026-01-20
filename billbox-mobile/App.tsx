@@ -3718,8 +3718,8 @@ function ScanBillScreen() {
     const isQr = incomingRank === 0
 
     // FINAL GLOBAL FLOW: ARCHIVE-FIRST, PAYMENT-OPTIONAL
-    // Only map payment details when explicitly marked for payment.
-    const allowPaymentFields = !archiveOnly
+    // AI-only should still map all fields to the draft.
+    const allowPaymentFields = !archiveOnly || isAiOnly
 
     // Issuer (Dobavitelj/Prejemnik): invoice issuer. For non-QR sources, prefer header-block evidence.
     const creditorFromText = extractCreditorNameFromText(rawText)
@@ -3839,13 +3839,23 @@ function ScanBillScreen() {
         setPurchaseItem(itemCandidate)
         markFieldSource('purchase_item')
       }
+      if (isAiOnly && purposeCandidate && canSetField('purpose', purposeCandidate, editedRef.current.purpose, purpose)) {
+        setPurpose(purposeCandidate)
+        markFieldSource('purpose')
+      }
     }
 
     // Bank-level rule: do not guess critical payment fields.
     // Only map payment details when explicitly marked for payment.
     const foundIban = allowPaymentFields ? extractFirstValidIban(rawIban) : null
     if (allowPaymentFields) {
-      if (foundIban) {
+      if (isAiOnly && rawIban) {
+        const rawNorm = normalizeIban(rawIban)
+        if (rawNorm && canSetField('iban', rawNorm, editedRef.current.iban, iban)) {
+          setIban(rawNorm)
+          markFieldSource('iban')
+        }
+      } else if (foundIban) {
         if (canSetField('iban', foundIban, editedRef.current.iban, iban)) {
           setIban(foundIban)
           markFieldSource('iban')
@@ -3873,6 +3883,9 @@ function ScanBillScreen() {
       if (!ref || !isValidReferenceFormat(ref)) {
         if (isAiOnly && rawRef && isValidReferenceFormat(rawRef)) ref = normalizeReference(rawRef)
         else if (refFromDoc && isValidReferenceFormat(refFromDoc)) ref = refFromDoc
+      }
+      if (isAiOnly && rawRef && !ref) {
+        ref = normalizeReference(rawRef)
       }
       if (ref) {
         if (foundIban && ref === foundIban) {
