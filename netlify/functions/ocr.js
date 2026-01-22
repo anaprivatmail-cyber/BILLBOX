@@ -1326,7 +1326,10 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
     })
 
     const data = await resp.json().catch(() => null)
-    if (!resp.ok) return { error: `ai_call_failed_${resp.status}` }
+    if (!resp.ok) {
+      const detail = data?.error?.message || data?.error?.type || data?.error?.code || null
+      return { error: `ai_call_failed_${resp.status}`, detail }
+    }
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
@@ -1377,7 +1380,10 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint) {
     })
 
     const data = await resp.json().catch(() => null)
-    if (!resp.ok) return { error: `ai_call_failed_${resp.status}` }
+    if (!resp.ok) {
+      const detail = data?.error?.message || data?.error?.type || data?.error?.code || null
+      return { error: `ai_call_failed_${resp.status}`, detail }
+    }
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
@@ -2206,7 +2212,10 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
     })
 
     const data = await resp.json().catch(() => null)
-    if (!resp.ok) return { error: `ai_call_failed_${resp.status}` }
+    if (!resp.ok) {
+      const detail = data?.error?.message || data?.error?.type || data?.error?.code || null
+      return { error: `ai_call_failed_${resp.status}`, detail }
+    }
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
@@ -2628,9 +2637,13 @@ export async function handler(event) {
       if (aiVisionOnly) {
         const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint)
         const aiError = aiResult && aiResult.error ? aiResult.error : null
-        if (!aiResult?.fields) return jsonResponse(500, { ok: false, error: 'ai_text_failed', detail: aiError || 'unknown' })
+        const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+        if (!aiResult?.fields) {
+          console.error('[OCR] AI text failed:', { error: aiError, detail: aiDetail })
+          return jsonResponse(500, { ok: false, error: 'ai_text_failed', detail: aiDetail || aiError || 'unknown' })
+        }
         const fields = sanitizeFieldsAiOnly(aiResult.fields)
-        const meta = { ...buildExtractionMeta(text, fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+        const meta = { ...buildExtractionMeta(text, fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_text' })
       }
 
@@ -2793,9 +2806,13 @@ export async function handler(event) {
           console.log('[OCR] AI-only PDF text:', { mode: 'ai_pdf_text', ocrLength: text.length })
           const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint)
           const aiError = aiResult && aiResult.error ? aiResult.error : null
-          if (!aiResult?.fields) return jsonResponse(500, { ok: false, error: 'ai_pdf_text_failed', detail: aiError || 'unknown' })
+          const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+          if (!aiResult?.fields) {
+            console.error('[OCR] AI PDF text failed:', { error: aiError, detail: aiDetail })
+            return jsonResponse(500, { ok: false, error: 'ai_pdf_text_failed', detail: aiDetail || aiError || 'unknown' })
+          }
           const fields = sanitizeFieldsAiOnly(aiResult.fields)
-          const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+          const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
           return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
         }
 
@@ -2884,9 +2901,13 @@ export async function handler(event) {
         console.log('[OCR] AI-only PDF scan:', { mode: 'ai_pdf_vision', ocrLength: ocrText.length })
         const aiResult = await extractFieldsFromTextWithAIOnly(ocrText, languageHint)
         const aiError = aiResult && aiResult.error ? aiResult.error : null
-        if (!aiResult?.fields) return jsonResponse(500, { ok: false, error: 'ai_pdf_vision_failed', detail: aiError || 'unknown' })
+        const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+        if (!aiResult?.fields) {
+          console.error('[OCR] AI PDF vision failed:', { error: aiError, detail: aiDetail })
+          return jsonResponse(500, { ok: false, error: 'ai_pdf_vision_failed', detail: aiDetail || aiError || 'unknown' })
+        }
         const fields = sanitizeFieldsAiOnly(aiResult.fields)
-        const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+        const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
         return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
       }
 
@@ -2937,13 +2958,15 @@ export async function handler(event) {
 
       const aiResult = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint })
       const aiError = aiResult && aiResult.error ? aiResult.error : null
+      const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
       const aiFields = aiResult && aiResult.fields ? aiResult.fields : null
       if (!aiFields) {
-        return jsonResponse(500, { ok: false, error: 'ai_vision_failed', detail: aiError || 'unknown' })
+        console.error('[OCR] AI vision failed:', { error: aiError, detail: aiDetail })
+        return jsonResponse(500, { ok: false, error: 'ai_vision_failed', detail: aiDetail || aiError || 'unknown' })
       }
 
       const fields = sanitizeFieldsAiOnly(aiFields)
-      const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError } }
+      const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
       return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
     }
 
