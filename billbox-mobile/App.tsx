@@ -1819,7 +1819,8 @@ async function performOCRFromBase64(
   })
   const data = await resp.json().catch(() => null as any)
   if (!resp.ok || !data?.ok) {
-    const message = data?.message || data?.error || `OCR failed (${resp.status})`
+    const detail = data?.detail ? ` (${data.detail})` : ''
+    const message = data?.message || (data?.error ? `${data.error}${detail}` : `OCR failed (${resp.status})`)
     const err: any = new Error(message)
     err.status = resp.status
     err.code = data?.error || null
@@ -1974,7 +1975,8 @@ async function performOCR(
   })
   const data = await resp.json().catch(() => null as any)
   if (!resp.ok || !data?.ok) {
-    const message = data?.message || data?.error || `OCR failed (${resp.status})`
+    const detail = data?.detail ? ` (${data.detail})` : ''
+    const message = data?.message || (data?.error ? `${data.error}${detail}` : `OCR failed (${resp.status})`)
     const err: any = new Error(message)
     err.status = resp.status
     err.code = data?.error || null
