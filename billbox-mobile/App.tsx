@@ -3068,7 +3068,8 @@ function ScanBillScreen() {
   const [debugStatus, setDebugStatus] = useState<'IDLE' | 'RUNNING' | 'DONE' | 'ERROR'>('IDLE')
   const [debugQrFound, setDebugQrFound] = useState<boolean | null>(null)
   const [debugOcrLength, setDebugOcrLength] = useState(0)
-  const [debugAiInfo, setDebugAiInfo] = useState<{ called: boolean; model?: string | null; tier?: string | null } | null>(null)
+  const [debugAiInfo, setDebugAiInfo] = useState<{ called: boolean; model?: string | null; tier?: string | null; enabled?: boolean | null; attempted?: boolean | null; error?: string | null; mode?: string | null } | null>(null)
+  const [debugOcrMode, setDebugOcrMode] = useState<string | null>(null)
   const [debugFileInfo, setDebugFileInfo] = useState<{ source: 'original' | 'preview'; size?: number | null } | null>(null)
 
   const [supplier, setSupplier] = useState('')
@@ -4354,7 +4355,8 @@ function ScanBillScreen() {
     setDebugStatus('DONE')
     setDebugQrFound(true)
     setDebugOcrLength(t.length)
-    setDebugAiInfo({ called: false, model: null, tier: null })
+    setDebugAiInfo({ called: false, model: null, tier: null, enabled: null, attempted: null, error: null, mode: null })
+    setDebugOcrMode(null)
     setFormat(epc ? 'EPC/SEPA SCT' : (upn ? 'UPN' : 'URL'))
     // Mark missing fields for review (internal flag; no UI changes).
     const missing: string[] = []
@@ -4395,7 +4397,16 @@ function ScanBillScreen() {
       setDebugStatus('DONE')
       setDebugQrFound(/qr/i.test(String(mode || '')))
       setDebugOcrLength(String(ocrText || '').length)
-      setDebugAiInfo({ called: Boolean(ai), model: aiModel || null, tier: aiTier || null })
+      setDebugOcrMode(String(mode || '') || null)
+      setDebugAiInfo({
+        called: Boolean(ai),
+        model: aiModel || null,
+        tier: aiTier || null,
+        enabled: meta?.ai?.enabled ?? null,
+        attempted: meta?.ai?.attempted ?? null,
+        error: meta?.ai?.error ?? null,
+        mode: String(mode || '') || null,
+      })
       // Keep UX non-technical; the draft is already filled and still editable.
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
@@ -4478,7 +4489,16 @@ function ScanBillScreen() {
       setDebugStatus('DONE')
       setDebugQrFound(/qr/i.test(String(mode || '')))
       setDebugOcrLength(String(ocrText || '').length)
-      setDebugAiInfo({ called: Boolean(ai), model: aiModel || null, tier: aiTier || null })
+      setDebugOcrMode(String(mode || '') || null)
+      setDebugAiInfo({
+        called: Boolean(ai),
+        model: aiModel || null,
+        tier: aiTier || null,
+        enabled: meta?.ai?.enabled ?? null,
+        attempted: meta?.ai?.attempted ?? null,
+        error: meta?.ai?.error ?? null,
+        mode: String(mode || '') || null,
+      })
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
       }
@@ -5270,9 +5290,12 @@ function ScanBillScreen() {
           <Text style={styles.debugLine}>{tr('Mode')}: {archiveOnly ? tr('Archive') : tr('To pay')}</Text>
           <Text style={styles.debugLine}>{tr('Extraction')}: {debugStatus}</Text>
           <Text style={styles.debugLine}>{tr('File')}: {debugFileInfo?.source || 'original'} • {(typeof debugFileInfo?.size === 'number' ? `${debugFileInfo.size} B` : 'n/a')}</Text>
+          <Text style={styles.debugLine}>{tr('OCR mode')}: {debugOcrMode || 'n/a'}</Text>
           <Text style={styles.debugLine}>{tr('QR found')}: {String(debugQrFound)}</Text>
           <Text style={styles.debugLine}>{tr('OCR length')}: {debugOcrLength}</Text>
           <Text style={styles.debugLine}>{tr('AI called')}: {debugAiInfo?.called ? 'true' : 'false'}{debugAiInfo?.model || debugAiInfo?.tier ? ` (${[debugAiInfo?.model, debugAiInfo?.tier].filter(Boolean).join(', ')})` : ''}</Text>
+          <Text style={styles.debugLine}>{tr('AI enabled')}: {String(debugAiInfo?.enabled ?? 'n/a')} • {tr('Attempted')}: {String(debugAiInfo?.attempted ?? 'n/a')}</Text>
+          <Text style={styles.debugLine}>{tr('AI error')}: {debugAiInfo?.error || '—'}</Text>
           <Text style={styles.debugLine}>{tr('Fields')}: {[
             supplier ? tr('Issuer') : null,
             invoiceNumber ? tr('Invoice') : null,
