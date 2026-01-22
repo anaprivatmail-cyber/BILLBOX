@@ -3934,9 +3934,38 @@ function ScanBillScreen() {
 
     // Amount: apply extracted amount, otherwise fallback to OCR text (label-first).
     if (!editedRef.current.amount) {
-      const extractedAmount = typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0
-        ? { amount: fields.amount, currency: String(fields?.currency || 'EUR') }
-        : extractAmountFromText(rawText)
+      const parseMoney = (s: string): number | null => {
+        const raw = String(s || '').trim()
+        const cleaned = raw.replace(/[^0-9.,\-\s]/g, '').trim()
+        if (!/[0-9]/.test(cleaned)) return null
+        const compact = cleaned.replace(/\s+/g, '')
+        const lastComma = compact.lastIndexOf(',')
+        const lastDot = compact.lastIndexOf('.')
+        let decimalSep: ',' | '.' | null = null
+        if (lastComma >= 0 && lastDot >= 0) decimalSep = lastComma > lastDot ? ',' : '.'
+        else if (lastComma >= 0) decimalSep = ','
+        else if (lastDot >= 0) decimalSep = '.'
+        let normalized = compact
+        if (decimalSep === ',') normalized = compact.replace(/\./g, '').replace(',', '.')
+        else if (decimalSep === '.') normalized = compact.replace(/,/g, '')
+        normalized = normalized.replace(/(?!^)-/g, '')
+        const num = Number(normalized)
+        return Number.isFinite(num) ? num : null
+      }
+
+      let extractedAmount: { amount: number; currency: string } | null = null
+      if (typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0) {
+        extractedAmount = { amount: fields.amount, currency: String(fields?.currency || 'EUR') }
+      } else if (isAiOnly && typeof fields?.amount === 'string') {
+        const amt = parseMoney(fields.amount)
+        if (amt && amt > 0) {
+          const cur = typeof fields?.currency === 'string' ? fields.currency.toUpperCase() : (/\bEUR\b/i.test(fields.amount) || /€/.test(fields.amount) ? 'EUR' : '')
+          extractedAmount = { amount: amt, currency: cur || 'EUR' }
+        }
+      } else {
+        extractedAmount = extractAmountFromText(rawText)
+      }
+
       if (extractedAmount?.amount) {
         const nextAmount = String(extractedAmount.amount)
         if (canSetField('amount', nextAmount, editedRef.current.amount, amountStr)) {
@@ -3950,11 +3979,24 @@ function ScanBillScreen() {
       }
     }
 
-    // Due date: only accept ISO YYYY-MM-DD.
+    // Due date: accept ISO YYYY-MM-DD; AI-only also parses common EU formats.
     if (allowPaymentFields) {
       const dueClean = String(rawDue || '').trim()
-      if (dueClean && /^\d{4}-\d{2}-\d{2}$/.test(dueClean) && canSetField('due_date', dueClean, editedRef.current.dueDate, dueDate)) {
-        setDueDate(dueClean)
+      const parseDate = (s: string): string | null => {
+        const iso = s.match(/^\d{4}-\d{2}-\d{2}$/)
+        if (iso) return s
+        const m = s.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/)
+        if (!m) return null
+        let day = Number(m[1])
+        let month = Number(m[2])
+        let year = Number(m[3])
+        if (year < 100) year += 2000
+        if (month < 1 || month > 12 || day < 1 || day > 31) return null
+        return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+      }
+      const parsedDue = isAiOnly ? (parseDate(dueClean) || dueClean) : dueClean
+      if (parsedDue && /^\d{4}-\d{2}-\d{2}$/.test(parsedDue) && canSetField('due_date', parsedDue, editedRef.current.dueDate, dueDate)) {
+        setDueDate(parsedDue)
         markFieldSource('due_date')
       }
       if (!isQr && !editedRef.current.dueDate && !dueDate.trim() && !dueClean) {
