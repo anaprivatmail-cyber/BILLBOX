@@ -81,7 +81,7 @@ export async function handler(event) {
     const userId = authInfo.userId
 
     const ent = await loadEntitlements(supabase, userId)
-    if (!isExportAllowed(ent.plan, 'pdf')) {
+    if (!isExportAllowed(ent, 'pdf')) {
       return jsonResponse(403, { ok: false, error: 'upgrade_required', code: 'upgrade_required' })
     }
     const payerCheck = assertPayerScope(ent, spaceIds.length ? spaceIds : spaceId)

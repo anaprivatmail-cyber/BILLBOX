@@ -1728,6 +1728,13 @@ function isSameMonth(a, b) {
   return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth()
 }
 
+function nextMonthStartUtc(date) {
+  const d = date instanceof Date ? date : new Date(date)
+  const year = d.getUTCFullYear()
+  const month = d.getUTCMonth()
+  return new Date(Date.UTC(year, month + 1, 1, 0, 0, 0, 0))
+}
+
 async function parsePdfText(pdfBuffer) {
   // Important: do NOT import `pdf-parse` package root here.
   // The package entrypoint contains a CLI/test block that can misbehave under bundlers.
@@ -2840,6 +2847,8 @@ export async function handler(event) {
     let allowAi = true
     let languageHint = null
     let usageCounted = false
+    let textPayload = null
+    let textPayloadContentType = null
 
     const isText = /^text\/plain\b/i.test(contentType)
     let isPdf = /application\/pdf/i.test(contentType)
@@ -2899,6 +2908,13 @@ export async function handler(event) {
         if (typeof body.allowAi === 'boolean') allowAi = body.allowAi
         if (typeof body.language === 'string') languageHint = String(body.language || '').trim()
         if (typeof body.contentType === 'string') imageContentType = String(body.contentType || '').trim()
+        const textValue = typeof body.text === 'string'
+          ? body.text
+          : (typeof body.csvText === 'string' ? body.csvText : '')
+        if (textValue) {
+          textPayload = textValue
+          textPayloadContentType = typeof body.contentType === 'string' ? String(body.contentType || '').trim() : 'text/plain'
+        }
         const pdf = String(body.pdfBase64 || '')
         if (pdf) {
           // Allow mobile clients to send PDFs as base64 JSON to avoid flaky local URI uploads.
@@ -2918,7 +2934,7 @@ export async function handler(event) {
       base64Image = event.isBase64Encoded ? event.body : bufferToBase64(event.body)
     }
 
-    if (!isPdf && (!base64Image || String(base64Image).length < 16)) {
+    if (!textPayload && !isPdf && (!base64Image || String(base64Image).length < 16)) {
       return jsonResponse(400, { ok: false, error: 'empty_image' })
     }
 
@@ -2950,22 +2966,109 @@ export async function handler(event) {
       return jsonResponse(403, { ok: false, error: 'ocr_not_allowed', message: 'OCR not available on your plan.' })
     }
 
-    const plan = String(ent.plan || 'free')
+    const rawPlan = String(ent.plan || 'free')
+    const status = String(ent.status || 'active').trim().toLowerCase()
+    const trialEndsAt = ent.trial_ends_at ? new Date(ent.trial_ends_at) : null
+    const graceUntil = ent.grace_until ? new Date(ent.grace_until) : null
+    const exportOnly = Boolean(ent.export_only)
+    const deletedAt = ent.deleted_at ? new Date(ent.deleted_at) : null
+    const deleteAt = ent.delete_at ? new Date(ent.delete_at) : null
 
     const now = new Date()
-    const updatedAt = ent.updated_at ? new Date(ent.updated_at) : null
+
+    let effectivePlan = rawPlan === 'basic' || rawPlan === 'pro' ? rawPlan : 'free'
+    let allowed = true
+
+    if (deletedAt || status === 'deleted' || (deleteAt && now >= deleteAt)) {
+      allowed = false
+    } else if (exportOnly || status === 'export_only') {
+      allowed = false
+    } else if (status === 'grace_period') {
+      allowed = false
+    } else if (status === 'cancelled_all') {
+      allowed = false
+    } else if (status === 'payment_failed' || status === 'subscription_cancelled' || status === 'trial_expired') {
+      allowed = false
+    } else if (status === 'active_vec') {
+      effectivePlan = 'pro'
+    } else if (status === 'active_moje' || status === 'downgrade_vec_to_moje') {
+      effectivePlan = 'basic'
+    } else if (status === 'trial_active') {
+      if (trialEndsAt && now > trialEndsAt) {
+        return jsonResponse(403, { ok: false, error: 'trial_expired', message: 'Trial expired.' })
+      }
+      effectivePlan = 'basic'
+    } else if (status === 'grace_period' && graceUntil && now > graceUntil) {
+      allowed = false
+    }
+
+    if (!allowed) {
+      return jsonResponse(403, { ok: false, error: 'ocr_not_allowed', message: 'OCR not available on your plan.' })
+    }
+
+    const updatedAt = ent.ocr_updated_at ? new Date(ent.ocr_updated_at) : (ent.updated_at ? new Date(ent.updated_at) : null)
     // Default quotas if not configured in DB
+    const defaultQuota = effectivePlan === 'pro' ? 100 : effectivePlan === 'basic' ? 50 : 3
     const quota = typeof ent.ocr_quota_monthly === 'number'
       ? ent.ocr_quota_monthly
-      : (plan === 'free' ? 3 : null)
+      : defaultQuota
     let used = typeof ent.ocr_used_this_month === 'number' ? ent.ocr_used_this_month : 0
     if (!isSameMonth(now, updatedAt)) used = 0
 
     if (quota !== null && used >= quota) {
-      return jsonResponse(403, { ok: false, error: 'ocr_quota_exceeded', message: 'OCR monthly quota exceeded for your plan.' })
+      const resetAt = nextMonthStartUtc(updatedAt || now).toISOString()
+      return jsonResponse(403, { ok: false, error: 'ocr_quota_exceeded', message: 'OCR monthly quota exceeded for your plan.', resetAt })
+    }
+
+    const incrementUsage = async () => {
+      const newUsed = used + 1
+      if (hasEntRow) {
+        await supabase
+          .from('entitlements')
+          .update({ ocr_used_this_month: newUsed, ocr_updated_at: now.toISOString(), updated_at: now.toISOString() })
+          .eq('user_id', userId)
+      } else {
+        await supabase
+          .from('entitlements')
+          .upsert({
+            user_id: userId,
+            plan: 'free',
+            payer_limit: 1,
+            exports_enabled: false,
+            ocr_quota_monthly: 3,
+            ocr_used_this_month: newUsed,
+            ocr_updated_at: now.toISOString(),
+            subscription_source: 'free',
+            status: 'active',
+            updated_at: now.toISOString(),
+          })
+      }
+      used = newUsed
     }
 
     const aiVisionOnly = Boolean(allowAi && isAiOcrEnabled())
+
+    if (textPayload) {
+      const text = String(textPayload || '').trim()
+      if (!text) return jsonResponse(400, { ok: false, error: 'missing_text' })
+
+      const fields0 = extractFields(text)
+      const candidates = buildFieldCandidates(text)
+      const aiResult = allowAi ? await extractFieldsWithAI(text, candidates, languageHint, requestId) : null
+      const aiFields = aiResult && aiResult.fields ? aiResult : null
+      const aiError = aiResult && aiResult.error ? aiResult.error : null
+      const fields = mergeFields(fields0, aiFields, text)
+      const aiModel = aiFields ? resolveModel() : null
+      const aiTier = aiFields ? 'document' : null
+      const meta = {
+        ...buildExtractionMeta(text, fields),
+        ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError },
+        input: { contentType: textPayloadContentType || 'text/plain' },
+      }
+
+      await incrementUsage()
+      return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'text' })
+    }
 
     // PDF path: try extracting selectable text; if missing, fall back to Vision PDF OCR.
     if (isPdf) {
@@ -2997,7 +3100,7 @@ export async function handler(event) {
           if (hasEntRow) {
             await supabase
               .from('entitlements')
-              .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+              .update({ ocr_used_this_month: newUsed, ocr_updated_at: now.toISOString(), updated_at: now.toISOString() })
               .eq('user_id', userId)
           } else {
             await supabase
@@ -3009,6 +3112,7 @@ export async function handler(event) {
                 exports_enabled: false,
                 ocr_quota_monthly: 3,
                 ocr_used_this_month: newUsed,
+                ocr_updated_at: now.toISOString(),
                 subscription_source: 'free',
                 status: 'active',
                 updated_at: now.toISOString(),
@@ -3122,7 +3226,7 @@ export async function handler(event) {
           if (hasEntRow) {
             await supabase
               .from('entitlements')
-              .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+              .update({ ocr_used_this_month: newUsed, ocr_updated_at: now.toISOString(), updated_at: now.toISOString() })
               .eq('user_id', userId)
           } else {
             await supabase
@@ -3134,6 +3238,7 @@ export async function handler(event) {
                 exports_enabled: false,
                 ocr_quota_monthly: 3,
                 ocr_used_this_month: newUsed,
+                ocr_updated_at: now.toISOString(),
                 subscription_source: 'free',
                 status: 'active',
                 updated_at: now.toISOString(),
@@ -3198,7 +3303,7 @@ export async function handler(event) {
         if (hasEntRow) {
           await supabase
             .from('entitlements')
-            .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+            .update({ ocr_used_this_month: newUsed, ocr_updated_at: now.toISOString(), updated_at: now.toISOString() })
             .eq('user_id', userId)
         } else {
           await supabase
@@ -3210,6 +3315,7 @@ export async function handler(event) {
               exports_enabled: false,
               ocr_quota_monthly: 3,
               ocr_used_this_month: newUsed,
+              ocr_updated_at: now.toISOString(),
               subscription_source: 'free',
               status: 'active',
               updated_at: now.toISOString(),
@@ -3367,7 +3473,7 @@ export async function handler(event) {
                 if (hasEntRow) {
                   await supabase
                     .from('entitlements')
-                    .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+                    .update({ ocr_used_this_month: newUsed, ocr_updated_at: now.toISOString(), updated_at: now.toISOString() })
                     .eq('user_id', userId)
                 } else {
                   await supabase
@@ -3379,6 +3485,7 @@ export async function handler(event) {
                       exports_enabled: false,
                       ocr_quota_monthly: 3,
                       ocr_used_this_month: newUsed,
+                      ocr_updated_at: now.toISOString(),
                       subscription_source: 'free',
                       status: 'active',
                       updated_at: now.toISOString(),
@@ -3400,7 +3507,7 @@ export async function handler(event) {
         if (hasEntRow) {
           await supabase
             .from('entitlements')
-            .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+            .update({ ocr_used_this_month: newUsed, ocr_updated_at: now.toISOString(), updated_at: now.toISOString() })
             .eq('user_id', userId)
         } else {
           await supabase
@@ -3412,6 +3519,7 @@ export async function handler(event) {
               exports_enabled: false,
               ocr_quota_monthly: 3,
               ocr_used_this_month: newUsed,
+              ocr_updated_at: now.toISOString(),
               subscription_source: 'free',
               status: 'active',
               updated_at: now.toISOString(),

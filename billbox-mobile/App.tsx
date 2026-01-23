@@ -15,6 +15,7 @@ import * as DocumentPicker from 'expo-document-picker'
 import * as FileSystem from 'expo-file-system/legacy'
 import * as Print from 'expo-print'
 import * as Sharing from 'expo-sharing'
+import * as Clipboard from 'expo-clipboard'
 import Constants from 'expo-constants'
 // @ts-ignore JSZip is provided by dependency
 import JSZip from 'jszip'
@@ -338,14 +339,38 @@ function AiAssistant({ context }: { context: any }) {
 
       setBusy(true)
       try {
+        const s = getSupabase()
+        let token: string | null = null
+        try {
+          const sess = s ? await s.auth.getSession() : null
+          token = sess?.data?.session?.access_token || null
+        } catch {
+          token = null
+        }
+
         const resp = await fetch(`${base}/.netlify/functions/ai-assistant`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({ message: text, context: context || {} }),
         })
         const json = await resp.json().catch(() => null)
         if (!resp.ok || !json) {
           setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI request failed.') }]))
+          return
+        }
+
+        if (resp.status === 403) {
+          if (json?.error === 'trial_expired') {
+            setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'Free trial expired. Choose a plan to continue.') }]))
+            return
+          }
+          if (json?.error === 'ai_quota_exceeded' || json?.error === 'ai_not_allowed') {
+            setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI assistance is currently limited. It will be available in the next period or with an upgrade.') }]))
+            return
+          }
+        }
+        if (resp.status === 401) {
+          setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI is not available right now.') }]))
           return
         }
 
@@ -1794,6 +1819,47 @@ async function deleteAllAttachmentsForRecord(spaceId: string | null | undefined,
   await s.storage.from('attachments').remove(items.map((i) => i.path))
 }
 
+function nextMonthStartUtc(date: Date): Date {
+  const year = date.getUTCFullYear()
+  const month = date.getUTCMonth()
+  return new Date(Date.UTC(year, month + 1, 1, 0, 0, 0, 0))
+}
+
+async function preflightOcrQuota(): Promise<{ ok: true } | { ok: false; resetAt?: string }> {
+  try {
+    const base = getFunctionsBase()
+    const supabase = getSupabase()
+    if (!base || !supabase) return { ok: true }
+    const { data } = await supabase.auth.getSession()
+    const token = data?.session?.access_token
+    if (!token) return { ok: true }
+
+    const resp = await fetch(`${base}/.netlify/functions/entitlements`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    const json = await resp.json().catch(() => null as any)
+    const ent = json?.entitlements || null
+    if (!ent) return { ok: true }
+
+    const quota = typeof ent.ocrQuotaMonthly === 'number'
+      ? ent.ocrQuotaMonthly
+      : (typeof ent.ocr_quota_monthly === 'number' ? ent.ocr_quota_monthly : null)
+    const used = typeof ent.ocrUsedThisMonth === 'number'
+      ? ent.ocrUsedThisMonth
+      : (typeof ent.ocr_used_this_month === 'number' ? ent.ocr_used_this_month : 0)
+    if (quota === null || quota === undefined) return { ok: true }
+
+    if (used >= quota) {
+      const updatedRaw = ent.ocrUpdatedAt || ent.ocr_updated_at || ent.updatedAt || ent.updated_at || null
+      const baseDate = updatedRaw ? new Date(updatedRaw) : new Date()
+      const resetAt = nextMonthStartUtc(Number.isNaN(baseDate.getTime()) ? new Date() : baseDate).toISOString()
+      return { ok: false, resetAt }
+    }
+  } catch {}
+  return { ok: true }
+}
+
 async function performOCRFromBase64(
   base64: string,
   contentType: string,
@@ -1819,6 +1885,22 @@ async function performOCRFromBase64(
     throw err
   }
 
+  const preflight = await preflightOcrQuota()
+  if (!preflight.ok) {
+    const err: any = new Error(tr('OCR monthly quota exceeded.'))
+    err.code = 'ocr_quota_exceeded'
+    err.resetAt = preflight.resetAt || null
+    throw err
+  }
+
+  const preflight = await preflightOcrQuota()
+  if (!preflight.ok) {
+    const err: any = new Error(tr('OCR monthly quota exceeded.'))
+    err.code = 'ocr_quota_exceeded'
+    err.resetAt = preflight.resetAt || null
+    throw err
+  }
+
   const ct = (contentType && String(contentType).trim()) || 'application/octet-stream'
   const raw = String(base64 || '').trim()
   const approxBytes = Math.floor((raw.length * 3) / 4)
@@ -1840,12 +1922,13 @@ async function performOCRFromBase64(
   const data = await resp.json().catch(() => null as any)
   if (!resp.ok || !data?.ok) {
     const detail = data?.detail ? ` (${data.detail})` : ''
-    const message = data?.message || (data?.error ? `${data.error}${detail}` : `OCR failed (${resp.status})`)
+    const message = data?.message || (data?.error ? `${data.error}${detail}` : tr('OCR failed ({status})', { status: resp.status }))
     const err: any = new Error(message)
     err.status = resp.status
     err.code = data?.error || null
     err.requestId = data?.requestId || null
     err.detail = data?.detail || null
+    err.resetAt = data?.resetAt || data?.reset_at || null
     throw err
   }
   const f = data.fields || {}
@@ -1856,14 +1939,14 @@ async function performOCRFromBase64(
   const aiModel = typeof data?.aiModel === 'string' ? data.aiModel : null
   const aiTier = typeof data?.aiTier === 'string' ? data.aiTier : null
   const parts: string[] = []
-  if (f.creditor_name || f.supplier) parts.push(`Creditor: ${f.creditor_name || f.supplier}`)
-  if (typeof f.amount === 'number' && f.currency) parts.push(`Amount: ${f.currency} ${f.amount}`)
-  if (f.due_date) parts.push(`Due: ${f.due_date}`)
-  if (f.iban) parts.push(`IBAN: ${f.iban}`)
-  if (f.reference) parts.push(`Ref: ${f.reference}`)
-  if (f.purpose) parts.push(`Purpose: ${f.purpose}`)
-  if (f.payment_details) parts.push(`Payment details: ${String(f.payment_details).slice(0, 200)}`)
-  const summary = parts.join('\n') || 'No fields found'
+  if (f.creditor_name || f.supplier) parts.push(`${tr('Creditor')}: ${f.creditor_name || f.supplier}`)
+  if (typeof f.amount === 'number' && f.currency) parts.push(`${tr('Amount')}: ${f.currency} ${f.amount}`)
+  if (f.due_date) parts.push(`${tr('Due')}: ${f.due_date}`)
+  if (f.iban) parts.push(`${tr('IBAN')}: ${f.iban}`)
+  if (f.reference) parts.push(`${tr('Reference number')}: ${f.reference}`)
+  if (f.purpose) parts.push(`${tr('Purpose')}: ${f.purpose}`)
+  if (f.payment_details) parts.push(`${tr('Payment details')}: ${String(f.payment_details).slice(0, 200)}`)
+  const summary = parts.join('\n') || tr('No fields found')
   return { fields: f, summary, rawText, mode, meta, ai, aiModel, aiTier }
 }
 
@@ -1898,10 +1981,17 @@ async function performOCR(
   let base64: string
   let contentType = (opts?.contentType && String(opts.contentType).trim()) || 'application/octet-stream'
   let tempFileUri: string | null = null
+  const isCsvType = (ct: string, name?: string) => {
+    const c = String(ct || '').toLowerCase()
+    if (c.includes('text/csv') || c.includes('application/csv') || c.includes('application/vnd.ms-excel')) return true
+    const n = String(name || '').toLowerCase()
+    return n.endsWith('.csv')
+  }
 
   const inferContentTypeFromUri = (u: string): string => {
     const lower = String(u || '').toLowerCase()
     if (lower.endsWith('.pdf')) return 'application/pdf'
+    if (lower.endsWith('.csv')) return 'text/csv'
     if (lower.endsWith('.png')) return 'image/png'
     if (lower.endsWith('.webp')) return 'image/webp'
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
@@ -1959,6 +2049,48 @@ async function performOCR(
       throw err
     }
 
+    if (isCsvType(contentType, opts?.filename || uri)) {
+      try {
+        const text = await FileSystem.readAsStringAsync(readableUri, { encoding: FileSystem.EncodingType.UTF8 })
+        const resp = await fetch(`${base}/.netlify/functions/ocr`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ text, contentType: 'text/csv', allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, language: opts?.languageHint }),
+        })
+        const data = await resp.json().catch(() => null as any)
+        if (!resp.ok || !data?.ok) {
+          const detail = data?.detail ? ` (${data.detail})` : ''
+          const message = data?.message || (data?.error ? `${data.error}${detail}` : tr('OCR failed ({status})', { status: resp.status }))
+          const err: any = new Error(message)
+          err.status = resp.status
+          err.code = data?.error || null
+          err.requestId = data?.requestId || null
+          err.detail = data?.detail || null
+          err.resetAt = data?.resetAt || data?.reset_at || null
+          throw err
+        }
+        const f = data.fields || {}
+        const rawText = typeof data.rawText === 'string' ? data.rawText : ''
+        const mode = typeof data.mode === 'string' ? data.mode : undefined
+        const meta = data && typeof data.meta === 'object' ? data.meta : undefined
+        const ai = Boolean(data?.ai)
+        const aiModel = typeof data?.aiModel === 'string' ? data.aiModel : null
+        const aiTier = typeof data?.aiTier === 'string' ? data.aiTier : null
+        const parts: string[] = []
+        if (f.creditor_name || f.supplier) parts.push(`${tr('Creditor')}: ${f.creditor_name || f.supplier}`)
+        if (typeof f.amount === 'number' && f.currency) parts.push(`${tr('Amount')}: ${f.currency} ${f.amount}`)
+        if (f.due_date) parts.push(`${tr('Due')}: ${f.due_date}`)
+        if (f.iban) parts.push(`${tr('IBAN')}: ${f.iban}`)
+        if (f.reference) parts.push(`${tr('Reference number')}: ${f.reference}`)
+        if (f.purpose) parts.push(`${tr('Purpose')}: ${f.purpose}`)
+        if (f.payment_details) parts.push(`${tr('Payment details')}: ${String(f.payment_details).slice(0, 200)}`)
+        const summary = parts.join('\n') || tr('No fields found')
+        return { fields: f, summary, rawText, mode, meta, ai, aiModel, aiTier }
+      } catch (e) {
+        throw e
+      }
+    }
+
     try {
       base64 = await FileSystem.readAsStringAsync(readableUri, { encoding: FileSystem.EncodingType.Base64 })
     } catch (e: any) {
@@ -1998,12 +2130,13 @@ async function performOCR(
   const data = await resp.json().catch(() => null as any)
   if (!resp.ok || !data?.ok) {
     const detail = data?.detail ? ` (${data.detail})` : ''
-    const message = data?.message || (data?.error ? `${data.error}${detail}` : `OCR failed (${resp.status})`)
+    const message = data?.message || (data?.error ? `${data.error}${detail}` : tr('OCR failed ({status})', { status: resp.status }))
     const err: any = new Error(message)
     err.status = resp.status
     err.code = data?.error || null
     err.requestId = data?.requestId || null
     err.detail = data?.detail || null
+    err.resetAt = data?.resetAt || data?.reset_at || null
     throw err
   }
   const f = data.fields || {}
@@ -2014,14 +2147,14 @@ async function performOCR(
   const aiModel = typeof data?.aiModel === 'string' ? data.aiModel : null
   const aiTier = typeof data?.aiTier === 'string' ? data.aiTier : null
   const parts: string[] = []
-  if (f.creditor_name || f.supplier) parts.push(`Creditor: ${f.creditor_name || f.supplier}`)
-  if (typeof f.amount === 'number' && f.currency) parts.push(`Amount: ${f.currency} ${f.amount}`)
-  if (f.due_date) parts.push(`Due: ${f.due_date}`)
-  if (f.iban) parts.push(`IBAN: ${f.iban}`)
-  if (f.reference) parts.push(`Ref: ${f.reference}`)
-  if (f.purpose) parts.push(`Purpose: ${f.purpose}`)
-  if (f.payment_details) parts.push(`Payment details: ${String(f.payment_details).slice(0, 200)}`)
-  const summary = parts.join('\n') || 'No fields found'
+  if (f.creditor_name || f.supplier) parts.push(`${tr('Creditor')}: ${f.creditor_name || f.supplier}`)
+  if (typeof f.amount === 'number' && f.currency) parts.push(`${tr('Amount')}: ${f.currency} ${f.amount}`)
+  if (f.due_date) parts.push(`${tr('Due')}: ${f.due_date}`)
+  if (f.iban) parts.push(`${tr('IBAN')}: ${f.iban}`)
+  if (f.reference) parts.push(`${tr('Reference number')}: ${f.reference}`)
+  if (f.purpose) parts.push(`${tr('Purpose')}: ${f.purpose}`)
+  if (f.payment_details) parts.push(`${tr('Payment details')}: ${String(f.payment_details).slice(0, 200)}`)
+  const summary = parts.join('\n') || tr('No fields found')
   return { fields: f, summary, rawText, mode, meta, ai, aiModel, aiTier }
 }
 
@@ -2253,13 +2386,13 @@ function SpaceProvider({ children }: { children: React.ReactNode }) {
     const displayName = sp?.name ? `"${sp.name}"` : slotLabel
     const isPayer1 = id === 'personal'
     const message = isPayer1
-      ? `This will delete all bills, warranties, reminders, and attachments for ${displayName}.\n\nAfter removal, ${slotLabel} will be re-created and you will be asked to name it again.`
-      : `This will delete all bills, warranties, reminders, and attachments for ${displayName}.\n\nThis cannot be undone.`
+        ? tr('This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.', { displayName, slotLabel })
+        : tr('This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.', { displayName })
 
-    Alert.alert(`Remove ${slotLabel}?`, message, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove',
+      Alert.alert(tr('Remove {slotLabel}?', { slotLabel }), message, [
+        { text: tr('Cancel'), style: 'cancel' },
+        {
+          text: tr('Remove'),
         style: 'destructive',
         onPress: async () => {
           if (isPayer1) {
@@ -2421,8 +2554,8 @@ function BillDetailsScreen() {
           <SectionHeader title={tr('Bill summary')} />
           <Text style={styles.bodyText}>{bill.currency} {bill.amount.toFixed(2)} • {tr('Due')} {bill.due_date}</Text>
           {!!(bill as any).invoice_number && <Text style={styles.bodyText}>{tr('Invoice number')}: {(bill as any).invoice_number}</Text>}
-          {!!bill.reference && <Text style={styles.bodyText}>Ref: {bill.reference}</Text>}
-          {!!bill.iban && <Text style={styles.bodyText}>IBAN: {bill.iban}</Text>}
+          {!!bill.reference && <Text style={styles.bodyText}>{tr('Reference number')}: {bill.reference}</Text>}
+          {!!bill.iban && <Text style={styles.bodyText}>{tr('IBAN')}: {bill.iban}</Text>}
           <View style={{ marginTop: themeSpacing.sm, gap: 6 }}>
             <Text style={styles.fieldLabel}>{tr('Invoice number (optional)')}</Text>
             <AppInput placeholder={tr('Invoice number')} value={invoiceNumber} onChangeText={setInvoiceNumber} />
@@ -3080,6 +3213,17 @@ function ScanBillScreen() {
 
   const isIOS = Platform.OS === 'ios'
 
+  const formatResetDate = useCallback((iso: string | null | undefined) => {
+    if (!iso) return ''
+    try {
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return String(iso)
+      return d.toISOString().slice(0, 10)
+    } catch {
+      return String(iso)
+    }
+  }, [])
+
   const [saving, setSaving] = useState(false)
 
   const [manual, setManual] = useState('')
@@ -3323,7 +3467,8 @@ function ScanBillScreen() {
   const CATEGORY_RULES = [
     { key: 'utilities', pattern: /(elektri\S*|power|electricity|plin|gas|voda\b|water|komunal\S*|waste|ogrevanj\S*|heating)/i },
     { key: 'telecom', pattern: /(telekom|telefon|mobile|mobitel|internet|broadband|fiber|fibre|tv|cable)/i },
-    { key: 'grocery', pattern: /(trgovin|market|supermarket|grocer|lidl|spar|hofer|aldi|mercator|muller|dm|shop)/i },
+    { key: 'grocery', pattern: /(\u017eivil|trgovin|market|supermarket|grocer|grocery|lidl|spar|hofer|aldi|mercator|muller|dm|shop)/i },
+    { key: 'clothing', pattern: /(obla\u010dil|oblek|obutev|butik|fashion|apparel|clothing|shoes|footwear|boutique)/i },
     { key: 'fuel', pattern: /(gorivo|petrol|diesel|bencin|bencin|fuel|pumpa|gas\s*station|shell|omv|ina)/i },
     { key: 'subscription', pattern: /(naro\u010dnin|subscription|membership|plan|monthly|mese\u010dno)/i },
     { key: 'service', pattern: /(storitev|service|vzdr\u017eevanje|maintenance|servis|repair|popravilo)/i },
@@ -3334,6 +3479,7 @@ function ScanBillScreen() {
     { key: 'utilities', labelKey: 'Category: utilities' },
     { key: 'telecom', labelKey: 'Category: telecom' },
     { key: 'grocery', labelKey: 'Category: grocery' },
+    { key: 'clothing', labelKey: 'Category: clothing' },
     { key: 'fuel', labelKey: 'Category: fuel' },
     { key: 'subscription', labelKey: 'Category: subscription' },
     { key: 'service', labelKey: 'Category: service' },
@@ -3600,6 +3746,19 @@ function ScanBillScreen() {
   function applyDataToForm(source: 'QR' | 'OCR' | 'GOOGLE', fields: any, rawText?: string) {
     const src = source === 'QR' ? 'qr' : (source === 'GOOGLE' ? 'google' : 'ocr')
     applyExtractedPaymentFields({ ...fields, rawText: rawText || fields?.rawText || '', _source: src }, src)
+  }
+
+  function inferArchiveOnlyFromText(rawText: string, fields: any): boolean {
+    const text = String(rawText || '').toLowerCase()
+    const hasDue = Boolean(fields?.due_date)
+    const hasIban = Boolean(fields?.iban)
+    const hasRef = Boolean(fields?.reference)
+    if (hasDue || (hasIban && hasRef)) return false
+
+    const paidRe = /(pla\u010dan|pla\u010dano|poravnano|paid|payment\s*received|zaprto|settled|cash\b|gotovina|kartic|card\s*payment|visa|mastercard|pos\b|receipt|fiscal)/i
+    if (paidRe.test(text)) return true
+
+    return false
   }
 
   function isPayerLabelLine(line: string): boolean {
@@ -4506,15 +4665,18 @@ function ScanBillScreen() {
   useEffect(() => {
     const payload = route.params?.inboxPrefill
     if (payload && payload.fields) {
-      // Inbox attachments are explicitly for payment.
-      setArchiveOnly(false)
       const f = payload.fields as ExtractedFields
       const raw = String((f as any)?.rawText || '')
+      const sourceHint = String((f as any)?._source || (f as any)?.mode || '')
+      const isQr = /qr/i.test(sourceHint)
+      const source: 'QR' | 'OCR' = isQr ? 'QR' : 'OCR'
+      const inferredArchiveOnly = inferArchiveOnlyFromText(raw, f)
+      setArchiveOnly(inferredArchiveOnly)
       const supplierName = pickNameCandidate(f.creditor_name, f.supplier)
       if (supplierName) setSupplier(supplierName)
       const cred = pickNameCandidate(f.creditor_name, supplierName)
       if (cred) setCreditorName(cred)
-      applyDataToForm('OCR', { ...f }, raw)
+      applyDataToForm(source, { ...f }, raw)
       if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
       if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
       if (typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -4710,11 +4872,11 @@ function ScanBillScreen() {
         mode: String(primary?.mode || '') || null,
       })
       // Keep UX non-technical; the draft is already filled and still editable.
-      if (summary && summary !== 'No fields found') {
+      if (summary && summary !== tr('No fields found')) {
         // Optional: leave silent, but keep summary available via rawText.
       }
     } catch (e: any) {
-      const msg = e?.message || 'OCR failed'
+      const msg = e?.message || tr('OCR failed')
       const status = (e as any)?.status
       const code = (e as any)?.code
       const requestId = (e as any)?.requestId
@@ -4746,15 +4908,32 @@ function ScanBillScreen() {
         }
       }
 
+      if (code === 'trial_expired') {
+        const text = withRequestId(tr('Free trial expired. Choose a plan to continue.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR unavailable'), text)
+        showUpgradeAlert('ocr')
+        setDebugStatus('ERROR')
+        return
+      }
+
       if (code === 'ocr_not_allowed') {
-        setOcrError(withRequestId(tr('OCR not available on your plan.')))
+        const text = withRequestId(tr('OCR not available on your plan.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR unavailable'), text)
         showUpgradeAlert('ocr')
         setDebugStatus('ERROR')
         return
       }
 
       if (code === 'ocr_quota_exceeded' || /quota/i.test(msg)) {
-        setOcrError(withRequestId(tr('OCR monthly quota exceeded.')))
+        const resetAt = (e as any)?.resetAt || null
+        const dateLabel = formatResetDate(resetAt)
+        const text = dateLabel
+          ? tr('You reached the monthly OCR limit. Continue after {date} or upgrade.', { date: dateLabel })
+          : tr('OCR monthly quota exceeded.')
+        setOcrError(withRequestId(text))
+        Alert.alert(tr('OCR unavailable'), withRequestId(text))
         showUpgradeAlert('ocr')
         setDebugStatus('ERROR')
         return
@@ -4843,11 +5022,11 @@ function ScanBillScreen() {
         error: primary?.meta?.ai?.error ?? null,
         mode: String(primary?.mode || '') || null,
       })
-      if (summary && summary !== 'No fields found') {
+      if (summary && summary !== tr('No fields found')) {
         // Optional: leave silent, but keep summary available via rawText.
       }
     } catch (e: any) {
-      const msg = e?.message || 'OCR failed'
+      const msg = e?.message || tr('OCR failed')
       const status = (e as any)?.status
       const code = (e as any)?.code
       const requestId = (e as any)?.requestId
@@ -4878,14 +5057,30 @@ function ScanBillScreen() {
         return
       }
 
+      if (code === 'trial_expired') {
+        const text = withRequestId(tr('Free trial expired. Choose a plan to continue.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR unavailable'), text)
+        showUpgradeAlert('ocr')
+        return
+      }
+
       if (code === 'ocr_not_allowed') {
-        setOcrError(withRequestId(tr('OCR not available on your plan.')))
+        const text = withRequestId(tr('OCR not available on your plan.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR unavailable'), text)
         showUpgradeAlert('ocr')
         return
       }
 
       if (code === 'ocr_quota_exceeded' || /quota/i.test(msg)) {
-        setOcrError(withRequestId(tr('OCR monthly quota exceeded.')))
+        const resetAt = (e as any)?.resetAt || null
+        const dateLabel = formatResetDate(resetAt)
+        const text = dateLabel
+          ? tr('You reached the monthly OCR limit. Continue after {date} or upgrade.', { date: dateLabel })
+          : tr('OCR monthly quota exceeded.')
+        setOcrError(withRequestId(text))
+        Alert.alert(tr('OCR failed'), withRequestId(text))
         showUpgradeAlert('ocr')
         return
       }
@@ -5776,12 +5971,67 @@ function InboxScreen() {
 
   const effectiveSpaceId = spaceId || space?.id || 'default'
 
+  const formatResetDate = useCallback((iso: string | null | undefined) => {
+    if (!iso) return ''
+    try {
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return String(iso)
+      return d.toISOString().slice(0, 10)
+    } catch {
+      return String(iso)
+    }
+  }, [])
+
+  const stripHtml = (input: string) => {
+    const raw = String(input || '')
+    return raw
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  const buildInvoiceClassifierText = (item: InboxItem, meta: any, subject?: string | null) => {
+    const parts: string[] = []
+    if (subject) parts.push(String(subject))
+    if (item?.name) parts.push(String(item.name))
+    const bodyText = meta?.body_text ? String(meta.body_text) : ''
+    const bodyHtml = meta?.body_html ? String(meta.body_html) : ''
+    if (bodyText) parts.push(bodyText)
+    if (bodyHtml) parts.push(stripHtml(bodyHtml))
+    return parts.join('\n').trim()
+  }
+
+  const scoreInvoiceText = (text: string, mimeType?: string | null) => {
+    const t = String(text || '').toLowerCase()
+    if (!t) return 0
+    let score = 0
+    if (/(\bra\u010dun\b|invoice|faktura|rechnung|fattura)/i.test(t)) score += 2
+    if (/(\bznesek\b|total|amount|balance\s*due|sum|skupaj)/i.test(t)) score += 1
+    if (/(\bddv\b|vat|pdv)/i.test(t)) score += 1
+    if (/(rok\s*pla\S*|due\s*date|pay\s*by|payment\s*due)/i.test(t)) score += 1
+    if (/(iban|trr|bank\s*account)/i.test(t)) score += 1
+    if (/(sklic|reference|ref\.?|model)/i.test(t)) score += 1
+    if (/(\bEUR\b|\bUSD\b|\bGBP\b|€|\$|£)/i.test(t)) score += 1
+    if (/(invoice\s*(no|number)|\b\u0161t\.?\s*ra\u010duna\b|ra\u010dun\s*\u0161t)/i.test(t)) score += 1
+    if (/(UPNQR|\bBCD\b)/i.test(t)) score += 2
+
+    if (/(unsubscribe|newsletter|marketing|promo|campaign)/i.test(t)) score -= 2
+    if (!/\d/.test(t)) score -= 1
+
+    const mime = String(mimeType || '').toLowerCase()
+    if (mime.includes('text/csv') || mime.includes('application/csv')) score += 1
+
+    return score
+  }
+
   const syncServerInbox = useCallback(async () => {
     if (!supabase) return
     try {
       const { data, error } = await supabase
         .from('inbox_items')
-        .select('id, space_id, status, received_at, created_at, attachment_bucket, attachment_path, attachment_name, mime_type, meta')
+        .select('id, space_id, status, received_at, created_at, attachment_bucket, attachment_path, attachment_name, mime_type, meta, subject, sender')
         .eq('space_id', effectiveSpaceId)
         .order('received_at', { ascending: false })
         .limit(50)
@@ -5818,6 +6068,9 @@ function InboxScreen() {
         const mimeType = row.mime_type ? String(row.mime_type) : undefined
         const createdAt = String(row.received_at || row.created_at || new Date().toISOString())
 
+        const meta = row?.meta && typeof row.meta === 'object' ? { ...row.meta } : {}
+        if (row?.subject) meta.subject = row.subject
+        if (row?.sender) meta.sender = row.sender
         const added = await addToInbox({
           spaceId: effectiveSpaceId,
           id,
@@ -5826,6 +6079,7 @@ function InboxScreen() {
           mimeType,
           createdAt,
           status: status || 'new',
+          meta,
         })
 
         byId.set(id, added)
@@ -5835,14 +6089,36 @@ function InboxScreen() {
       if (newlyAdded.length && entitlements?.canUseOCR) {
         for (const it of newlyAdded) {
           try {
+            const meta = (it as any).meta || {}
+            const subject = meta?.subject ? String(meta.subject) : ''
+            const classifierText = buildInvoiceClassifierText(it, meta, subject)
+            const score = scoreInvoiceText(classifierText, it.mimeType || null)
+            const isCandidate = score >= 3
+            if (!isCandidate) {
+              await updateInboxItem(effectiveSpaceId, it.id, { notes: tr('Not an invoice'), status: it.status || 'new' })
+              await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
+              continue
+            }
+
             // Quiet auto-OCR for newly received email items so "Attach to bill" is immediately useful.
             const sourceUri = (it as any).localPath || it.uri
-            const { fields, summary } = await performOCR(sourceUri, { preferQr: false, allowAi: false })
+            const { fields, summary, rawText, mode } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
             const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
-            await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : (it.status || 'new') })
+            const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
+            const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode } : fields
+            await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: enriched, notes: summary, status: looksLikeBill ? 'pending' : (it.status || 'new') })
             if (looksLikeBill) await cancelInboxReviewReminder(it.id, effectiveSpaceId)
             else await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
-          } catch {
+          } catch (e: any) {
+            const code = e?.code || null
+            if (code === 'ocr_quota_exceeded') {
+              const resetAt = e?.resetAt || null
+              const dateLabel = formatResetDate(resetAt)
+              const text = dateLabel
+                ? tr('You reached the monthly OCR limit. Continue after {date} or upgrade.', { date: dateLabel })
+                : tr('OCR monthly quota exceeded.')
+              await updateInboxItem(effectiveSpaceId, it.id, { notes: text, status: it.status || 'new' })
+            }
             // ignore auto-OCR failures; user can retry manually
           }
         }
@@ -5899,19 +6175,55 @@ function InboxScreen() {
       return
     }
     try {
+      const meta = (item as any).meta || {}
+      const subject = meta?.subject ? String(meta.subject) : ''
+      const classifierText = buildInvoiceClassifierText(item, meta, subject)
+      const score = scoreInvoiceText(classifierText, item.mimeType || null)
+      if (score < 3) {
+        Alert.alert(tr('Inbox'), tr('This does not look like a bill.'))
+        await updateInboxItem(spaceId, item.id, { notes: tr('Not an invoice'), status: item.status || 'new' })
+        await scheduleInboxReviewReminder(item.id, item.name, spaceId)
+        await refresh()
+        return
+      }
+    } catch {}
+    try {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
-      const { fields, summary, rawText } = await performOCR(sourceUri, { preferQr: false, allowAi: false })
+      const { fields, summary, rawText, mode } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
 
       const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
-      const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '' } : fields
+      const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
+      const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode } : fields
       await updateInboxItem(spaceId, item.id, { extractedFields: enriched, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
       if (looksLikeBill) await cancelInboxReviewReminder(item.id, spaceId)
       else await scheduleInboxReviewReminder(item.id, item.name, spaceId)
       await refresh()
       Alert.alert(tr('Scan complete'), summary)
     } catch (e: any) {
-      Alert.alert(tr('Scan failed'), e?.message || tr('Could not read this document.'))
+      const msg = e?.message || tr('Could not read this document.')
+      const code = e?.code || null
+      if (code === 'trial_expired') {
+        Alert.alert(tr('OCR unavailable'), tr('Free trial expired. Choose a plan to continue.'))
+        showUpgradeAlert('ocr')
+        return
+      }
+      if (code === 'ocr_not_allowed') {
+        Alert.alert(tr('OCR unavailable'), tr('OCR not available on your plan.'))
+        showUpgradeAlert('ocr')
+        return
+      }
+      if (code === 'ocr_quota_exceeded') {
+        const resetAt = e?.resetAt || null
+        const dateLabel = formatResetDate(resetAt)
+        const text = dateLabel
+          ? tr('You reached the monthly OCR limit. Continue after {date} or upgrade.', { date: dateLabel })
+          : tr('OCR monthly quota exceeded.')
+        Alert.alert(tr('OCR failed'), text)
+        showUpgradeAlert('ocr')
+        return
+      }
+      Alert.alert(tr('Scan failed'), msg)
     } finally {
       setBusy(null)
     }
@@ -6004,6 +6316,11 @@ function InboxScreen() {
                     {item.notes ? <Text>{item.notes}</Text> : null}
                   </View>
                 )}
+                {!item.extractedFields && item.notes ? (
+                  <View style={{ marginTop: 6 }}>
+                    <Text style={styles.mutedText}>{item.notes}</Text>
+                  </View>
+                ) : null}
                 <View style={styles.inboxActionsRow}>
                   <Button title={tr('Open')} onPress={()=>openItem(item)} />
                   <Button title={busy===item.id ? tr('Processing…') : tr('Scan')} onPress={()=>runOcr(item)} disabled={busy===item.id} />
@@ -6038,6 +6355,16 @@ function BillsListScreen() {
   const [billsError, setBillsError] = useState<string | null>(null)
 
   const dayKey = useDayKey()
+  const formatDate = useCallback((iso?: string | null) => {
+    if (!iso) return ''
+    try {
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return String(iso)
+      return d.toISOString().slice(0, 10)
+    } catch {
+      return String(iso)
+    }
+  }, [])
 
   const [filtersExpanded, setFiltersExpanded] = useState(true)
   const [supplierQuery, setSupplierQuery] = useState('')
@@ -6632,6 +6959,12 @@ function BillsListScreen() {
         return null
       }
       if (resp.status === 403) {
+        if (json?.error === 'trial_expired') {
+          Alert.alert(t(lang, 'Export'), t(lang, 'Free trial expired. Choose a plan to continue.'))
+          showUpgradeAlert('export')
+          return null
+        }
+        Alert.alert(t(lang, 'Export'), t(lang, 'Export is available on Več.'))
         showUpgradeAlert('export')
         return null
       }
@@ -6672,6 +7005,7 @@ function BillsListScreen() {
 
   async function exportCSVSelection() {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -6727,6 +7061,7 @@ function BillsListScreen() {
 
   async function exportAccountingCSVSelection() {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -6803,6 +7138,7 @@ function BillsListScreen() {
 
   async function exportJSONSelection() {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -6866,6 +7202,7 @@ function BillsListScreen() {
 
   async function exportPDFSelection(scope: ExportPayerScope = defaultExportScope) {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -6912,6 +7249,7 @@ function BillsListScreen() {
 
   async function exportZIPSelection(scope: ExportPayerScope = defaultExportScope) {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -6972,6 +7310,7 @@ function BillsListScreen() {
 
   const chooseExportFormat = useCallback(() => {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -7802,6 +8141,50 @@ function HomeScreen() {
     ? (homeSummaryVisibility.nextDue ? (activeSummary.nextDueDate || tr('None')) : mask)
     : (homeSummaryVisibility.nextDue ? '—' : mask)
 
+  const retentionNotices = useMemo(() => {
+    const notices: Array<{ tone: 'info' | 'warning'; message: string }> = []
+    const lifecycle = entitlements.lifecycleStatus
+    const deleteAt = entitlements.deleteAt
+    const exportUntil = entitlements.exportUntil
+    const downgradeCleanupAt = entitlements.downgradeCleanupAt
+
+    if (lifecycle === 'grace_period') {
+      notices.push({
+        tone: 'warning',
+        message: tr('Subscription cancelled. Bills remain available until {date}.', { date: formatDate(entitlements.graceUntil) }),
+      })
+    }
+
+    if (lifecycle === 'export_only') {
+      notices.push({
+        tone: 'warning',
+        message: tr('Export-only access is active until {date}. Export your bills before then.', { date: formatDate(exportUntil) }),
+      })
+    }
+
+    if (lifecycle === 'downgrade_vec_to_moje') {
+      notices.push({
+        tone: 'warning',
+        message: tr('Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.', { date: formatDate(downgradeCleanupAt) }),
+      })
+    }
+
+    if (deleteAt) {
+      const target = new Date(deleteAt)
+      if (!Number.isNaN(target.getTime())) {
+        const diffDays = Math.ceil((target.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+        if (diffDays <= 7 && diffDays >= 0) {
+          notices.push({
+            tone: 'warning',
+            message: tr('Attachments will be permanently deleted on {date}.', { date: formatDate(deleteAt) }),
+          })
+        }
+      }
+    }
+
+    return notices
+  }, [entitlements.deleteAt, entitlements.downgradeCleanupAt, entitlements.exportUntil, entitlements.graceUntil, entitlements.lifecycleStatus, formatDate, tr])
+
   return (
     <Screen>
       <View style={[styles.pageStack, { gap: themeSpacing.sm }]}>
@@ -7855,6 +8238,12 @@ function HomeScreen() {
             </>
           }
         />
+
+        {retentionNotices.map((n, i) => (
+          <Surface elevated key={`retention_${i}`}>
+            <InlineInfo tone={n.tone} iconName="alert-circle-outline" message={n.message} />
+          </Surface>
+        ))}
 
         <Surface elevated padded={false} style={[styles.card, styles.homeHeroCard]}>
           <View style={styles.homeHeroHeaderRow}>
@@ -9402,6 +9791,25 @@ function ReportsScreen() {
   const { snapshot: entitlements } = useEntitlements()
 
   const isPro = entitlements.plan === 'pro'
+  const analyticsBlocked =
+    entitlements.plan === 'free' ||
+    entitlements.status === 'trial_expired' ||
+    entitlements.lifecycleStatus === 'grace_period' ||
+    entitlements.lifecycleStatus === 'export_only' ||
+    entitlements.lifecycleStatus === 'deleted' ||
+    entitlements.lifecycleStatus === 'cancelled_all'
+
+  const analyticsBlockMessage = useMemo(() => {
+    if (entitlements.status === 'trial_expired') return tr('Free trial expired. Choose a plan to continue.')
+    if (entitlements.lifecycleStatus === 'grace_period') {
+      return tr('Subscription cancelled. Bills remain available until {date}.', { date: String(entitlements.graceUntil || '') })
+    }
+    if (entitlements.lifecycleStatus === 'export_only') return tr('Export-only access is active. Other premium features are disabled.')
+    if (entitlements.lifecycleStatus === 'deleted') return tr('Account is marked as deleted. Premium features are disabled.')
+    return tr('Analytics are available on Moje and Več.')
+  }, [entitlements.graceUntil, entitlements.lifecycleStatus, entitlements.status])
+
+  const analyticsUpgradeTarget: PlanId = entitlements.rawPlan === 'pro' ? 'pro' : 'basic'
 
   const payerSpaces = useMemo(() => {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
@@ -9647,6 +10055,11 @@ function ReportsScreen() {
   const onExportPress = useCallback(() => {
     if (!entitlements.exportsEnabled) {
       setExportUpsellVisible(true)
+      if (entitlements.status === 'trial_expired') {
+        Alert.alert(tr('Export'), tr('Free trial expired. Choose a plan to continue.'))
+      } else {
+        Alert.alert(tr('Export'), tr('Export is available on Več.'))
+      }
       showUpgradeAlert('export')
       return
     }
@@ -9794,6 +10207,27 @@ function ReportsScreen() {
     )
   }
 
+  if (analyticsBlocked) {
+    return (
+      <Screen>
+        <View style={styles.pageStack}>
+          <TabTopBar titleKey="Reports" />
+          <Surface elevated>
+            <InlineInfo tone="warning" iconName="alert-circle-outline" message={analyticsBlockMessage} />
+            <View style={{ marginTop: themeSpacing.sm }}>
+              <AppButton
+                label={analyticsUpgradeTarget === 'pro' ? tr('Upgrade to Več') : tr('Upgrade to Moje')}
+                variant="secondary"
+                iconName="arrow-up-circle-outline"
+                onPress={() => navigation.navigate('Payments', { focusPlan: analyticsUpgradeTarget, reason: 'reports' })}
+              />
+            </View>
+          </Surface>
+        </View>
+      </Screen>
+    )
+  }
+
   return (
     <Screen>
       <View style={styles.pageStack}>
@@ -9801,6 +10235,13 @@ function ReportsScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('Filters')} />
+          {!isPro ? (
+            <InlineInfo
+              tone="info"
+              iconName="sparkles-outline"
+              message={tr('Basic analytics is available on Moje and Več. Upgrade to Več for advanced analytics.')}
+            />
+          ) : null}
           <View style={styles.filtersBody}>
             <View style={{ marginTop: themeSpacing.sm }}>
               <Text style={styles.filterLabel}>{tr('Profiles')}</Text>
@@ -10350,6 +10791,12 @@ function ExportsScreen() {
         return null
       }
       if (resp.status === 403) {
+        if (json?.error === 'trial_expired') {
+          Alert.alert(t(lang, 'Export'), t(lang, 'Free trial expired. Choose a plan to continue.'))
+          showUpgradeAlert('export')
+          return null
+        }
+        Alert.alert(t(lang, 'Export'), t(lang, 'Export is available on Več.'))
         showUpgradeAlert('export')
         return null
       }
@@ -10390,6 +10837,7 @@ function ExportsScreen() {
 
   async function exportJSONRange() {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -10440,6 +10888,7 @@ function ExportsScreen() {
 
   async function exportCSV() {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -10515,6 +10964,7 @@ function ExportsScreen() {
 
   async function exportPDFRange() {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -10547,6 +10997,7 @@ function ExportsScreen() {
 
   async function exportPDFSingle(bill: Bill) {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -10570,6 +11021,7 @@ function ExportsScreen() {
 
   async function exportAttachmentsZip() {
     if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
@@ -11295,7 +11747,7 @@ function PaymentsScreen() {
         'Two locations/households (2 profiles)',
         'Installment obligations (credits/leasing)',
         'Import bills from email',
-        '300 OCR / month',
+        '100 OCR / month',
         'Export (CSV / PDF / ZIP / JSON)',
         'Advanced analytics',
       ]
@@ -11304,7 +11756,7 @@ function PaymentsScreen() {
       return [
         'Unlimited bills + warranties',
         '1 profile',
-        '100 OCR / month',
+        '50 OCR / month',
         'Basic analytics',
       ]
     }
@@ -11321,10 +11773,55 @@ function PaymentsScreen() {
     return raw === 'basic' || raw === 'pro' || raw === 'free' ? raw : null
   }, [route?.params?.focusPlan])
 
+  const formatDate = useCallback((iso?: string | null) => {
+    if (!iso) return ''
+    try {
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return String(iso)
+      return d.toISOString().slice(0, 10)
+    } catch {
+      return String(iso)
+    }
+  }, [])
+
+  const statusNotice = useMemo(() => {
+    if (entitlements.status === 'trial_active') {
+      return t(lang, 'Free trial is active until {date}.', { date: formatDate(entitlements.trialEndsAt) })
+    }
+    if (entitlements.status === 'trial_expired') {
+      return t(lang, 'Free trial expired. Choose a plan to continue.')
+    }
+    if (entitlements.status === 'payment_failed') {
+      return t(lang, 'Payment failed. Premium features are disabled until payment is completed.')
+    }
+    if (entitlements.status === 'subscription_cancelled') {
+      return t(lang, 'Subscription cancelled. Premium features are disabled.')
+    }
+
+    switch (entitlements.lifecycleStatus) {
+      case 'grace_period':
+        return t(lang, 'Subscription cancelled. Bills remain available until {date}.', { date: formatDate(entitlements.graceUntil) })
+      case 'export_only':
+        return t(lang, 'Export-only access is active until {date}. Export your bills before then.', { date: formatDate(entitlements.exportUntil) })
+      case 'downgrade_vec_to_moje':
+        return t(lang, 'Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.', { date: formatDate(entitlements.downgradeCleanupAt) })
+      case 'deleted':
+        return t(lang, 'Account is marked as deleted. Premium features are disabled.')
+      default:
+        return ''
+    }
+  }, [entitlements.downgradeCleanupAt, entitlements.exportUntil, entitlements.graceUntil, entitlements.lifecycleStatus, entitlements.status, entitlements.trialEndsAt, formatDate, lang])
+
   return (
     <Screen>
       <View style={styles.pageStack}>
         <TabTopBar titleKey="Subscription plans" />
+
+        {statusNotice ? (
+          <Surface elevated>
+            <InlineInfo tone={entitlements.status === 'trial_active' ? 'info' : 'warning'} iconName="alert-circle-outline" message={statusNotice} />
+          </Surface>
+        ) : null}
 
         {(['free', 'basic', 'pro'] as PlanId[]).map((plan) => {
           const active = entitlements.plan === plan
@@ -11561,6 +12058,10 @@ function SettingsScreen() {
   const [renameVisible, setRenameVisible] = useState(false)
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
+  const [inboxLoading, setInboxLoading] = useState(false)
+  const [inboxAddress, setInboxAddress] = useState<string | null>(null)
+  const [inboxConfigured, setInboxConfigured] = useState(false)
+  const [inboxError, setInboxError] = useState<string | null>(null)
 
   const languageOptions = useMemo(() => {
     const opts: Array<{ code: Lang; key: string }> = [
@@ -11610,6 +12111,48 @@ function SettingsScreen() {
     await spacesCtx.addSpace({ name: trimmed, kind: 'personal', plan: spacesCtx.current?.plan || 'free' })
     setCreatingPayer2(false)
   }, [payer2NameDraft, spacesCtx])
+  const loadInboxAlias = useCallback(async () => {
+    if (!supabase || !space) return
+    try {
+      setInboxLoading(true)
+      setInboxError(null)
+      const base = getFunctionsBase()
+      if (!base) {
+        setInboxConfigured(false)
+        setInboxAddress(null)
+        return
+      }
+      const { data } = await supabase.auth.getSession()
+      const token = data?.session?.access_token
+      if (!token) return
+
+      const resp = await fetch(`${base}/.netlify/functions/inbox-alias?spaceId=${encodeURIComponent(space.id)}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const json = await resp.json().catch(() => null as any)
+      if (!resp.ok || !json?.ok) {
+        setInboxConfigured(false)
+        setInboxAddress(null)
+        setInboxError(tr('Inbox address not configured.'))
+        return
+      }
+      const addr = typeof json.address === 'string' ? json.address : null
+      setInboxAddress(addr)
+      setInboxConfigured(Boolean(json.configured && addr))
+    } catch {
+      setInboxError(tr('Inbox address not configured.'))
+      setInboxConfigured(false)
+      setInboxAddress(null)
+    } finally {
+      setInboxLoading(false)
+    }
+  }, [space, supabase])
+
+  useEffect(() => {
+    loadInboxAlias()
+  }, [loadInboxAlias])
+
   if (spacesCtx.loading || !space) {
     return (
       <Screen scroll={false}>
@@ -11736,6 +12279,36 @@ function SettingsScreen() {
               />
             </View>
           ) : null}
+        </Surface>
+
+        <Surface elevated>
+          <SectionHeader title={tr('Email inbox')} />
+          {inboxLoading ? (
+            <Text style={styles.mutedText}>{tr('Loading inbox…')}</Text>
+          ) : inboxConfigured && inboxAddress ? (
+            <View style={{ gap: themeSpacing.xs }}>
+              <Text style={styles.bodyText}>{tr('Your BillBox inbox')}</Text>
+              <Text style={styles.mutedText}>{inboxAddress}</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+                <AppButton
+                  label={tr('Copy address')}
+                  variant="secondary"
+                  iconName="copy-outline"
+                  onPress={async () => {
+                    if (!inboxAddress) return
+                    try {
+                      await Clipboard.setStringAsync(inboxAddress)
+                      Alert.alert(tr('Copied'))
+                    } catch {
+                      Alert.alert(tr('Error'), tr('Could not copy.'))
+                    }
+                  }}
+                />
+              </View>
+            </View>
+          ) : (
+            <Text style={styles.mutedText}>{inboxError || tr('Inbox address not configured.')}</Text>
+          )}
         </Surface>
 
         <Surface elevated style={{ marginTop: themeSpacing.md }}>

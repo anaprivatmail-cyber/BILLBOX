@@ -690,6 +690,29 @@ for (const lang of Object.keys(phraseDict) as Lang[]) {
 export type I18nVars = Record<string, string | number>
 
 const missingLogged: Record<string, true> = {}
+let auditLogged = false
+
+function auditTranslationsOnce() {
+  if (auditLogged) return
+  auditLogged = true
+  try {
+    const isDev = typeof __DEV__ !== 'undefined' && (__DEV__ as any)
+    if (!isDev) return
+  } catch {
+    return
+  }
+
+  const baseKeys = Object.keys(dict.en)
+  const langs: Lang[] = ['sl', 'hr', 'it', 'de']
+  for (const lang of langs) {
+    const table = dict[lang] || {}
+    const missing = baseKeys.filter((k) => !table[k])
+    if (missing.length) {
+      // eslint-disable-next-line no-console
+      console.warn(`[i18n] Missing ${lang} translations (${missing.length}): ${missing.join(', ')}`)
+    }
+  }
+}
 
 function formatTemplate(template: string, vars?: I18nVars): string {
   if (!vars) return template
@@ -723,6 +746,7 @@ export function t(lang: Lang, key: string, vars?: I18nVars): string {
 }
 
 export async function loadLang(): Promise<Lang> {
+  auditTranslationsOnce()
   try {
     const raw = await AsyncStorage.getItem(LS_LANG)
     const val = (raw || '').trim() as Lang

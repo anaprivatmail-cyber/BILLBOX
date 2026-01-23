@@ -1,5 +1,13 @@
 import { createClient } from '@supabase/supabase-js'
 
+const DOWNGRADE_EXPORT_DAYS = 30
+
+function addDays(date, days) {
+  const out = new Date(date.getTime())
+  out.setDate(out.getDate() + days)
+  return out
+}
+
 function jsonResponse(statusCode, payload) {
   return {
     statusCode,
@@ -23,10 +31,10 @@ function planConfigFromProduct(productId) {
   if (!id) return null
 
   if (id.includes('pro')) {
-    return { plan: 'pro', payer_limit: 2, ocr_quota_monthly: 300, exports_enabled: true, subscription_source: 'iap_google' }
+    return { plan: 'pro', payer_limit: 2, ocr_quota_monthly: 100, ai_quota_monthly: 100, exports_enabled: true, subscription_source: 'iap_google', status: 'active_pro' }
   }
   if (id.includes('basic')) {
-    return { plan: 'basic', payer_limit: 1, ocr_quota_monthly: 100, exports_enabled: true, subscription_source: 'iap_google' }
+    return { plan: 'basic', payer_limit: 1, ocr_quota_monthly: 50, ai_quota_monthly: 30, exports_enabled: false, subscription_source: 'iap_google', status: 'active_basic' }
   }
   return null
 }
@@ -36,14 +44,37 @@ async function activateEntitlementsForIap(supabase, userId, productId, platform)
   if (!cfg) throw new Error('unknown_product')
 
   const nowIso = new Date().toISOString()
+  let prevPlan = null
+  try {
+    const { data } = await supabase
+      .from('entitlements')
+      .select('plan')
+      .eq('user_id', userId)
+      .limit(1)
+      .maybeSingle()
+    prevPlan = data?.plan ? String(data.plan) : null
+  } catch {
+    prevPlan = null
+  }
+
+  const normalizedPlan = cfg.plan === 'pro' ? 'pro' : 'basic'
+  const isDowngrade = prevPlan === 'pro' && normalizedPlan === 'basic'
+  const downgradeCleanupAt = isDowngrade ? addDays(new Date(), DOWNGRADE_EXPORT_DAYS).toISOString() : null
+  const status = normalizedPlan === 'pro' ? 'active_vec' : 'active_moje'
   const payload = {
     user_id: userId,
-    plan: cfg.plan,
+    plan: normalizedPlan,
     payer_limit: cfg.payer_limit,
     ocr_quota_monthly: cfg.ocr_quota_monthly,
+    ai_quota_monthly: cfg.ai_quota_monthly,
     exports_enabled: cfg.exports_enabled,
     subscription_source: platform === 'ios' ? 'iap_apple' : 'iap_google',
-    status: 'active',
+    status: isDowngrade ? 'downgrade_vec_to_moje' : status,
+    export_only: false,
+    grace_until: null,
+    export_until: null,
+    delete_at: null,
+    downgrade_cleanup_at: downgradeCleanupAt,
     updated_at: nowIso,
   }
 

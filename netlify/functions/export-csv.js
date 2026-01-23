@@ -1,38 +1,11 @@
-import { createClient } from '@supabase/supabase-js'
-
-function jsonResponse(statusCode, payload, extraHeaders = {}) {
-  return {
-    statusCode,
-    headers: { 'content-type': 'application/json', ...extraHeaders },
-    body: JSON.stringify(payload),
-  }
-}
-
-function getSupabaseAdmin() {
-  const url = process.env.SUPABASE_URL
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!url || !serviceKey) return null
-  return createClient(url, serviceKey, { auth: { persistSession: false } })
-}
-
-async function getUserFromAuthHeader(event) {
-  const header = event.headers.authorization || event.headers.Authorization || ''
-  if (!header || typeof header !== 'string') return { userId: null, error: 'missing_authorization' }
-  const parts = header.split(' ')
-  if (parts.length !== 2 || parts[0] !== 'Bearer' || !parts[1]) {
-    return { userId: null, error: 'invalid_authorization' }
-  }
-  const token = parts[1]
-  const supabase = getSupabaseAdmin()
-  if (!supabase) return { userId: null, error: 'supabase_admin_not_configured' }
-  try {
-    const { data, error } = await supabase.auth.getUser(token)
-    if (error || !data?.user?.id) return { userId: null, error: 'invalid_token' }
-    return { userId: data.user.id, error: null, supabase }
-  } catch {
-    return { userId: null, error: 'invalid_token' }
-  }
-}
+import {
+  jsonResponse,
+  getUserFromAuthHeader,
+  safeJsonBody,
+  loadEntitlements,
+  isExportAllowed,
+  assertPayerScope,
+} from './_exports.js'
 
 function csvEscape(value) {
   const s = value === null || value === undefined ? '' : String(value)
@@ -55,12 +28,7 @@ export async function handler(event) {
       return jsonResponse(401, { ok: false, error: 'auth_required' })
     }
 
-    let body
-    try {
-      body = JSON.parse(event.body || '{}')
-    } catch {
-      body = {}
-    }
+    const body = await safeJsonBody(event)
 
     const from = String(body.from || '')
     const to = String(body.to || '')
@@ -82,41 +50,15 @@ export async function handler(event) {
     const supabase = authInfo.supabase
     const userId = authInfo.userId
 
-    // Enforce entitlements server-side
-    let ent
-    try {
-      const { data } = await supabase
-        .from('entitlements')
-        .select('*')
-        .eq('user_id', userId)
-        .order('active_until', { ascending: false, nullsFirst: false })
-        .limit(1)
-        .maybeSingle()
-      ent = data || { plan: 'free', exports_enabled: false }
-    } catch {
-      ent = { plan: 'free', exports_enabled: false }
-    }
-
-    if (!ent.exports_enabled) {
+    const ent = await loadEntitlements(supabase, userId)
+    if (!isExportAllowed(ent, 'csv')) {
       return jsonResponse(403, { ok: false, error: 'export_not_allowed', message: 'Exports not available on your plan.' })
     }
 
     const requestedSpaceIds = spaceIds.length ? spaceIds : (spaceId ? [spaceId] : [])
-    if (requestedSpaceIds.length) {
-      const allowed1 = ent?.space_id ? String(ent.space_id) : ''
-      const allowed2 = ent?.space_id2 ? String(ent.space_id2) : (ent?.space_id_2 ? String(ent.space_id_2) : '')
-      const payerLimit = typeof ent?.payer_limit === 'number' ? ent.payer_limit : String(ent?.plan || '') === 'pro' ? 2 : 1
-
-      for (const sid of requestedSpaceIds) {
-        if (allowed1 && sid === allowed1) continue
-        if (allowed2 && sid === allowed2) {
-          if (payerLimit < 2) {
-            return jsonResponse(403, { ok: false, error: 'payer_limit', message: 'Upgrade required for Profil 2.' })
-          }
-          continue
-        }
-        return jsonResponse(403, { ok: false, error: 'invalid_space', message: 'Invalid profile scope.' })
-      }
+    const payerCheck = assertPayerScope(ent, requestedSpaceIds)
+    if (!payerCheck.ok) {
+      return jsonResponse(403, { ok: false, error: 'payer_limit', message: 'Upgrade required for Profil 2.' })
     }
 
     // Query bills

@@ -58,22 +58,108 @@ export async function loadEntitlements(supabase, userId) {
       .maybeSingle()
 
     const row = data || null
-    const plan = normalizePlan(row?.plan)
-    const payerLimit = typeof row?.payer_limit === 'number' ? row.payer_limit : plan === 'pro' ? 2 : 1
-    const exportsEnabled = Boolean(row?.exports_enabled)
+    const rawPlan = normalizePlan(row?.plan)
+    const status = String(row?.status || 'active').trim().toLowerCase()
+    const trialEndsAt = row?.trial_ends_at ? new Date(row.trial_ends_at) : null
+    const graceUntil = row?.grace_until ? new Date(row.grace_until) : null
+    const exportOnly = Boolean(row?.export_only)
+    const deletedAt = row?.deleted_at ? new Date(row.deleted_at) : null
+    const exportUntil = row?.export_until ? new Date(row.export_until) : null
+    const deleteAt = row?.delete_at ? new Date(row.delete_at) : null
+    const downgradeCleanupAt = row?.downgrade_cleanup_at ? new Date(row.downgrade_cleanup_at) : null
+    const now = new Date()
+
+    let effectivePlan = rawPlan
+    let exportsEnabled = Boolean(row?.exports_enabled)
+    let allowed = true
+    let lifecycleStatus = 'active'
+
+    if (deletedAt || status === 'deleted' || (deleteAt && now >= deleteAt)) {
+      allowed = false
+      lifecycleStatus = 'deleted'
+    } else if (status === 'export_only') {
+      lifecycleStatus = 'export_only'
+      exportsEnabled = true
+      effectivePlan = 'free'
+    } else if (status === 'grace_period') {
+      lifecycleStatus = 'grace_period'
+      effectivePlan = 'free'
+      exportsEnabled = false
+      allowed = true
+    } else if (status === 'downgrade_vec_to_moje') {
+      lifecycleStatus = 'downgrade_vec_to_moje'
+      effectivePlan = 'basic'
+      exportsEnabled = false
+    } else if (status === 'cancelled_all') {
+      allowed = false
+      lifecycleStatus = 'cancelled_all'
+    } else if (status === 'payment_failed' || status === 'subscription_cancelled' || status === 'trial_expired') {
+      allowed = false
+      lifecycleStatus = 'cancelled_all'
+    } else if (status === 'trial_active') {
+      if (trialEndsAt && now > trialEndsAt) {
+        allowed = false
+        lifecycleStatus = 'cancelled_all'
+      } else {
+        effectivePlan = 'basic'
+        exportsEnabled = false
+        lifecycleStatus = 'active_moje'
+      }
+    } else {
+      lifecycleStatus = rawPlan === 'pro' ? 'active_vec' : rawPlan === 'basic' ? 'active_moje' : 'active_moje'
+    }
+
+    if (!allowed) {
+      effectivePlan = 'free'
+      exportsEnabled = false
+    }
+
+    const payerLimit = typeof row?.payer_limit === 'number' ? row.payer_limit : effectivePlan === 'pro' ? 2 : 1
     const spaceId = row?.space_id ? String(row.space_id) : null
     const spaceId2 = row?.space_id2 ? String(row.space_id2) : (row?.space_id_2 ? String(row.space_id_2) : null)
-    return { plan, payerLimit, exportsEnabled, spaceId, spaceId2 }
+    return {
+      plan: effectivePlan,
+      rawPlan,
+      status,
+      lifecycleStatus,
+      payerLimit,
+      exportsEnabled,
+      spaceId,
+      spaceId2,
+      exportUntil: exportUntil ? exportUntil.toISOString() : null,
+      deleteAt: deleteAt ? deleteAt.toISOString() : null,
+      downgradeCleanupAt: downgradeCleanupAt ? downgradeCleanupAt.toISOString() : null,
+    }
   } catch {
-    return { plan: 'free', payerLimit: 1, exportsEnabled: false, spaceId: null, spaceId2: null }
+    return {
+      plan: 'free',
+      rawPlan: 'free',
+      status: 'active',
+      lifecycleStatus: 'active_moje',
+      payerLimit: 1,
+      exportsEnabled: false,
+      spaceId: null,
+      spaceId2: null,
+      exportUntil: null,
+      deleteAt: null,
+      downgradeCleanupAt: null,
+    }
   }
 }
 
-export function isExportAllowed(plan, exportKind) {
-  // Must match the app's UI copy:
-  // Free: JSON only • Basic: CSV + JSON • Pro: CSV + PDF + ZIP + JSON
-  if (exportKind === 'json') return true
-  if (exportKind === 'csv') return plan === 'basic' || plan === 'pro'
+export function isExportAllowed(entitlements, exportKind, options = {}) {
+  const e = entitlements || {}
+  const lifecycle = String(e.lifecycleStatus || e.status || 'active').trim().toLowerCase()
+  const plan = String(e.plan || 'free')
+
+  if (lifecycle === 'deleted' || lifecycle === 'grace_period') return false
+  if (lifecycle === 'export_only') return true
+  if (lifecycle === 'downgrade_vec_to_moje') {
+    return exportKind === 'zip' && options?.allowDowngradeExport === true
+  }
+
+  if (exportKind === 'json') return plan === 'pro'
+  if (exportKind === 'csv') return plan === 'pro'
   if (exportKind === 'pdf') return plan === 'pro'
   if (exportKind === 'zip') return plan === 'pro'
   return false
@@ -87,7 +173,9 @@ export function assertPayerScope(entitlements, spaceIdOrIds) {
   if (!ids.length) return { ok: true }
 
   const e = entitlements || {}
-  const payerLimit = Number(e.payerLimit || 1)
+  const lifecycle = String(e.lifecycleStatus || e.status || 'active').trim().toLowerCase()
+  const exportOverride = lifecycle === 'export_only'
+  const payerLimit = exportOverride ? 2 : Number(e.payerLimit || 1)
   const allowed1 = e.spaceId ? String(e.spaceId) : ''
   const allowed2 = e.spaceId2 ? String(e.spaceId2) : ''
 

@@ -92,15 +92,30 @@ export async function handler(event) {
     const userId = authInfo.userId
 
     const ent = await loadEntitlements(supabase, userId)
-    if (!isExportAllowed(ent.plan, 'zip')) {
+    const lifecycle = String(ent.lifecycleStatus || ent.status || 'active').trim().toLowerCase()
+    const requestedScope = spaceIds.length ? spaceIds : (spaceId ? [spaceId] : [])
+
+    const allowDowngradeExport = lifecycle === 'downgrade_vec_to_moje'
+    if (!isExportAllowed(ent, 'zip', { allowDowngradeExport })) {
       return jsonResponse(403, { ok: false, error: 'upgrade_required', code: 'upgrade_required' })
     }
-    const payerCheck = assertPayerScope(ent, spaceIds.length ? spaceIds : spaceId)
-    if (!payerCheck.ok) {
-      return jsonResponse(403, { ok: false, error: 'upgrade_required', code: payerCheck.code || 'upgrade_required' })
+
+    if (allowDowngradeExport) {
+      const allowedSpaceId2 = ent.spaceId2 ? String(ent.spaceId2) : ''
+      const onlySpace2 = requestedScope.length
+        ? requestedScope.every((sid) => String(sid || '').trim() === allowedSpaceId2)
+        : false
+      if (!onlySpace2) {
+        return jsonResponse(403, { ok: false, error: 'upgrade_required', code: 'upgrade_required' })
+      }
+    } else {
+      const payerCheck = assertPayerScope(ent, requestedScope)
+      if (!payerCheck.ok) {
+        return jsonResponse(403, { ok: false, error: 'upgrade_required', code: payerCheck.code || 'upgrade_required' })
+      }
     }
 
-    const requestedSpaceIds = spaceIds.length ? spaceIds : (spaceId ? [spaceId] : [])
+    const requestedSpaceIds = requestedScope
 
     let billList = []
     let hasAttachmentsOnly = false

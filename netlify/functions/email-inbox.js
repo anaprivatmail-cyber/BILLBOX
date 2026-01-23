@@ -26,6 +26,23 @@ function safeString(v) {
   return t ? t : null
 }
 
+function truncateText(value, max = 4000) {
+  const s = String(value || '')
+  if (!s) return null
+  return s.length > max ? s.slice(0, max) : s
+}
+
+function stripHtml(input) {
+  const raw = String(input || '')
+  if (!raw) return ''
+  return raw
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 function parseTokenFromRecipient(addr) {
   const s = String(addr || '').trim()
   if (!s) return null
@@ -78,7 +95,10 @@ function collectAttachments(payload) {
   for (const a of raw) {
     if (!a) continue
     const filename = safeString(a.filename || a.name || a.fileName || a.originalname) || 'document'
-    const mimeType = safeString(a.contentType || a.type || a.mimeType || a.mimetype) || 'application/octet-stream'
+    let mimeType = safeString(a.contentType || a.type || a.mimeType || a.mimetype) || 'application/octet-stream'
+    if (mimeType === 'application/octet-stream' && /\.csv$/i.test(filename)) {
+      mimeType = 'text/csv'
+    }
     const base64 = safeString(a.content || a.data || a.base64 || a.content_base64)
     const sizeBytes =
       typeof a.size === 'number'
@@ -105,6 +125,7 @@ function isAllowedMime(mime) {
   const m = String(mime || '').toLowerCase()
   if (m.startsWith('image/')) return true
   if (m === 'application/pdf') return true
+  if (m === 'text/csv' || m === 'application/csv' || m === 'application/vnd.ms-excel') return true
   return false
 }
 
@@ -175,6 +196,25 @@ export async function handler(event) {
     const sender = safeString(payload.from || payload.sender || payload.envelope?.from)
     const subject = safeString(payload.subject)
 
+    const bodyTextRaw =
+      payload.text ||
+      payload.text_body ||
+      payload.textBody ||
+      payload['stripped-text'] ||
+      payload['stripped_text'] ||
+      payload.body ||
+      ''
+    const bodyHtmlRaw =
+      payload.html ||
+      payload.html_body ||
+      payload.htmlBody ||
+      payload['stripped-html'] ||
+      payload['stripped_html'] ||
+      ''
+    const bodyText = truncateText(bodyTextRaw)
+    const bodyHtml = truncateText(bodyHtmlRaw)
+    const bodyFromHtml = bodyHtml ? truncateText(stripHtml(bodyHtml), 4000) : null
+
     const receivedAt = safeString(payload.date || payload.received_at || payload.receivedAt)
     const receivedIso = receivedAt && !Number.isNaN(new Date(receivedAt).getTime()) ? new Date(receivedAt).toISOString() : new Date().toISOString()
 
@@ -217,6 +257,8 @@ export async function handler(event) {
               provider: payload.provider || 'brevo',
               message_id: payload.messageId || payload['message-id'] || payload.message_id || null,
               recipients,
+              body_text: bodyText || bodyFromHtml || null,
+              body_html: bodyHtml || null,
             },
           })
           .select('id')

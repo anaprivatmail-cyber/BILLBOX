@@ -27,6 +27,7 @@ export const phraseDict = {
     'Category: utilities': 'Utilities',
     'Category: telecom': 'Telecom',
     'Category: grocery': 'Groceries',
+    'Category: clothing': 'Clothing',
     'Category: fuel': 'Fuel',
     'Category: subscription': 'Subscription',
     'Category: service': 'Service',
@@ -48,6 +49,71 @@ export const phraseDict = {
     Due: 'Due',
     Saved: 'Saved',
     'Saved to archive': 'Saved to archive',
+    'Active profile is not available. Please try again.': 'Active profile is not available. Please try again.',
+    'Could not read the selected file.': 'Could not read the selected file.',
+    Current: 'Current',
+    'Exports are scoped to the selected profile scope and the filters above.':
+      'Exports are scoped to the selected profile scope and the filters above.',
+    'File too large for OCR.': 'File too large for OCR.',
+    'IBAN could not be validated. Please check it.': 'IBAN could not be validated. Please check it.',
+    'IBAN was too long — extra characters were ignored.': 'IBAN was too long — extra characters were ignored.',
+    'Invalid reference': 'Invalid reference',
+    'Load into manual input': 'Load into manual input',
+    'No captured text yet. Scan a QR or import a file first.': 'No captured text yet. Scan a QR or import a file first.',
+    'OCR monthly quota exceeded.': 'OCR monthly quota exceeded.',
+    'OCR not available on your plan.': 'OCR not available on your plan.',
+    'You reached the monthly OCR limit. Continue after {date} or upgrade.': 'You reached the monthly OCR limit. Continue after {date} or upgrade.',
+    'Free trial expired. Choose a plan to continue.': 'Free trial expired. Choose a plan to continue.',
+    'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
+      'AI assistance is currently limited. It will be available in the next period or with an upgrade.',
+    'Export is available on Več.': 'Export is available on Več.',
+    'Payment failed. Premium features are disabled until payment is completed.':
+      'Payment failed. Premium features are disabled until payment is completed.',
+    'Subscription cancelled. Premium features are disabled.': 'Subscription cancelled. Premium features are disabled.',
+    'Subscription cancelled. Bills remain available until {date}.':
+      'Subscription cancelled. Bills remain available until {date}.',
+    'Subscription will end on {date}. Premium features remain available until then.':
+      'Subscription will end on {date}. Premium features remain available until then.',
+    'Export-only access is active. Other premium features are disabled.':
+      'Export-only access is active. Other premium features are disabled.',
+    'Export-only access is active until {date}. Export your bills before then.':
+      'Export-only access is active until {date}. Export your bills before then.',
+    'Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.':
+      'Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.',
+    'Attachments will be permanently deleted on {date}.':
+      'Attachments will be permanently deleted on {date}.',
+    'Account is marked as deleted. Premium features are disabled.':
+      'Account is marked as deleted. Premium features are disabled.',
+    'Free trial is active until {date}.': 'Free trial is active until {date}.',
+    'Profile scope': 'Profile scope',
+    'Email inbox': 'Email inbox',
+    'Your BillBox inbox': 'Your BillBox inbox',
+    'Copy address': 'Copy address',
+    Copied: 'Copied',
+    'Inbox address not configured.': 'Inbox address not configured.',
+    'Loading inbox…': 'Loading inbox…',
+    'This does not look like a bill.': 'This does not look like a bill.',
+    'Not an invoice': 'Not an invoice',
+    'Could not copy.': 'Could not copy.',
+    'Reference looked like an IBAN fragment; it was ignored.': 'Reference looked like an IBAN fragment; it was ignored.',
+    'Reference looks like an IBAN. Please move it to the IBAN field.':
+      'Reference looks like an IBAN. Please move it to the IBAN field.',
+    'Reference matched the IBAN; it was ignored.': 'Reference matched the IBAN; it was ignored.',
+    'Reference must not be the same as IBAN.': 'Reference must not be the same as IBAN.',
+    'Required for accounting.': 'Required for accounting.',
+    'Selected profile scope is unavailable.': 'Selected profile scope is unavailable.',
+    'This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.':
+      'This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.',
+    'This looks like an IBAN, not a reference.': 'This looks like an IBAN, not a reference.',
+    'This PDF has no selectable text (scanned). Please import an image instead.':
+      'This PDF has no selectable text (scanned). Please import an image instead.',
+    'Remove {slotLabel}?': 'Remove {slotLabel}?',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.':
+      'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.':
+      'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.',
+    'No fields found': 'No fields found',
+    'OCR failed ({status})': 'OCR failed ({status})',
   },
   sl: {
     'Bill is paid (save to archive)': 'Račun je plačan (shrani v arhiv)',
@@ -77,11 +143,12 @@ export const phraseDict = {
     'Category: utilities': 'Komunalne storitve',
     'Category: telecom': 'Telekomunikacije',
     'Category: grocery': 'Živila',
+    'Category: clothing': 'Oblačila',
     'Category: fuel': 'Gorivo',
     'Category: subscription': 'Naročnina',
     'Category: service': 'Storitev',
     'Category: warranty product': 'Garancija (izdelek)',
-    'Category: other': 'Drugo',
+    'Category: other': 'Razno',
     'Required field': 'Obvezno polje',
     'Please fill all required fields.': 'Izpolni vsa obvezna polja.',
     Debug: 'Razhroščevanje',
@@ -222,8 +289,8 @@ export const phraseDict = {
 
     '• 10 bills / month': '• 10 računov / mesec',
     '• 3 OCR / month': '• 3 OCR / mesec',
+    '• 50 OCR / month': '• 50 OCR / mesec',
     '• 100 OCR / month': '• 100 OCR / mesec',
-    '• 300 OCR / month': '• 300 OCR / mesec',
     '• Export your data': '• Izvozi svoje podatke',
     '• OCR import (higher limit)': '• OCR uvoz (višja omejitev)',
     '• Export (CSV / PDF / ZIP / JSON)': '• Izvoz (CSV / PDF / ZIP / JSON)',
@@ -775,6 +842,72 @@ export const phraseDict = {
     'Scan failed': 'Skeniranje ni uspelo',
     'Scan first': 'Najprej skeniraj',
     'Scan the document to prefill the bill.': 'Skeniraj dokument, da se račun samodejno predizpolni.',
+    'Active profile is not available. Please try again.': 'Aktivni profil ni na voljo. Poskusi znova.',
+    'Could not read the selected file.': 'Izbranega dokumenta ni bilo mogoče prebrati.',
+    Current: 'Trenutno',
+    'Exports are scoped to the selected profile scope and the filters above.':
+      'Izvozi veljajo za izbrani profil in zgornje filtre.',
+    'File too large for OCR.': 'Datoteka je prevelika za OCR.',
+    'IBAN could not be validated. Please check it.': 'IBAN ni bilo mogoče preveriti. Preveri ga.',
+    'IBAN was too long — extra characters were ignored.': 'IBAN je bil predolg — odvečni znaki so bili prezrti.',
+    'Invalid reference': 'Neveljaven sklic',
+    'Load into manual input': 'Naloži v ročni vnos',
+    'No captured text yet. Scan a QR or import a file first.':
+      'Zajetega besedila še ni. Najprej skeniraj QR ali uvozi datoteko.',
+    'OCR monthly quota exceeded.': 'Mesečna kvota OCR je presežena.',
+    'OCR not available on your plan.': 'OCR ni na voljo v tvojem paketu.',
+    'You reached the monthly OCR limit. Continue after {date} or upgrade.': 'Dosegli ste mesečni limit branja računov. Nadaljujte po {date} ali nadgradite paket.',
+    'Free trial expired. Choose a plan to continue.': 'Brezplačni preizkus je potekel. Za nadaljevanje izberi paket.',
+    'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
+      'AI pomoč je trenutno omejena. Na voljo bo v naslednjem obdobju ali z nadgradnjo.',
+    'Export is available on Več.': 'Izvoz je na voljo v paketu Več.',
+    'Payment failed. Premium features are disabled until payment is completed.':
+      'Plačilo ni uspelo. Premium funkcije so onemogočene do uspešnega plačila.',
+    'Subscription cancelled. Premium features are disabled.': 'Naročnina je preklicana. Premium funkcije so onemogočene.',
+    'Subscription cancelled. Bills remain available until {date}.':
+      'Naročnina je prekinjena. Računi so še dostopni do {date}.',
+    'Subscription will end on {date}. Premium features remain available until then.':
+      'Naročnina se konča {date}. Premium funkcije ostanejo na voljo do takrat.',
+    'Export-only access is active. Other premium features are disabled.':
+      'Dostop samo za izvoz je aktiven. Ostale premium funkcije so onemogočene.',
+    'Export-only access is active until {date}. Export your bills before then.':
+      'Do {date} lahko izvoziš račune. Po tem bodo dokumenti odstranjeni.',
+    'Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.':
+      'Priloge drugega profila bodo odstranjene dne {date}. Do takrat jih lahko izvoziš ali ponovno aktiviraš paket Več.',
+    'Attachments will be permanently deleted on {date}.':
+      'Priloge bodo trajno odstranjene dne {date}.',
+    'Account is marked as deleted. Premium features are disabled.':
+      'Račun je označen kot izbrisan. Premium funkcije so onemogočene.',
+    'Free trial is active until {date}.': 'Brezplačni preizkus je aktiven do {date}.',
+    'Profile scope': 'Obseg profila',
+    'Email inbox': 'E-poštni inbox',
+    'Your BillBox inbox': 'Tvoj BillBox inbox',
+    'Copy address': 'Kopiraj naslov',
+    Copied: 'Kopirano',
+    'Inbox address not configured.': 'Inbox naslov ni nastavljen.',
+    'Loading inbox…': 'Nalagam inbox…',
+    'This does not look like a bill.': 'To ne izgleda kot račun.',
+    'Not an invoice': 'Ni račun',
+    'Could not copy.': 'Ni bilo mogoče kopirati.',
+    'Reference looked like an IBAN fragment; it was ignored.': 'Sklic je izgledal kot del IBAN-a; bil je prezrt.',
+    'Reference looks like an IBAN. Please move it to the IBAN field.':
+      'Sklic izgleda kot IBAN. Premakni ga v polje IBAN.',
+    'Reference matched the IBAN; it was ignored.': 'Sklic se je ujemal z IBAN-om; bil je prezrt.',
+    'Reference must not be the same as IBAN.': 'Sklic ne sme biti enak IBAN-u.',
+    'Required for accounting.': 'Obvezno za računovodstvo.',
+    'Selected profile scope is unavailable.': 'Izbrani profil ni na voljo.',
+    'This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.':
+      'To je natančen podatek, ki smo ga prejeli iz QR/OCR. Lahko ga označiš in kopiraš ali naložiš v ročni izluščevalnik zgoraj.',
+    'This looks like an IBAN, not a reference.': 'To izgleda kot IBAN, ne kot sklic.',
+    'This PDF has no selectable text (scanned). Please import an image instead.':
+      'Ta PDF nima izbirnega besedila (skenirano). Namesto tega uvozi sliko.',
+    'Remove {slotLabel}?': 'Odstranim {slotLabel}?',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.':
+      'To bo izbrisalo vse račune, garancije, opomnike in priloge za {displayName}.\n\nPo odstranitvi bo {slotLabel} ponovno ustvarjen in znova te bomo prosili za ime.',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.':
+      'To bo izbrisalo vse račune, garancije, opomnike in priloge za {displayName}.\n\nTega ni mogoče razveljaviti.',
+    'No fields found': 'Ni najdenih polj.',
+    'OCR failed ({status})': 'OCR ni uspel ({status}).',
   },
 
   hr: {
@@ -805,11 +938,12 @@ export const phraseDict = {
     'Category: utilities': 'Komunalije',
     'Category: telecom': 'Telekomunikacije',
     'Category: grocery': 'Namirnice',
+    'Category: clothing': 'Odjeća',
     'Category: fuel': 'Gorivo',
     'Category: subscription': 'Pretplata',
     'Category: service': 'Usluga',
     'Category: warranty product': 'Jamstvo (proizvod)',
-    'Category: other': 'Ostalo',
+    'Category: other': 'Razno',
     'Required field': 'Obavezno polje',
     'Please fill all required fields.': 'Ispuni sva obavezna polja.',
     Debug: 'Debug',
@@ -916,8 +1050,8 @@ export const phraseDict = {
 
     '• 10 bills / month': '• 10 računa / mjesec',
     '• 3 OCR / month': '• 3 OCR / mjesec',
+    '• 50 OCR / month': '• 50 OCR / mjesec',
     '• 100 OCR / month': '• 100 OCR / mjesec',
-    '• 300 OCR / month': '• 300 OCR / mjesec',
     '• Export your data': '• Izvezi svoje podatke',
     '• OCR import (higher limit)': '• OCR uvoz (viši limit)',
     '• Export (CSV / PDF / ZIP / JSON)': '• Izvoz (CSV / PDF / ZIP / JSON)',
@@ -1502,6 +1636,73 @@ export const phraseDict = {
     'Scan failed': 'Skeniranje nije uspjelo',
     'Scan first': 'Prvo skeniraj',
     'Scan the document to prefill the bill.': 'Skeniraj dokument kako bi se račun unaprijed ispunio.',
+    'Active profile is not available. Please try again.': 'Aktivni profil nije dostupan. Pokušaj ponovno.',
+    'Could not read the selected file.': 'Odabranu datoteku nije moguće pročitati.',
+    Current: 'Trenutno',
+    'Exports are scoped to the selected profile scope and the filters above.':
+      'Izvozi se odnose na odabrani profil i gore navedene filtre.',
+    'File too large for OCR.': 'Datoteka je prevelika za OCR.',
+    'IBAN could not be validated. Please check it.': 'IBAN nije moguće provjeriti. Provjeri ga.',
+    'IBAN was too long — extra characters were ignored.': 'IBAN je bio predug — dodatni znakovi su zanemareni.',
+    'Invalid reference': 'Neispravan poziv na broj',
+    'Load into manual input': 'Učitaj u ručni unos',
+    'No captured text yet. Scan a QR or import a file first.':
+      'Još nema zabilježenog teksta. Prvo skeniraj QR ili uvezi datoteku.',
+    'OCR monthly quota exceeded.': 'Mjesečna OCR kvota je prekoračena.',
+    'OCR not available on your plan.': 'OCR nije dostupan u tvom paketu.',
+    'You reached the monthly OCR limit. Continue after {date} or upgrade.':
+      'Dosegnut je mjesečni limit OCR-a. Nastavi nakon {date} ili nadogradi paket.',
+    'Free trial expired. Choose a plan to continue.': 'Besplatno probno razdoblje je isteklo. Za nastavak odaberi paket.',
+    'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
+      'AI pomoć je trenutno ograničena. Bit će dostupna u sljedećem razdoblju ili uz nadogradnju.',
+    'Export is available on Več.': 'Izvoz je dostupan u paketu Več.',
+    'Payment failed. Premium features are disabled until payment is completed.':
+      'Plaćanje nije uspjelo. Premium značajke su onemogućene do uspješnog plaćanja.',
+    'Subscription cancelled. Premium features are disabled.': 'Pretplata je otkazana. Premium značajke su onemogućene.',
+    'Subscription cancelled. Bills remain available until {date}.':
+      'Pretplata je prekinuta. Računi su dostupni do {date}.',
+    'Subscription will end on {date}. Premium features remain available until then.':
+      'Pretplata završava {date}. Premium značajke ostaju dostupne do tada.',
+    'Export-only access is active. Other premium features are disabled.':
+      'Dostupnost samo za izvoz je aktivna. Ostale premium značajke su onemogućene.',
+    'Export-only access is active until {date}. Export your bills before then.':
+      'Do {date} možeš izvesti račune. Nakon toga će dokumenti biti uklonjeni.',
+    'Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.':
+      'Privici drugog profila bit će uklonjeni {date}. Možeš ih izvesti ili ponovno aktivirati paket Več.',
+    'Attachments will be permanently deleted on {date}.':
+      'Privici će biti trajno obrisani {date}.',
+    'Account is marked as deleted. Premium features are disabled.':
+      'Račun je označen kao obrisan. Premium značajke su onemogućene.',
+    'Free trial is active until {date}.': 'Besplatni probni period traje do {date}.',
+    'Profile scope': 'Opseg profila',
+    'Email inbox': 'Email inbox',
+    'Your BillBox inbox': 'Tvoj BillBox inbox',
+    'Copy address': 'Kopiraj adresu',
+    Copied: 'Kopirano',
+    'Inbox address not configured.': 'Inbox adresa nije podešena.',
+    'Loading inbox…': 'Učitavam inbox…',
+    'This does not look like a bill.': 'Ovo ne izgleda kao račun.',
+    'Not an invoice': 'Nije račun',
+    'Could not copy.': 'Nije moguće kopirati.',
+    'Reference looked like an IBAN fragment; it was ignored.': 'Poziv na broj je izgledao kao dio IBAN-a; zanemaren je.',
+    'Reference looks like an IBAN. Please move it to the IBAN field.':
+      'Poziv na broj izgleda kao IBAN. Premjesti ga u polje IBAN.',
+    'Reference matched the IBAN; it was ignored.': 'Poziv na broj se poklapao s IBAN-om; zanemaren je.',
+    'Reference must not be the same as IBAN.': 'Poziv na broj ne smije biti isti kao IBAN.',
+    'Required for accounting.': 'Obavezno za računovodstvo.',
+    'Selected profile scope is unavailable.': 'Odabrani profil nije dostupan.',
+    'This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.':
+      'Ovo je točan sadržaj koji smo dobili iz QR/OCR-a. Možeš ga označiti i kopirati ili učitati u ručni ekstraktor iznad.',
+    'This looks like an IBAN, not a reference.': 'Ovo izgleda kao IBAN, ne kao poziv na broj.',
+    'This PDF has no selectable text (scanned). Please import an image instead.':
+      'Ovaj PDF nema selektivnog teksta (skeniran). Umjesto toga uvezi sliku.',
+    'Remove {slotLabel}?': 'Ukloniti {slotLabel}?',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.':
+      'Ovo će obrisati sve račune, jamstva, podsjetnike i privitke za {displayName}.\n\nNakon uklanjanja, {slotLabel} će se ponovno kreirati i bit ćeš ponovno upitan za naziv.',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.':
+      'Ovo će obrisati sve račune, jamstva, podsjetnike i privitke za {displayName}.\n\nOvo se ne može poništiti.',
+    'No fields found': 'Nisu pronađena polja.',
+    'OCR failed ({status})': 'OCR nije uspio ({status}).',
   },
 
   it: {
@@ -1532,6 +1733,7 @@ export const phraseDict = {
     'Category: utilities': 'Utenze',
     'Category: telecom': 'Telecomunicazioni',
     'Category: grocery': 'Alimentari',
+    'Category: clothing': 'Abbigliamento',
     'Category: fuel': 'Carburante',
     'Category: subscription': 'Abbonamento',
     'Category: service': 'Servizio',
@@ -1644,8 +1846,8 @@ export const phraseDict = {
 
     '• 10 bills / month': '• 10 bollette / mese',
     '• 3 OCR / month': '• 3 OCR / mese',
+    '• 50 OCR / month': '• 50 OCR / mese',
     '• 100 OCR / month': '• 100 OCR / mese',
-    '• 300 OCR / month': '• 300 OCR / mese',
     '• Export your data': '• Esporta i tuoi dati',
     '• OCR import (higher limit)': '• Import OCR (limite più alto)',
     '• Export (CSV / PDF / ZIP / JSON)': '• Esportazione (CSV / PDF / ZIP / JSON)',
@@ -2233,6 +2435,74 @@ export const phraseDict = {
     'Scan failed': 'Scansione non riuscita',
     'Scan first': 'Scansiona prima',
     'Scan the document to prefill the bill.': 'Scansiona il documento per precompilare la bolletta.',
+    'Active profile is not available. Please try again.': 'Il profilo attivo non è disponibile. Riprova.',
+    'Could not read the selected file.': 'Impossibile leggere il file selezionato.',
+    Current: 'Attuale',
+    'Exports are scoped to the selected profile scope and the filters above.':
+      'Gli export si applicano al profilo selezionato e ai filtri sopra.',
+    'File too large for OCR.': 'File troppo grande per l\'OCR.',
+    'IBAN could not be validated. Please check it.': 'Impossibile verificare l\'IBAN. Controllalo.',
+    'IBAN was too long — extra characters were ignored.': 'L\'IBAN era troppo lungo — i caratteri extra sono stati ignorati.',
+    'Invalid reference': 'Riferimento non valido',
+    'Load into manual input': 'Carica nell\'inserimento manuale',
+    'No captured text yet. Scan a QR or import a file first.':
+      'Nessun testo acquisito. Scansiona un QR o importa prima un file.',
+    'OCR monthly quota exceeded.': 'Quota OCR mensile superata.',
+    'OCR not available on your plan.': 'OCR non disponibile nel tuo piano.',
+    'You reached the monthly OCR limit. Continue after {date} or upgrade.':
+      'Hai raggiunto il limite mensile di OCR. Continua dopo {date} o aggiorna il piano.',
+    'Free trial expired. Choose a plan to continue.': 'La prova gratuita è terminata. Scegli un piano per continuare.',
+    'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
+      'L\'assistenza AI è attualmente limitata. Sarà disponibile nel prossimo periodo o con un upgrade.',
+    'Export is available on Več.': 'L\'export è disponibile nel piano Več.',
+    'Payment failed. Premium features are disabled until payment is completed.':
+      'Pagamento non riuscito. Le funzioni premium sono disabilitate finché il pagamento non viene completato.',
+    'Subscription cancelled. Premium features are disabled.':
+      'Abbonamento annullato. Le funzioni premium sono disabilitate.',
+    'Subscription cancelled. Bills remain available until {date}.':
+      'L\'abbonamento è stato annullato. Le bollette sono disponibili fino al {date}.',
+    'Subscription will end on {date}. Premium features remain available until then.':
+      'L\'abbonamento terminerà il {date}. Le funzioni premium rimangono disponibili fino ad allora.',
+    'Export-only access is active. Other premium features are disabled.':
+      'L\'accesso solo export è attivo. Le altre funzioni premium sono disabilitate.',
+    'Export-only access is active until {date}. Export your bills before then.':
+      'Fino al {date} puoi esportare le bollette. Dopo verranno rimossi i documenti.',
+    'Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.':
+      'Gli allegati del secondo profilo saranno rimossi il {date}. Puoi esportarli o riattivare Več.',
+    'Attachments will be permanently deleted on {date}.':
+      'Gli allegati verranno eliminati definitivamente il {date}.',
+    'Account is marked as deleted. Premium features are disabled.':
+      'L\'account è contrassegnato come eliminato. Le funzioni premium sono disabilitate.',
+    'Free trial is active until {date}.': 'La prova gratuita è attiva fino al {date}.',
+    'Profile scope': 'Ambito del profilo',
+    'Email inbox': 'Inbox email',
+    'Your BillBox inbox': 'Il tuo inbox BillBox',
+    'Copy address': 'Copia indirizzo',
+    Copied: 'Copiato',
+    'Inbox address not configured.': 'Indirizzo inbox non configurato.',
+    'Loading inbox…': 'Caricamento inbox…',
+    'This does not look like a bill.': 'Questo non sembra una bolletta.',
+    'Not an invoice': 'Non è una bolletta',
+    'Could not copy.': 'Impossibile copiare.',
+    'Reference looked like an IBAN fragment; it was ignored.': 'Il riferimento sembrava un frammento di IBAN; è stato ignorato.',
+    'Reference looks like an IBAN. Please move it to the IBAN field.':
+      'Il riferimento sembra un IBAN. Spostalo nel campo IBAN.',
+    'Reference matched the IBAN; it was ignored.': 'Il riferimento coincideva con l\'IBAN; è stato ignorato.',
+    'Reference must not be the same as IBAN.': 'Il riferimento non deve essere uguale all\'IBAN.',
+    'Required for accounting.': 'Obbligatorio per la contabilità.',
+    'Selected profile scope is unavailable.': 'Il profilo selezionato non è disponibile.',
+    'This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.':
+      'Questo è il contenuto esatto ricevuto da QR/OCR. Puoi selezionarlo e copiarlo o caricarlo nell\'estrattore manuale sopra.',
+    'This looks like an IBAN, not a reference.': 'Questo sembra un IBAN, non un riferimento.',
+    'This PDF has no selectable text (scanned). Please import an image instead.':
+      'Questo PDF non ha testo selezionabile (scansionato). Importa invece un\'immagine.',
+    'Remove {slotLabel}?': 'Rimuovere {slotLabel}?',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.':
+      'Questo eliminerà tutte le bollette, garanzie, promemoria e allegati per {displayName}.\n\nDopo la rimozione, {slotLabel} verrà ricreato e ti verrà chiesto di rinominarlo.',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.':
+      'Questo eliminerà tutte le bollette, garanzie, promemoria e allegati per {displayName}.\n\nOperazione irreversibile.',
+    'No fields found': 'Nessun campo trovato.',
+    'OCR failed ({status})': 'OCR non riuscito ({status}).',
   },
 
   de: {
@@ -2263,6 +2533,7 @@ export const phraseDict = {
     'Category: utilities': 'Versorgungsleistungen',
     'Category: telecom': 'Telekommunikation',
     'Category: grocery': 'Lebensmittel',
+    'Category: clothing': 'Kleidung',
     'Category: fuel': 'Kraftstoff',
     'Category: subscription': 'Abonnement',
     'Category: service': 'Dienstleistung',
@@ -2390,8 +2661,8 @@ export const phraseDict = {
     upgrade_required_message: 'Zum Fortfahren bitte Plan upgraden.',
     '• 10 bills / month': '• 10 Rechnungen / Monat',
     '• 3 OCR / month': '• 3 OCR / Monat',
+    '• 50 OCR / month': '• 50 OCR / Monat',
     '• 100 OCR / month': '• 100 OCR / Monat',
-    '• 300 OCR / month': '• 300 OCR / Monat',
     '• Export your data': '• Daten exportieren',
     '• OCR import (higher limit)': '• OCR-Import (höheres Limit)',
     '• Export (CSV / PDF / ZIP / JSON)': '• Export (CSV / PDF / ZIP / JSON)',
@@ -2962,5 +3233,74 @@ export const phraseDict = {
     'Profiles': 'Profile',
     'Profil 2 is available on Pro.': 'Profil 2 ist in Pro verfügbar.',
     'ZIP saved': 'ZIP gespeichert',
+    'Active profile is not available. Please try again.': 'Aktives Profil ist nicht verfügbar. Bitte versuche es erneut.',
+    'Could not read the selected file.': 'Ausgewählte Datei konnte nicht gelesen werden.',
+    Current: 'Aktuell',
+    'Exports are scoped to the selected profile scope and the filters above.':
+      'Exporte gelten für das ausgewählte Profil und die oben stehenden Filter.',
+    'File too large for OCR.': 'Datei ist zu groß für OCR.',
+    'IBAN could not be validated. Please check it.': 'IBAN konnte nicht verifiziert werden. Bitte prüfe ihn.',
+    'IBAN was too long — extra characters were ignored.': 'IBAN war zu lang — zusätzliche Zeichen wurden ignoriert.',
+    'Invalid reference': 'Ungültige Referenz',
+    'Load into manual input': 'In die manuelle Eingabe laden',
+    'No captured text yet. Scan a QR or import a file first.':
+      'Noch kein erfasster Text. Scanne zuerst einen QR oder importiere eine Datei.',
+    'OCR monthly quota exceeded.': 'Monatliches OCR-Kontingent überschritten.',
+    'OCR not available on your plan.': 'OCR ist in deinem Tarif nicht verfügbar.',
+    'You reached the monthly OCR limit. Continue after {date} or upgrade.':
+      'Monatliches OCR-Limit erreicht. Weiter nach {date} oder Upgrade.',
+    'Free trial expired. Choose a plan to continue.': 'Kostenlose Testphase abgelaufen. Bitte wähle einen Tarif, um fortzufahren.',
+    'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
+      'KI‑Hilfe ist derzeit eingeschränkt. Sie ist im nächsten Zeitraum oder mit Upgrade verfügbar.',
+    'Export is available on Več.': 'Export ist im Paket Več verfügbar.',
+    'Payment failed. Premium features are disabled until payment is completed.':
+      'Zahlung fehlgeschlagen. Premium‑Funktionen sind deaktiviert, bis die Zahlung abgeschlossen ist.',
+    'Subscription cancelled. Premium features are disabled.':
+      'Abo gekündigt. Premium‑Funktionen sind deaktiviert.',
+    'Subscription cancelled. Bills remain available until {date}.':
+      'Das Abo wurde beendet. Rechnungen sind bis {date} verfügbar.',
+    'Subscription will end on {date}. Premium features remain available until then.':
+      'Abo endet am {date}. Premium‑Funktionen bleiben bis dahin verfügbar.',
+    'Export-only access is active. Other premium features are disabled.':
+      'Nur‑Export‑Zugriff ist aktiv. Andere Premium‑Funktionen sind deaktiviert.',
+    'Export-only access is active until {date}. Export your bills before then.':
+      'Bis {date} kannst du Rechnungen exportieren. Danach werden die Dokumente entfernt.',
+    'Attachments of the second profile will be removed on {date}. You can export them or reactivate Več.':
+      'Anhänge des zweiten Profils werden am {date} entfernt. Du kannst sie exportieren oder Več reaktivieren.',
+    'Attachments will be permanently deleted on {date}.':
+      'Anhänge werden am {date} dauerhaft gelöscht.',
+    'Account is marked as deleted. Premium features are disabled.':
+      'Konto ist als gelöscht markiert. Premium‑Funktionen sind deaktiviert.',
+    'Free trial is active until {date}.': 'Kostenlose Testphase aktiv bis {date}.',
+    'Profile scope': 'Profilbereich',
+    'Email inbox': 'E-Mail-Posteingang',
+    'Your BillBox inbox': 'Dein BillBox-Posteingang',
+    'Copy address': 'Adresse kopieren',
+    Copied: 'Kopiert',
+    'Inbox address not configured.': 'Posteingang ist nicht konfiguriert.',
+    'Loading inbox…': 'Posteingang wird geladen…',
+    'This does not look like a bill.': 'Das sieht nicht wie eine Rechnung aus.',
+    'Not an invoice': 'Keine Rechnung',
+    'Could not copy.': 'Kopieren nicht möglich.',
+    'Reference looked like an IBAN fragment; it was ignored.':
+      'Die Referenz sah wie ein IBAN-Fragment aus; sie wurde ignoriert.',
+    'Reference looks like an IBAN. Please move it to the IBAN field.':
+      'Die Referenz sieht wie eine IBAN aus. Bitte in das IBAN-Feld verschieben.',
+    'Reference matched the IBAN; it was ignored.': 'Die Referenz entsprach der IBAN; sie wurde ignoriert.',
+    'Reference must not be the same as IBAN.': 'Die Referenz darf nicht gleich der IBAN sein.',
+    'Required for accounting.': 'Erforderlich für die Buchhaltung.',
+    'Selected profile scope is unavailable.': 'Ausgewähltes Profil ist nicht verfügbar.',
+    'This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.':
+      'Dies ist der genaue Inhalt, den wir aus QR/OCR erhalten haben. Du kannst ihn markieren und kopieren oder oben in den manuellen Extraktor laden.',
+    'This looks like an IBAN, not a reference.': 'Das sieht nach einer IBAN aus, nicht nach einer Referenz.',
+    'This PDF has no selectable text (scanned). Please import an image instead.':
+      'Dieses PDF enthält keinen auswählbaren Text (gescannt). Bitte importiere stattdessen ein Bild.',
+    'Remove {slotLabel}?': '{slotLabel} entfernen?',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.':
+      'Dies löscht alle Rechnungen, Garantien, Erinnerungen und Anhänge für {displayName}.\n\nNach dem Entfernen wird {slotLabel} neu erstellt und du wirst erneut zur Benennung aufgefordert.',
+    'This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.':
+      'Dies löscht alle Rechnungen, Garantien, Erinnerungen und Anhänge für {displayName}.\n\nDas kann nicht rückgängig gemacht werden.',
+    'No fields found': 'Keine Felder gefunden.',
+    'OCR failed ({status})': 'OCR fehlgeschlagen ({status}).',
   },
 } as const

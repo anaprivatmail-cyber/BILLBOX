@@ -12,3 +12,7 @@
 [build.environment]
   NODE_VERSION = "20"
   NPM_VERSION = "10"
+
+[[scheduled]]
+  path = "/.netlify/functions/cleanup-entitlements"
+  schedule = "0 3 * * *"

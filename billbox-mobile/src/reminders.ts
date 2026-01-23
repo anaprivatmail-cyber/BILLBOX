@@ -145,7 +145,7 @@ export async function scheduleBillReminders(bill: any, daysBefore = [3, 0], spac
         content: {
           title: tr('Bill reminder'),
           body: tr('{supplier} is due {date}.', { supplier: bill.supplier || tr('Bill'), date: bill.due_date }),
-          data: { bill_id: bill.id, space_id: spaceId || null, playSound: days === 0 },
+          data: { bill_id: bill.id, space_id: spaceId || null, playSound: true },
           categoryIdentifier: 'bill',
         },
         trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
@@ -171,7 +171,7 @@ export async function scheduleGroupedPaymentReminder(dateISO: string, count: num
       content: {
         title: tr('Payment plan'),
         body: tr('You planned payments for {count} bill(s) on {date}.', { count, date: dateISO }),
-        data: { space_id: spaceId || null },
+        data: { space_id: spaceId || null, playSound: true },
       },
       trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
     })
@@ -206,7 +206,7 @@ export async function cancelBillReminders(billId: string, spaceId?: string | nul
   await cancelIds(billKey(billId, spaceId))
 }
 
-export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30], spaceId?: string | null): Promise<void> {
+export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30, 7], spaceId?: string | null): Promise<void> {
   if (!(await getRemindersEnabled())) return
   if (!warranty?.id || !warranty?.expires_at) return
   const ok = await requestPermissionIfNeeded()
@@ -227,7 +227,7 @@ export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30]
         content: {
           title: tr('Warranty reminder'),
           body: tr('{item} expires {date}.', { item: warranty.item_name || tr('Warranty'), date: warranty.expires_at }),
-          data: { warranty_id: warranty.id, space_id: spaceId || null },
+          data: { warranty_id: warranty.id, space_id: spaceId || null, playSound: true },
         },
         trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
       })

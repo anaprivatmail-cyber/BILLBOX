@@ -1,7 +1,47 @@
 // Minimal Netlify Function: AI assistant endpoint.
 // IMPORTANT: Keep API keys on the server only.
 
+const { createClient } = require('@supabase/supabase-js')
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+
+function getSupabaseAdmin() {
+  const url = process.env.SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) return null
+  return createClient(url, serviceKey, { auth: { persistSession: false } })
+}
+
+async function getUserFromAuthHeader(event) {
+  const header = event.headers.authorization || event.headers.Authorization || ''
+  if (!header || typeof header !== 'string') return { userId: null, error: 'missing_authorization' }
+  const parts = header.split(' ')
+  if (parts.length !== 2 || parts[0] !== 'Bearer' || !parts[1]) {
+    return { userId: null, error: 'invalid_authorization' }
+  }
+  const token = parts[1]
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return { userId: null, error: 'supabase_admin_not_configured' }
+  try {
+    const { data, error } = await supabase.auth.getUser(token)
+    if (error || !data?.user?.id) return { userId: null, error: 'invalid_token' }
+    return { userId: data.user.id, error: null, supabase }
+  } catch {
+    return { userId: null, error: 'invalid_token' }
+  }
+}
+
+function isSameMonth(a, b) {
+  if (!a || !b) return false
+  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth()
+}
+
+function nextMonthStartUtc(date) {
+  const d = date instanceof Date ? date : new Date(date)
+  const year = d.getUTCFullYear()
+  const month = d.getUTCMonth()
+  return new Date(Date.UTC(year, month + 1, 1, 0, 0, 0, 0))
+}
 
 function resolveModel() {
   const raw = process.env.OPENAI_MODEL
@@ -34,6 +74,11 @@ exports.handler = async (event) => {
     return json(405, { error: 'Method not allowed' })
   }
 
+  const authInfo = await getUserFromAuthHeader(event)
+  if (!authInfo.userId || !authInfo.supabase) {
+    return json(401, { error: 'auth_required', message: 'AI is not available right now.' })
+  }
+
   const payload = safeParse(event.body) || {}
   const message = String(payload.message || '').trim()
   const context = payload.context || {}
@@ -49,6 +94,84 @@ exports.handler = async (event) => {
       message: 'AI is not configured for this environment.',
       suggestedActions: [],
     })
+  }
+
+  // Enforce per-plan AI limits before calling the model.
+  try {
+    const supabase = authInfo.supabase
+    const userId = authInfo.userId
+
+    const { data } = await supabase
+      .from('entitlements')
+      .select('*')
+      .eq('user_id', userId)
+      .order('active_until', { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle()
+
+    const ent = data || { plan: 'free', status: 'active' }
+    const status = String(ent.status || 'active').trim().toLowerCase()
+    const rawPlan = String(ent.plan || 'free')
+    const trialEndsAt = ent.trial_ends_at ? new Date(ent.trial_ends_at) : null
+    const graceUntil = ent.grace_until ? new Date(ent.grace_until) : null
+    const exportOnly = Boolean(ent.export_only)
+    const deletedAt = ent.deleted_at ? new Date(ent.deleted_at) : null
+    const deleteAt = ent.delete_at ? new Date(ent.delete_at) : null
+    const now = new Date()
+
+    let effectivePlan = rawPlan === 'basic' || rawPlan === 'pro' ? rawPlan : 'free'
+    let allowed = true
+
+    if (deletedAt || status === 'deleted' || (deleteAt && now >= deleteAt)) {
+      allowed = false
+    } else if (exportOnly || status === 'export_only') {
+      allowed = false
+    } else if (status === 'grace_period') {
+      allowed = false
+    } else if (status === 'cancelled_all') {
+      allowed = false
+    } else if (status === 'payment_failed' || status === 'subscription_cancelled' || status === 'trial_expired') {
+      allowed = false
+    } else if (status === 'active_vec') {
+      effectivePlan = 'pro'
+    } else if (status === 'active_moje' || status === 'downgrade_vec_to_moje') {
+      effectivePlan = 'basic'
+    } else if (status === 'trial_active') {
+      if (trialEndsAt && now > trialEndsAt) {
+        return json(403, { error: 'trial_expired', message: 'Trial expired.' })
+      }
+      effectivePlan = 'basic'
+    } else if (status === 'grace_period' && graceUntil && now > graceUntil) {
+      allowed = false
+    }
+
+    if (!allowed) {
+      return json(403, { error: 'ai_not_allowed', message: 'AI is not available for this plan.' })
+    }
+
+    const defaultQuota = effectivePlan === 'pro' ? 100 : effectivePlan === 'basic' ? 30 : 0
+    const quota = typeof ent.ai_quota_monthly === 'number' ? ent.ai_quota_monthly : defaultQuota
+    if (!quota) {
+      return json(403, { error: 'ai_not_allowed', message: 'AI is not available for this plan.' })
+    }
+
+    const updatedAt = ent.ai_updated_at ? new Date(ent.ai_updated_at) : (ent.updated_at ? new Date(ent.updated_at) : null)
+    let used = typeof ent.ai_used_this_month === 'number' ? ent.ai_used_this_month : 0
+    if (!isSameMonth(now, updatedAt)) used = 0
+
+    if (used >= quota) {
+      const resetAt = nextMonthStartUtc(updatedAt || now).toISOString()
+      return json(403, { error: 'ai_quota_exceeded', message: 'AI quota exceeded.', resetAt })
+    }
+
+    // Increment usage before calling model to avoid race conditions.
+    const newUsed = used + 1
+    await supabase
+      .from('entitlements')
+      .update({ ai_used_this_month: newUsed, ai_updated_at: now.toISOString(), updated_at: now.toISOString() })
+      .eq('user_id', userId)
+  } catch {
+    return json(503, { error: 'ai_unavailable', message: 'AI is not available right now.' })
   }
 
   // Keep output short and structured.

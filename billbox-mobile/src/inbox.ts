@@ -14,6 +14,7 @@ export type InboxItem = {
   status: InboxStatus
   extractedFields?: any
   notes?: string
+  meta?: any
 }
 
 const LS_INBOX_PREFIX = 'billbox.inbox.'
@@ -52,6 +53,7 @@ export async function addToInbox(input: {
   status?: InboxStatus
   extractedFields?: any
   notes?: string
+  meta?: any
 }): Promise<InboxItem> {
   const items = await load(input.spaceId)
   const now = new Date().toISOString()
@@ -89,6 +91,7 @@ export async function addToInbox(input: {
     status: input.status || 'new',
     extractedFields: input.extractedFields,
     notes: input.notes,
+    meta: input.meta,
   }
   items.unshift(next)
   await save(input.spaceId, items)
