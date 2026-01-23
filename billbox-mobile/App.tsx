@@ -7583,6 +7583,17 @@ function HomeScreen() {
   const [upgradeModalVisible, setUpgradeModalVisible] = useState(false)
   const [namePrompt, setNamePrompt] = useState<null | { messageKey: string }>(null)
 
+  const languageOptions = useMemo(() => {
+    const opts: Array<{ code: Lang; key: string }> = [
+      { code: 'sl', key: 'slovenian' },
+      { code: 'en', key: 'english' },
+      { code: 'hr', key: 'croatian' },
+      { code: 'it', key: 'italian' },
+      { code: 'de', key: 'german' },
+    ]
+    return opts.map((o) => ({ ...o, label: t(lang, o.key) }))
+  }, [lang])
+
   const showNamePrompt = useCallback((messageKey: string) => {
     setNamePrompt({ messageKey })
   }, [])
@@ -7913,6 +7924,25 @@ function HomeScreen() {
                 </View>
               </View>
             ) : null}
+
+            <View style={{ marginTop: themeSpacing.md }}>
+              <Text style={styles.mutedText}>{tr('Language')}</Text>
+              <View style={[styles.languageGrid, { marginTop: themeSpacing.xs }]}>
+                {languageOptions.map((opt) => {
+                  const active = lang === opt.code
+                  return (
+                    <Pressable
+                      key={opt.code}
+                      onPress={() => setLang(opt.code)}
+                      style={[styles.languageOption, active && styles.languageOptionSelected]}
+                      accessibilityLabel={opt.label}
+                    >
+                      <Text style={[styles.languageOptionLabel, active && styles.languageOptionLabelSelected]}>{opt.label}</Text>
+                    </Pressable>
+                  )
+                })}
+              </View>
+            </View>
           </View>
         </Surface>
         <View style={styles.gridWrap}>
