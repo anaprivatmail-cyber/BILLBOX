@@ -528,6 +528,11 @@ function isPayerSpaceId(spaceId: string | null | undefined): boolean {
   return spaceId === 'personal' || spaceId === 'personal2'
 }
 
+function createRequestId(prefix = 'req'): string {
+  const rand = Math.random().toString(36).slice(2, 10)
+  return `${prefix}-${Date.now().toString(36)}-${rand}`
+}
+
 async function removeAllLocalKeysWithPrefix(prefix: string): Promise<void> {
   try {
     const keys = await AsyncStorage.getAllKeys()
@@ -7571,6 +7576,21 @@ function HomeScreen() {
     setNamePrompt({ messageKey })
   }, [])
 
+  const safeNavigate = useCallback((routeName: string, params?: any) => {
+    const requestId = createRequestId('nav')
+    if (routeName === 'Warranties') {
+      console.info(`[nav] route=Guarantees requestId=${requestId}`)
+    }
+    const root = navigation.getRootState?.()
+    const routeNames = root?.routeNames || []
+    if (!routeNames.includes(routeName)) {
+      console.warn(`[nav] missing route=${routeName} requestId=${requestId}`)
+      Alert.alert(tr('Error'), tr('Open failed'))
+      return
+    }
+    navigation.navigate(routeName, params)
+  }, [navigation])
+
   const payerOptions = useMemo(() => {
     const base = spacesCtx.spaces
       .filter((s) => isPayerSpaceId(s.id))
@@ -7894,6 +7914,10 @@ function HomeScreen() {
                   return
                 }
                 const params = (tile as any)?.params
+                if (tile.target === 'Warranties') {
+                  safeNavigate(tile.target, params)
+                  return
+                }
                 navigation.navigate(tile.target, params)
               }}
               style={({ pressed }) => [styles.statCardPressable, pressed && styles.statCardPressed]}
@@ -8074,6 +8098,49 @@ function HomeScreen() {
   )
 }
 
+class WarrantiesErrorBoundary extends React.Component<{ requestId: string; children: React.ReactNode }, { hasError: boolean; error: any }> {
+  constructor(props: any) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error: any, info: any) {
+    const { requestId } = this.props
+    console.error(`[warranties] route=Guarantees requestId=${requestId}`, error, info)
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children
+    return (
+      <Screen scroll={false}>
+        <View style={styles.centered}>
+          <Text style={styles.mutedText}>{tr('Unknown error')}</Text>
+          <Text style={styles.mutedText}>{tr('Request ID')}: {this.props.requestId}</Text>
+        </View>
+      </Screen>
+    )
+  }
+}
+
+function WarrantiesScreenWithBoundary() {
+  const requestIdRef = useRef<string>(createRequestId('warranties'))
+  const requestId = requestIdRef.current
+
+  useEffect(() => {
+    console.info(`[nav] route=Guarantees requestId=${requestId}`)
+  }, [requestId])
+
+  return (
+    <WarrantiesErrorBoundary requestId={requestId}>
+      <WarrantiesScreen />
+    </WarrantiesErrorBoundary>
+  )
+}
+
 function WarrantiesScreen() {
   const supabase = useMemo(() => getSupabase(), [])
   const navigation = useNavigation<any>()
@@ -8168,6 +8235,15 @@ function WarrantiesScreen() {
     if ([y, m, d].some((part) => Number.isNaN(part))) return null
     return new Date(y, m - 1, d)
   }, [])
+
+  const getWarrantyStatus = useCallback((w: Warranty): 'active' | 'expiring' | 'expired' | 'no_expiry' => {
+    const expires = parseDateValue((w as any)?.expires_at)
+    if (!expires) return 'no_expiry'
+    const days = Math.floor((expires.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+    if (days < 0) return 'expired'
+    if (days <= 30) return 'expiring'
+    return 'active'
+  }, [parseDateValue, today])
 
   const computeDurationMonthsBetween = useCallback(
     (purchaseIso?: string | null, expiresIso?: string | null): string => {
@@ -11890,7 +11966,7 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
             <>
               <Stack.Screen name="BillBox" component={MainTabs} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Inbox" component={InboxScreen} options={{ headerShown: coerceBool(false) }} />
-              <Stack.Screen name="Warranties" component={WarrantiesScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Warranties" component={WarrantiesScreenWithBoundary} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Reports" component={ReportsScreen} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Exports" component={ExportsRedirectScreen} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Payments" component={PaymentsScreen} options={{ headerShown: coerceBool(false) }} />
