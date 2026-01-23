@@ -1893,14 +1893,6 @@ async function performOCRFromBase64(
     throw err
   }
 
-  const preflight = await preflightOcrQuota()
-  if (!preflight.ok) {
-    const err: any = new Error(tr('OCR monthly quota exceeded.'))
-    err.code = 'ocr_quota_exceeded'
-    err.resetAt = preflight.resetAt || null
-    throw err
-  }
-
   const ct = (contentType && String(contentType).trim()) || 'application/octet-stream'
   const raw = String(base64 || '').trim()
   const approxBytes = Math.floor((raw.length * 3) / 4)
