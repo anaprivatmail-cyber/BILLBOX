@@ -6048,15 +6048,6 @@ function BillsListScreen() {
     return 'active'
   }, [parseDateValue, today])
 
-  const getWarrantyStatus = useCallback((w: Warranty): 'active' | 'expiring' | 'expired' | 'no_expiry' => {
-    const expires = parseDateValue((w as any)?.expires_at)
-    if (!expires) return 'no_expiry'
-    const days = Math.floor((expires.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
-    if (days < 0) return 'expired'
-    if (days <= 30) return 'expiring'
-    return 'active'
-  }, [parseDateValue, today])
-
   const getBillDate = useCallback((bill: Bill, mode: typeof dateMode): string => {
     if (mode === 'invoice') return (bill as any).invoice_date || bill.created_at
     if (mode === 'created') return bill.created_at
