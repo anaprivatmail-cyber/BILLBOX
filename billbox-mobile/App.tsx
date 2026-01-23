@@ -4786,53 +4786,38 @@ function ScanBillScreen() {
       if (!isIOS) setShowDuePicker(false)
       return
     }
-      const requestId = (e as any)?.requestId
-      if (requestId) setDebugRequestId(requestId)
-      const withRequestId = (base: string) => requestId ? `${base}\n${tr('Request ID')}: ${requestId}` : base
     const y = selectedDate.getFullYear()
     const m = String(selectedDate.getMonth() + 1).padStart(2, '0')
     const d = String(selectedDate.getDate()).padStart(2, '0')
-        const text = withRequestId(tr('Please sign in again.'))
-        setOcrError(text)
-        Alert.alert(tr('OCR unavailable'), text)
-        setDebugStatus('ERROR')
+    setDueDate(`${y}-${m}-${d}`)
     if (!isIOS) setShowDuePicker(false)
   }
 
   const handleSaveBill = async (overrideArchiveOnly?: boolean, opts?: { showAlert?: boolean }): Promise<boolean> => {
-        setOcrError(withRequestId(tr('OCR not available on your plan.')))
     const showAlert = opts?.showAlert !== false
-        setDebugStatus('ERROR')
     const supplierTrimmed = supplier.trim()
     const invoiceTrimmed = invoiceNumber.trim()
     const currencyTrimmed = currency.trim().toUpperCase()
     const amt = Number(String(amountStr).replace(',', '.'))
-        setOcrError(withRequestId(tr('OCR monthly quota exceeded.')))
+    const isArchiveOnly = overrideArchiveOnly || archiveOnly
+
+    const missing = {
       supplier: !supplierTrimmed,
-        setDebugStatus('ERROR')
       invoice: !invoiceTrimmed,
       amount: !Number.isFinite(amt) || amt <= 0,
       currency: !currencyTrimmed || currencyTrimmed === 'UNKNOWN',
     }
-        const text = withRequestId(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
-        setOcrError(text)
-        Alert.alert(tr('OCR failed'), text)
-        setDebugStatus('ERROR')
-      Alert.alert(tr('Missing data'), tr('Please fill all required fields.'))
-      return false
-    }
 
-        const text = withRequestId(tr('File too large for OCR.'))
-        setOcrError(text)
-        Alert.alert(tr('OCR failed'), text)
-        setDebugStatus('ERROR')
+    if (!isArchiveOnly) {
+      if (missing.supplier || missing.amount || missing.currency) {
+        Alert.alert(tr('Missing data'), tr('Please fill all required fields.'))
+        return false
+      }
+      if (!Number.isFinite(amt) || amt <= 0) {
         Alert.alert(tr('Invalid amount'), tr('Provide a numeric amount greater than 0.'))
         return false
       }
     }
-      const text = withRequestId(String(msg || tr('OCR failed')))
-      setOcrError(text)
-      Alert.alert(tr('OCR failed'), text)
     const trimmedDue = dueDate.trim()
     const effectiveDueDate = trimmedDue || new Date().toISOString().slice(0, 10)
 
@@ -6053,6 +6038,24 @@ function BillsListScreen() {
     if ([y, m, d].some((part) => Number.isNaN(part))) return null
     return new Date(y, m - 1, d)
   }, [])
+
+  const getWarrantyStatus = useCallback((w: Warranty): 'active' | 'expiring' | 'expired' | 'no_expiry' => {
+    const expires = parseDateValue((w as any)?.expires_at)
+    if (!expires) return 'no_expiry'
+    const days = Math.floor((expires.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+    if (days < 0) return 'expired'
+    if (days <= 30) return 'expiring'
+    return 'active'
+  }, [parseDateValue, today])
+
+  const getWarrantyStatus = useCallback((w: Warranty): 'active' | 'expiring' | 'expired' | 'no_expiry' => {
+    const expires = parseDateValue((w as any)?.expires_at)
+    if (!expires) return 'no_expiry'
+    const days = Math.floor((expires.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+    if (days < 0) return 'expired'
+    if (days <= 30) return 'expiring'
+    return 'active'
+  }, [parseDateValue, today])
 
   const getBillDate = useCallback((bill: Bill, mode: typeof dateMode): string => {
     if (mode === 'invoice') return (bill as any).invoice_date || bill.created_at
@@ -7955,7 +7958,7 @@ function WarrantiesScreen() {
   const [warrantyDateMode, setWarrantyDateMode] = useState<'purchase' | 'created'>('purchase')
   const [warrantyDateFrom, setWarrantyDateFrom] = useState('')
   const [warrantyDateTo, setWarrantyDateTo] = useState('')
-  const [warrantyView, setWarrantyView] = useState<'active' | 'archived'>('active')
+  const [warrantyStatusFilter, setWarrantyStatusFilter] = useState<'active' | 'expiring' | 'expired'>('active')
   const [selectedBillId, setSelectedBillId] = useState<string | null>(null)
   const [billQuery, setBillQuery] = useState('')
   const [linkedBillOpen, setLinkedBillOpen] = useState(false)
@@ -8176,13 +8179,13 @@ function WarrantiesScreen() {
     const from = parseDateValue(warrantyDateFrom.trim())
     const to = parseDateValue(warrantyDateTo.trim())
     const list = (items || []).filter((w) => {
-      const expires = parseDateValue((w as any)?.expires_at)
-      const isExpired = expires ? expires.getTime() < today.getTime() : false
-
-      if (warrantyView === 'archived') {
-        if (!isExpired) return false
+      const status = getWarrantyStatus(w)
+      if (warrantyStatusFilter === 'expired') {
+        if (status !== 'expired') return false
+      } else if (warrantyStatusFilter === 'expiring') {
+        if (status !== 'expiring') return false
       } else {
-        if (isExpired) return false
+        if (status !== 'active' && status !== 'no_expiry') return false
       }
 
       const dateField = warrantyDateMode === 'created' ? (w as any)?.created_at : (w as any)?.purchase_date
@@ -8222,7 +8225,8 @@ function WarrantiesScreen() {
     warrantyDateTo,
     warrantyItemFilter,
     warrantySupplierFilter,
-    warrantyView,
+    warrantyStatusFilter,
+    getWarrantyStatus,
   ])
 
   async function addManual() {
@@ -8318,7 +8322,7 @@ function WarrantiesScreen() {
     setSelectedBillId(null)
     setBillQuery('')
     setWarrantyQuery('')
-    setWarrantyView('active')
+    setWarrantyStatusFilter('active')
     setPendingAttachment(null)
     Alert.alert(tr('Saved'), supabase ? tr('Warranty saved') : tr('Saved locally (Not synced)'))
   }
@@ -8499,7 +8503,7 @@ function WarrantiesScreen() {
         <TabTopBar titleKey="Warranties" />
 
         <Surface elevated>
-          <SectionHeader title="New warranty" />
+          <SectionHeader title={tr('New warranty')} />
           {spacesCtx.spaces.length > 1 ? (
             <View style={{ marginBottom: themeSpacing.sm }}>
               <Text style={styles.mutedText}>{tr('Profile')}</Text>
@@ -8513,7 +8517,7 @@ function WarrantiesScreen() {
           ) : null}
 
           <Disclosure
-            title="Linked bill (required)"
+            title={tr('Linked bill (required)')}
             open={linkedBillOpen}
             onOpenChange={setLinkedBillOpen}
             highlightOnOpen
@@ -8526,7 +8530,7 @@ function WarrantiesScreen() {
               ) : null}
 
               <AppInput
-                placeholder="Find bill by supplier"
+                placeholder={tr('Find bill by supplier')}
                 value={billQuery}
                 onChangeText={setBillQuery}
                 style={{ marginTop: themeSpacing.xs, marginBottom: themeSpacing.xs }}
@@ -8545,7 +8549,7 @@ function WarrantiesScreen() {
                   translate={false}
                 />
               ) : (
-                <InlineInfo tone="warning" iconName="alert-circle-outline" message="Select a bill before saving the warranty." />
+                <InlineInfo tone="warning" iconName="alert-circle-outline" message={tr('Select a linked bill, then press “Save warranty”.')} />
               )}
 
               <View style={{ gap: themeSpacing.xs }}>
@@ -8580,13 +8584,13 @@ function WarrantiesScreen() {
           <View style={{ gap: themeSpacing.sm }}>
             <View style={{ flexDirection: 'row', gap: themeSpacing.sm }}>
               <AppInput
-                placeholder="Item name"
+                placeholder={tr('Item name')}
                 value={itemName}
                 onChangeText={setItemName}
                 style={{ flex: 1 }}
               />
               <AppInput
-                placeholder="Supplier"
+                placeholder={tr('Supplier')}
                 value={supplier}
                 onChangeText={setSupplier}
                 style={{ flex: 1 }}
@@ -8595,7 +8599,7 @@ function WarrantiesScreen() {
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm }}>
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
                 <AppButton
-                  label="Purchase"
+                  label={tr('Purchase')}
                   variant="secondary"
                   iconName="calendar-outline"
                   onPress={() => openDatePicker('purchase')}
@@ -8605,7 +8609,7 @@ function WarrantiesScreen() {
 
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
                 <AppButton
-                  label="Expires"
+                  label={tr('Expires')}
                   variant="secondary"
                   iconName="calendar-outline"
                   disabled={Boolean(durationMonths.trim() && purchaseDate.trim())}
@@ -8617,13 +8621,13 @@ function WarrantiesScreen() {
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
                 {purchaseDate.trim() && expiresAt.trim() ? (
                   <AppInput
-                    placeholder="Duration (months)"
+                    placeholder={tr('Duration (months)')}
                     value={computedDurationMonths}
                     editable={false}
                   />
                 ) : (
                   <AppInput
-                    placeholder="Duration (months)"
+                    placeholder={tr('Duration (months)')}
                     value={durationMonths}
                     onChangeText={(value) => {
                       setDurationMonths(value)
@@ -8647,8 +8651,8 @@ function WarrantiesScreen() {
                   }}
                 />
                 <View style={styles.datePickerActions}>
-                  <AppButton label="Cancel" variant="ghost" onPress={cancelIosPicker} />
-                  <AppButton label="Done" onPress={confirmIosPicker} />
+                  <AppButton label={tr('Cancel')} variant="ghost" onPress={cancelIosPicker} />
+                  <AppButton label={tr('Done')} onPress={confirmIosPicker} />
                 </View>
               </View>
             ) : null}
@@ -8656,7 +8660,7 @@ function WarrantiesScreen() {
 
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
             <AppButton
-              label="Attach image"
+              label={tr('Attach image')}
               variant="secondary"
               iconName="image-outline"
               onPress={async ()=>{
@@ -8758,16 +8762,20 @@ function WarrantiesScreen() {
                       value={warrantyDateMode}
                       onChange={(v) => setWarrantyDateMode(v as any)}
                       options={[
-                        { value: 'purchase', label: 'Purchase' },
-                        { value: 'created', label: 'Created' },
+                        { value: 'purchase', label: tr('Purchase') },
+                        { value: 'created', label: tr('Created') },
                       ]}
                       style={{ flex: 1, minWidth: 220 }}
                     />
-                    <AppButton
-                      label={warrantyView === 'archived' ? tr('Active') : tr('Archived')}
-                      variant="secondary"
-                      iconName={warrantyView === 'archived' ? 'shield-checkmark-outline' : 'archive-outline'}
-                      onPress={() => setWarrantyView((prev) => (prev === 'archived' ? 'active' : 'archived'))}
+                    <SegmentedControl
+                      value={warrantyStatusFilter}
+                      onChange={(v) => setWarrantyStatusFilter(v as any)}
+                      options={[
+                        { value: 'active', label: tr('Active') },
+                        { value: 'expiring', label: tr('Expiring') },
+                        { value: 'expired', label: tr('Expired') },
+                      ]}
+                      style={{ flex: 1, minWidth: 220 }}
                     />
                   </View>
 
@@ -8793,11 +8801,15 @@ function WarrantiesScreen() {
               }
               ListEmptyComponent={
                 <EmptyState
-                  title={warrantyView === 'archived' ? tr('No expired warranties') : tr('No warranties found')}
-                  message={warrantyView === 'archived' ? tr('Expired warranties will appear here.') : tr('Adjust your search or add a new warranty.')}
-                  actionLabel={warrantyView === 'archived' ? undefined : tr('Add warranty')}
-                  onActionPress={warrantyView === 'archived' ? undefined : scrollToNewWarranty}
-                  iconName={warrantyView === 'archived' ? 'archive-outline' : 'shield-checkmark-outline'}
+                  title={warrantyStatusFilter === 'expired'
+                    ? tr('No expired warranties')
+                    : (warrantyStatusFilter === 'expiring' ? tr('No expiring warranties') : tr('No warranties found'))}
+                  message={warrantyStatusFilter === 'expired'
+                    ? tr('Expired warranties will appear here.')
+                    : (warrantyStatusFilter === 'expiring' ? tr('Expiring warranties will appear here.') : tr('Adjust your search or add a new warranty.'))}
+                  actionLabel={warrantyStatusFilter === 'expired' ? undefined : tr('Add warranty')}
+                  onActionPress={warrantyStatusFilter === 'expired' ? undefined : scrollToNewWarranty}
+                  iconName={warrantyStatusFilter === 'expired' ? 'archive-outline' : 'shield-checkmark-outline'}
                 />
               }
               renderItem={({ item }) => (
@@ -8819,16 +8831,19 @@ function WarrantiesScreen() {
                       </Text>
                     </View>
                     {(() => {
-                      const exp = parseDateValue((item as any)?.expires_at)
-                      const expired = exp ? exp.getTime() < today.getTime() : false
-                      const label = expired ? 'Expired' : item.expires_at ? 'Active' : 'No expiry'
-                      const tone = expired ? 'warning' : item.expires_at ? 'info' : 'neutral'
+                      const status = getWarrantyStatus(item)
+                      const label = status === 'expired'
+                        ? tr('Expired')
+                        : (status === 'expiring' ? tr('Expiring') : (status === 'active' ? tr('Active') : tr('No expiry')))
+                      const tone = status === 'expired' || status === 'expiring'
+                        ? 'warning'
+                        : (status === 'active' ? 'info' : 'neutral')
                       return <Badge label={label} tone={tone as any} />
                     })()}
                   </View>
                   <View style={styles.billActionsRow}>
                     <AppButton
-                      label="Details"
+                      label={tr('Details')}
                       variant="secondary"
                       iconName="information-circle-outline"
                       onPress={()=> navigation.navigate('Warranty Details', { warrantyId: item.id })}
@@ -8840,7 +8855,7 @@ function WarrantiesScreen() {
                       onPress={() => openWarrantyAttachment(item)}
                     />
                     <AppButton
-                      label="Delete"
+                      label={tr('Delete')}
                       variant="ghost"
                       iconName="trash-outline"
                       onPress={()=>del(item.id)}
@@ -8991,7 +9006,7 @@ function WarrantyDetailsScreen() {
         />
 
         <Surface elevated>
-          <SectionHeader title="Warranty summary" />
+          <SectionHeader title={tr('Warranty summary')} />
           <Text style={styles.bodyText}>
             {warranty.supplier || '—'} • {tr('Purchase')}: {warranty.purchase_date || '—'} • {tr('Expires')}: {warranty.expires_at || '—'}{computedDurationMonths ? ` • ${tr('Duration (months)')}: ${computedDurationMonths}` : ''}
           </Text>
@@ -8999,7 +9014,7 @@ function WarrantyDetailsScreen() {
 
         {(linkedBill || (warranty as any)?.bill_id) ? (
           <Surface elevated>
-            <SectionHeader title="Linked bill" />
+            <SectionHeader title={tr('Linked bill')} />
             {linkedBill ? (
               <>
                 <Text style={styles.bodyText}>{linkedBill.supplier} • {linkedBill.currency} {linkedBill.amount.toFixed(2)} • {tr('Due')} {linkedBill.due_date}</Text>
@@ -11280,7 +11295,6 @@ function SettingsScreen() {
   const [renameVisible, setRenameVisible] = useState(false)
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
-  const [legalVisible, setLegalVisible] = useState(false)
 
   const languageOptions = useMemo(() => {
     const opts: Array<{ code: Lang; key: string }> = [
@@ -11517,7 +11531,7 @@ function SettingsScreen() {
             label={tr('Open legal pages')}
             variant="secondary"
             iconName="document-text-outline"
-            onPress={() => setLegalVisible(true)}
+            onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/legal`)}
           />
         </Surface>
 
@@ -11527,37 +11541,6 @@ function SettingsScreen() {
           <Text style={styles.bodyText}>{tr('Website:')} {diagnostics.website}</Text>
           <Text style={styles.bodyText}>{tr('Info email:')} {diagnostics.infoEmail}</Text>
         </Surface>
-
-        <Modal visible={legalVisible} transparent animationType="fade" onRequestClose={() => setLegalVisible(false)}>
-          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
-            <Surface elevated style={styles.iosPickerSheet}>
-              <SectionHeader title={tr('Legal')} />
-              <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-                <AppButton
-                  label={tr('Privacy policy')}
-                  variant="secondary"
-                  iconName="document-text-outline"
-                  onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/privacy`)}
-                />
-                <AppButton
-                  label={tr('Terms of use')}
-                  variant="secondary"
-                  iconName="list-outline"
-                  onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/terms`)}
-                />
-                <AppButton
-                  label={tr('Delete account & data')}
-                  variant="secondary"
-                  iconName="trash-outline"
-                  onPress={() => Linking.openURL(`${PUBLIC_SITE_URL}/account-deletion`)}
-                />
-              </View>
-              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
-                <AppButton label={tr('Close')} variant="ghost" iconName="close-outline" onPress={() => setLegalVisible(false)} />
-              </View>
-            </Surface>
-          </View>
-        </Modal>
 
         <Modal visible={renameVisible} transparent animationType="fade" onRequestClose={() => setRenameVisible(false)}>
           <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
