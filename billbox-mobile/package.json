@@ -26,6 +26,7 @@
     "@supabase/supabase-js": "^2.89.0",
     "@zxing/browser": "^0.1.5",
     "expo": "~54.0.31",
+    "expo-build-properties": "~0.14.0",
     "expo-camera": "~17.0.10",
     "expo-clipboard": "~7.0.0",
     "expo-document-picker": "~14.0.8",
