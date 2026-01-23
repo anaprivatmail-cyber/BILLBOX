@@ -1,5 +1,6 @@
 import { GoogleAuth } from 'google-auth-library'
 import { createClient } from '@supabase/supabase-js'
+import crypto from 'crypto'
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
@@ -45,6 +46,74 @@ function safeParseJson(s) {
   } catch {
     return null
   }
+}
+
+function makeRequestId() {
+  try {
+    return crypto.randomUUID()
+  } catch {
+    return `ocr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+  }
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function shouldRetryAi(statusOrCode) {
+  if (statusOrCode === 'timeout') return true
+  if (typeof statusOrCode !== 'number') return false
+  if (statusOrCode === 429) return true
+  if (statusOrCode >= 500 && statusOrCode <= 599) return true
+  return false
+}
+
+async function callOpenAiWithRetry({ body, requestId, tag }) {
+  const delays = [500, 1500]
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    let controller
+    let timeout
+    try {
+      controller = new AbortController()
+      timeout = setTimeout(() => controller.abort(), 20000)
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body,
+        signal: controller.signal,
+      })
+      clearTimeout(timeout)
+
+      const data = await resp.json().catch(() => null)
+      if (resp.ok) return { ok: true, data }
+
+      const detail = data?.error?.message || data?.error?.type || data?.error?.code || null
+      const status = resp.status
+      if (shouldRetryAi(status) && attempt < delays.length) {
+        const jitter = Math.floor(Math.random() * 200)
+        console.warn('[OCR] AI retrying:', { requestId, tag, status, attempt: attempt + 1 })
+        await sleepMs(delays[attempt] + jitter)
+        continue
+      }
+      return { ok: false, status, detail }
+    } catch (e) {
+      if (timeout) clearTimeout(timeout)
+      const isTimeout = e?.name === 'AbortError' || /timeout/i.test(String(e?.message || ''))
+      const status = isTimeout ? 'timeout' : 'exception'
+      const detail = safeDetailFromError(e)
+      if (shouldRetryAi(status) && attempt < delays.length) {
+        const jitter = Math.floor(Math.random() * 200)
+        console.warn('[OCR] AI retrying:', { requestId, tag, status, attempt: attempt + 1 })
+        await sleepMs(delays[attempt] + jitter)
+        continue
+      }
+      return { ok: false, status, detail }
+    }
+  }
+  return { ok: false, status: 'exception', detail: 'ai_retry_exhausted' }
 }
 
 function normalizeIban(input) {
@@ -214,6 +283,79 @@ function extractReferenceCandidates(rawText) {
   return out
 }
 
+function splitReferenceModel(reference) {
+  const raw = String(reference || '').trim()
+  if (!raw) return { model: null, number: null }
+  const compact = raw.replace(/\s+/g, '').toUpperCase()
+  const m = compact.match(/^(SI|RF)(\d{2})([0-9A-Z\-\/]{4,})$/i)
+  if (!m) return { model: null, number: null }
+  const prefix = m[1].toUpperCase()
+  const model = `${prefix} ${m[2]}`
+  const number = String(m[3] || '')
+  return { model, number }
+}
+
+function extractModelAndReference(rawText) {
+  const text = String(rawText || '').replace(/\r/g, '')
+  const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+  if (!lines.length) return null
+
+  const modelRe = /\bmodel\b\s*:?\s*(?:SI|RF)?\s*(\d{2})\b/i
+  const sklicRe = /\b(sklic|referenca|reference|ref\.?|payment\s*reference)\b\s*:?\s*([0-9A-Z\-\/ ]{4,})/i
+
+  // Same-line patterns first
+  for (const l of lines) {
+    const mModel = l.match(modelRe)
+    const mSklic = l.match(sklicRe)
+    if (mModel && mSklic) {
+      const prefix = /\bRF\b/i.test(l) ? 'RF' : (/(^|\b)SI\b/i.test(l) ? 'SI' : 'SI')
+      const model = `${prefix} ${mModel[1]}`
+      const num = String(mSklic[2] || '').replace(/\s+/g, '').replace(/[^0-9A-Z\-\/]/g, '')
+      if (num) return { model, number: num }
+    }
+  }
+
+  // Cross-line proximity: find nearest sklic and model lines
+  let sklicIdx = -1
+  let sklicVal = ''
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(sklicRe)
+    if (!m) continue
+    sklicIdx = i
+    sklicVal = String(m[2] || '').replace(/\s+/g, '').replace(/[^0-9A-Z\-\/]/g, '')
+    break
+  }
+  if (sklicIdx >= 0 && sklicVal) {
+    let bestModel = null
+    let bestDist = 999
+    for (let i = 0; i < lines.length; i += 1) {
+      const m = lines[i].match(modelRe)
+      if (!m) continue
+      const dist = Math.abs(i - sklicIdx)
+      if (dist < bestDist) {
+        const prefix = /\bRF\b/i.test(lines[i]) ? 'RF' : (/(^|\b)SI\b/i.test(lines[i]) ? 'SI' : 'SI')
+        bestModel = `${prefix} ${m[1]}`
+        bestDist = dist
+      }
+    }
+    if (bestModel) return { model: bestModel, number: sklicVal }
+  }
+
+  // Pattern: "model 12 in sklic 2636..." or reversed
+  const joined = lines.join(' ')
+  const combo1 = joined.match(/model\s*:?\s*(?:SI|RF)?\s*(\d{2})\b[^\n]{0,80}?\b(sklic|referenca|reference|ref\.?|payment\s*reference)\b\s*:?\s*([0-9A-Z\-\/ ]{4,})/i)
+  const combo2 = joined.match(/\b(sklic|referenca|reference|ref\.?|payment\s*reference)\b\s*:?\s*([0-9A-Z\-\/ ]{4,})[^\n]{0,80}?model\s*:?\s*(?:SI|RF)?\s*(\d{2})\b/i)
+  const match = combo1 || combo2
+  if (match) {
+    const digits = combo1 ? match[1] : match[3]
+    const numRaw = combo1 ? match[3] : match[2]
+    const num = String(numRaw || '').replace(/\s+/g, '').replace(/[^0-9A-Z\-\/]/g, '')
+    if (digits && num) return { model: `SI ${digits}`, number: num }
+  }
+
+  return null
+}
+
 function extractLabeledAmountCandidates(rawText) {
   const text = String(rawText || '').replace(/\r/g, '')
     const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean).filter(line => line.length > 0)
@@ -320,12 +462,55 @@ function buildExtractionMeta(rawText, sanitizedFields) {
       continue
     }
     const v = sanitizedFields?.[k]
+    if (k === 'currency' && String(v || '').toUpperCase() === 'UNKNOWN') {
+      not_found.push('currency')
+      continue
+    }
     if (v == null) { not_found.push(k); continue }
     if (typeof v === 'string' && !String(v).trim()) not_found.push(k)
   }
 
   const any = Boolean(doubt.iban || doubt.reference || doubt.amount)
   return { any, doubt, candidates, not_found }
+}
+
+const EUR_IBAN_COUNTRIES = new Set([
+  'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU',
+  'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK',
+])
+
+function detectCurrencyFromText(rawText) {
+  const text = String(rawText || '')
+  if (/€/.test(text) || /\bEUR\b/i.test(text)) return 'EUR'
+  if (/[£]/.test(text) || /\bGBP\b/i.test(text)) return 'GBP'
+  if (/\bCHF\b/i.test(text)) return 'CHF'
+  if (/[¥]/.test(text) || /\bJPY\b/i.test(text)) return 'JPY'
+  if (/\bUSD\b/i.test(text) || /\$/.test(text)) return 'USD'
+  return null
+}
+
+function currencyFromIbanCountry(iban) {
+  const s = normalizeIban(iban)
+  if (!s || s.length < 2) return null
+  const cc = s.slice(0, 2)
+  if (cc === 'GB') return 'GBP'
+  if (cc === 'CH' || cc === 'LI') return 'CHF'
+  if (EUR_IBAN_COUNTRIES.has(cc)) return 'EUR'
+  return null
+}
+
+function getMissingKeyFields(fields) {
+  const missing = []
+  const supplier = String(fields?.supplier || fields?.creditor_name || '').trim()
+  if (!supplier) missing.push('supplier')
+  const okAmount = typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0
+  if (!okAmount) missing.push('amount')
+  if (!String(fields?.currency || '').trim()) missing.push('currency')
+  if (!String(fields?.due_date || '').trim()) missing.push('due_date')
+  const hasIban = Boolean(String(fields?.iban || '').trim())
+  const hasRef = Boolean(String(fields?.reference || '').trim())
+  if (!hasIban && !hasRef) missing.push('iban_or_reference')
+  return { missing, hasMissing: missing.length > 0 }
 }
 
 function textContainsLabeledIban(rawText, iban) {
@@ -1072,6 +1257,19 @@ function sanitizeFields(rawText, fields) {
     out.reference = cand ? normalizeRef(cand) : null
   }
 
+  // Derive model/number from reference when possible.
+  if (out.reference) {
+    const split = splitReferenceModel(out.reference)
+    if (split.model && split.number) {
+      out.reference_model = split.model
+      out.reference_number = split.number
+    }
+  } else if (out.reference_model && out.reference_number) {
+    const modelCompact = String(out.reference_model || '').replace(/\s+/g, '').toUpperCase()
+    const num = String(out.reference_number || '').replace(/\s+/g, '').toUpperCase()
+    if (modelCompact && num) out.reference = `${modelCompact}${num}`
+  }
+
   // Amount: keep only reasonable numbers; if missing, try labeled amount candidates.
   if (typeof out.amount === 'number') {
     if (!Number.isFinite(out.amount) || out.amount <= 0 || out.amount > 1000000) out.amount = null
@@ -1084,13 +1282,12 @@ function sanitizeFields(rawText, fields) {
       out.currency = bestAmount.currency
     }
   }
-  // Amount without a currency is too error-prone in OCR; only keep when currency is present/evidenced.
+  // Amount without a currency: attempt inference (symbols/labels/IBAN country); otherwise mark UNKNOWN.
   if (typeof out.amount === 'number' && !out.currency) {
-    const t = String(rawText || '')
-    if (/\bEUR\b/i.test(t) || /€/.test(t)) out.currency = 'EUR'
-    else out.amount = null
+    const inferred = detectCurrencyFromText(rawText) || currencyFromIbanCountry(out.iban)
+    out.currency = inferred || 'UNKNOWN'
   }
-  if (out.currency && !/^[A-Z]{3}$/.test(String(out.currency))) out.currency = null
+  if (out.currency && !/^[A-Z]{3}$/.test(String(out.currency)) && String(out.currency).toUpperCase() !== 'UNKNOWN') out.currency = null
 
   // Due date: ISO only; for non-QR sources default to today + 14 days and mark needsReview.
   if (out.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(String(out.due_date))) out.due_date = null
@@ -1255,6 +1452,14 @@ function sanitizeFieldsAiOnly(fields) {
     out.reference = null
   }
 
+  if (out.reference) {
+    const split = splitReferenceModel(out.reference)
+    if (split.model && split.number) {
+      out.reference_model = split.model
+      out.reference_number = split.number
+    }
+  }
+
   // Purpose / item
   out.purpose = clean(out.purpose) || null
   out.item_name = clean(out.item_name) || null
@@ -1284,7 +1489,7 @@ function sanitizeFieldsAiOnly(fields) {
   return out
 }
 
-async function extractFieldsFromImageWithAI({ base64Image, contentType, languageHint }) {
+async function extractFieldsFromImageWithAI({ base64Image, contentType, languageHint, requestId }) {
   if (!isAiOcrEnabled()) return { error: 'ai_disabled' }
   if (!base64Image) return { error: 'missing_image' }
 
@@ -1307,12 +1512,9 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
 
   try {
     const model = resolveModel()
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
+    const aiCall = await callOpenAiWithRetry({
+      requestId,
+      tag: 'vision',
       body: JSON.stringify({
         model,
         temperature: 0,
@@ -1325,11 +1527,12 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
       }),
     })
 
-    const data = await resp.json().catch(() => null)
-    if (!resp.ok) {
-      const detail = data?.error?.message || data?.error?.type || data?.error?.code || null
-      return { error: `ai_call_failed_${resp.status}`, detail }
+    if (!aiCall.ok) {
+      if (aiCall.status === 'timeout') return { error: 'ai_timeout', detail: aiCall.detail }
+      const code = typeof aiCall.status === 'number' ? `ai_call_failed_${aiCall.status}` : 'ai_exception'
+      return { error: code, detail: aiCall.detail }
     }
+    const data = aiCall.data
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
@@ -1340,7 +1543,7 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
   }
 }
 
-async function extractFieldsFromTextWithAIOnly(text, languageHint) {
+async function extractFieldsFromTextWithAIOnly(text, languageHint, requestId) {
   if (!isAiOcrEnabled()) return { error: 'ai_disabled' }
   const input = String(text || '').trim()
   if (!input) return { error: 'empty_text' }
@@ -1361,16 +1564,13 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint) {
 
   try {
     const model = resolveModel()
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
+    const aiCall = await callOpenAiWithRetry({
+      requestId,
+      tag: 'text',
       body: JSON.stringify({
         model,
-        temperature: 0,
-        max_tokens: 400,
+        temperature: 0.1,
+        max_tokens: 420,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: system },
@@ -1379,11 +1579,12 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint) {
       }),
     })
 
-    const data = await resp.json().catch(() => null)
-    if (!resp.ok) {
-      const detail = data?.error?.message || data?.error?.type || data?.error?.code || null
-      return { error: `ai_call_failed_${resp.status}`, detail }
+    if (!aiCall.ok) {
+      if (aiCall.status === 'timeout') return { error: 'ai_timeout', detail: aiCall.detail }
+      const code = typeof aiCall.status === 'number' ? `ai_call_failed_${aiCall.status}` : 'ai_exception'
+      return { error: code, detail: aiCall.detail }
     }
+    const data = aiCall.data
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
@@ -1394,10 +1595,16 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint) {
 }
 
 function jsonResponse(statusCode, payload) {
+  const base = payload && typeof payload === 'object' ? { ...payload } : { ok: false }
+  const isError = Boolean(base.error) || base.ok === false
+  if (isError && !('status' in base)) base.status = statusCode
+  if (isError && !('detail' in base)) base.detail = null
+  const requestId = base.requestId || (typeof globalThis !== 'undefined' ? globalThis.__ocrRequestId : null)
+  if (requestId) base.requestId = requestId
   return {
     statusCode,
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(base),
   }
 }
 
@@ -1602,7 +1809,7 @@ async function visionAnnotatePdfAllPages({ accessToken, pdfBuffer, numpages, tim
 
 function extractFields(rawText) {
   const text = (rawText || '').replace(/\r/g, '')
-  const out = { supplier: null, creditor_name: null, invoice_number: null, amount: null, currency: null, due_date: null, iban: null, reference: null, purpose: null, payment_details: null, item_name: null }
+  const out = { supplier: null, creditor_name: null, invoice_number: null, amount: null, currency: null, due_date: null, iban: null, reference: null, reference_model: null, reference_number: null, purpose: null, payment_details: null, item_name: null }
 
   function isPayerLine(line) {
     return /\b(pla\u010dnik|placnik|payer|kupec|buyer|customer)\b\s*:?/i.test(String(line || ''))
@@ -1911,6 +2118,13 @@ function extractFields(rawText) {
 
   // Reference / sklic (avoid confusing IBAN lines for SIxx references)
   try {
+    const modeled = extractModelAndReference(text)
+    if (modeled?.model && modeled?.number) {
+      const full = `${modeled.model.replace(/\s+/g, '')}${modeled.number}`
+      out.reference = full
+      out.reference_model = modeled.model
+      out.reference_number = modeled.number
+    }
     let refVal = null
     for (const l of lines) {
       const labeled = l.match(/\b(sklic|reference|ref\.?|model)\b\s*:?\s*(.+)$/i)
@@ -2149,7 +2363,7 @@ function extractFields(rawText) {
   return out
 }
 
-async function extractFieldsWithAI(rawText, candidates, languageHint) {
+async function extractFieldsWithAI(rawText, candidates, languageHint, requestId) {
   if (!isAiOcrEnabled()) return { error: 'ai_disabled' }
   const text = String(rawText || '').trim()
   if (!text) return { error: 'empty_text' }
@@ -2193,12 +2407,9 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
 
   try {
     const model = resolveModel()
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
+    const aiCall = await callOpenAiWithRetry({
+      requestId,
+      tag: 'doc',
       body: JSON.stringify({
         model,
         temperature: 0.1,
@@ -2211,11 +2422,12 @@ async function extractFieldsWithAI(rawText, candidates, languageHint) {
       }),
     })
 
-    const data = await resp.json().catch(() => null)
-    if (!resp.ok) {
-      const detail = data?.error?.message || data?.error?.type || data?.error?.code || null
-      return { error: `ai_call_failed_${resp.status}`, detail }
+    if (!aiCall.ok) {
+      if (aiCall.status === 'timeout') return { error: 'ai_timeout', detail: aiCall.detail }
+      const code = typeof aiCall.status === 'number' ? `ai_call_failed_${aiCall.status}` : 'ai_exception'
+      return { error: code, detail: aiCall.detail }
     }
+    const data = aiCall.data
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
@@ -2607,6 +2819,9 @@ function parsePaymentQR_QR(text) {
 
 export async function handler(event) {
   try {
+    const requestId = makeRequestId()
+    if (typeof globalThis !== 'undefined') globalThis.__ocrRequestId = requestId
+
     if (event.httpMethod !== 'POST') {
       return jsonResponse(405, { ok: false, error: 'method_not_allowed' })
     }
@@ -2624,9 +2839,12 @@ export async function handler(event) {
 
     let allowAi = true
     let languageHint = null
+    let usageCounted = false
 
     const isText = /^text\/plain\b/i.test(contentType)
     let isPdf = /application\/pdf/i.test(contentType)
+
+    console.log('[OCR] Request:', { requestId, contentType })
 
     // Text-only path: AI extraction from pasted QR text or other text payloads.
     // This does NOT count against OCR quota because no OCR/vision work is performed.
@@ -2635,7 +2853,7 @@ export async function handler(event) {
       const text = String(buf?.toString('utf8') || '').trim()
       if (!text) return jsonResponse(400, { ok: false, error: 'missing_text' })
       if (aiVisionOnly) {
-        const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint)
+        const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint, requestId)
         const aiError = aiResult && aiResult.error ? aiResult.error : null
         const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
         if (!aiResult?.fields) {
@@ -2649,7 +2867,7 @@ export async function handler(event) {
 
       const fields0 = extractFields(text)
       const candidates = buildFieldCandidates(text)
-      const aiResult = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
+      const aiResult = allowAi ? await extractFieldsWithAI(text, candidates, languageHint, requestId) : null
       const aiFields = aiResult && aiResult.fields ? aiResult : null
       const aiError = aiResult && aiResult.error ? aiResult.error : null
       const fields = mergeFields(fields0, aiFields, text)
@@ -2758,6 +2976,10 @@ export async function handler(event) {
 
       let text = ''
       let pdfPages = null
+      let forceVisionOcr = false
+      let aiAttemptedOnPdfText = false
+      let aiErrorOnPdfText = null
+      let aiDetailOnPdfText = null
       try {
         const parsed = await parsePdfText(pdfBuffer)
         text = String(parsed?.text || '').trim()
@@ -2792,6 +3014,7 @@ export async function handler(event) {
                 updated_at: now.toISOString(),
               }, { onConflict: 'user_id' })
           }
+          usageCounted = true
         } catch {}
 
         if (preferQr) {
@@ -2808,36 +3031,52 @@ export async function handler(event) {
         if (aiVisionOnly) {
           console.log('[OCR] AI-first PDF text:', { mode: 'ai_pdf_text', ocrLength: text.length })
           aiAttempted = true
-          const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint)
+          const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint, requestId)
           aiError = aiResult && aiResult.error ? aiResult.error : null
           aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+          aiAttemptedOnPdfText = true
+          aiErrorOnPdfText = aiError
+          aiDetailOnPdfText = aiDetail
           if (aiResult?.fields) {
             const fields = sanitizeFieldsAiOnly(aiResult.fields)
-            const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
-            return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
+            const missing = getMissingKeyFields(fields)
+            if (!missing.hasMissing) {
+              const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+              return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
+            }
+            aiError = aiError || 'ai_missing_fields'
+            aiDetail = aiDetail || `missing:${missing.missing.join(',')}`
+            aiErrorOnPdfText = aiError
+            aiDetailOnPdfText = aiDetail
+            console.warn('[OCR] AI PDF text missing key fields; falling back to Vision OCR.', { requestId, missing: missing.missing })
+            forceVisionOcr = true
+          } else {
+            console.error('[OCR] AI PDF text failed; falling back to Vision OCR.', { error: aiError, detail: aiDetail })
+            forceVisionOcr = true
           }
-          console.error('[OCR] AI PDF text failed; falling back to rule-based.', { error: aiError, detail: aiDetail })
         }
 
-        console.log('[OCR] QR found:', false, { mode: 'pdf_text', ocrLength: text.length })
-        const fields0 = extractFields(text)
-        const candidates = buildFieldCandidates(text)
-        const allowAiFallback = Boolean(allowAi && !aiAttempted)
-        const aiResult = allowAiFallback ? await extractFieldsWithAI(text, candidates, languageHint) : null
-        const aiFields = aiResult && aiResult.fields ? aiResult : null
-        const aiErrorFallback = aiResult && aiResult.error ? aiResult.error : null
-        if (aiFields?.fields) {
-          const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
-          console.log('[OCR] AI extracted fields:', keys)
+        if (!forceVisionOcr) {
+          console.log('[OCR] QR found:', false, { mode: 'pdf_text', ocrLength: text.length })
+          const fields0 = extractFields(text)
+          const candidates = buildFieldCandidates(text)
+          const allowAiFallback = Boolean(allowAi && !aiAttempted)
+          const aiResult = allowAiFallback ? await extractFieldsWithAI(text, candidates, languageHint, requestId) : null
+          const aiFields = aiResult && aiResult.fields ? aiResult : null
+          const aiErrorFallback = aiResult && aiResult.error ? aiResult.error : null
+          if (aiFields?.fields) {
+            const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
+            console.log('[OCR] AI extracted fields:', keys)
+          }
+          const fields = mergeFields(fields0, aiFields, text)
+          const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
+          const aiModel = aiFields ? resolveModel() : null
+          const aiTier = aiFields ? 'document' : null
+          return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
         }
-        const fields = mergeFields(fields0, aiFields, text)
-        const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
-        const aiModel = aiFields ? resolveModel() : null
-        const aiTier = aiFields ? 'document' : null
-        return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
       }
 
-      // Scanned PDF: use Vision PDF OCR to get text, then AI-only parse (no rules).
+      // Scanned PDF (or forced fallback): use Vision PDF OCR to get text, then AI-only parse (no rules).
       const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
       if (!rawCreds || String(rawCreds).trim() === '') {
         return jsonResponse(500, { ok: false, step: 'env', error: 'missing_google_credentials_json' })
@@ -2877,52 +3116,63 @@ export async function handler(event) {
       }
 
       // Increment usage (counts as OCR/document extraction)
-      try {
-        const newUsed = used + 1
-        if (hasEntRow) {
-          await supabase
-            .from('entitlements')
-            .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
-            .eq('user_id', userId)
-        } else {
-          await supabase
-            .from('entitlements')
-            .upsert({
-              user_id: userId,
-              plan: 'free',
-              payer_limit: 1,
-              exports_enabled: false,
-              ocr_quota_monthly: 3,
-              ocr_used_this_month: newUsed,
-              subscription_source: 'free',
-              status: 'active',
-              updated_at: now.toISOString(),
-            }, { onConflict: 'user_id' })
-        }
-      } catch {}
+      if (!usageCounted) {
+        try {
+          const newUsed = used + 1
+          if (hasEntRow) {
+            await supabase
+              .from('entitlements')
+              .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+              .eq('user_id', userId)
+          } else {
+            await supabase
+              .from('entitlements')
+              .upsert({
+                user_id: userId,
+                plan: 'free',
+                payer_limit: 1,
+                exports_enabled: false,
+                ocr_quota_monthly: 3,
+                ocr_used_this_month: newUsed,
+                subscription_source: 'free',
+                status: 'active',
+                updated_at: now.toISOString(),
+              }, { onConflict: 'user_id' })
+          }
+          usageCounted = true
+        } catch {}
+      }
 
-      let aiAttempted = false
-      let aiError = null
-      let aiDetail = null
-      if (aiVisionOnly) {
+      let aiAttempted = Boolean(aiAttemptedOnPdfText)
+      let aiError = aiErrorOnPdfText
+      let aiDetail = aiDetailOnPdfText
+      const aiVisionOnlyForScan = Boolean(aiVisionOnly && !aiAttemptedOnPdfText)
+      if (aiVisionOnlyForScan) {
         console.log('[OCR] AI-first PDF scan:', { mode: 'ai_pdf_vision', ocrLength: ocrText.length })
         aiAttempted = true
-        const aiResult = await extractFieldsFromTextWithAIOnly(ocrText, languageHint)
+        const aiResult = await extractFieldsFromTextWithAIOnly(ocrText, languageHint, requestId)
         aiError = aiResult && aiResult.error ? aiResult.error : null
         aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
         if (aiResult?.fields) {
           const fields = sanitizeFieldsAiOnly(aiResult.fields)
-          const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
-          return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
+          const missing = getMissingKeyFields(fields)
+          if (!missing.hasMissing) {
+            const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+            return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
+          }
+          console.warn('[OCR] AI PDF vision missing key fields; falling back to rule-based.', { requestId, missing: missing.missing })
+          aiError = aiError || 'ai_missing_fields'
+          aiDetail = aiDetail || `missing:${missing.missing.join(',')}`
+        } else {
+          console.error('[OCR] AI PDF vision failed; falling back to rule-based.', { error: aiError, detail: aiDetail })
         }
-        console.error('[OCR] AI PDF vision failed; falling back to rule-based.', { error: aiError, detail: aiDetail })
       }
 
       console.log('[OCR] QR found:', false, { mode: 'pdf_vision', ocrLength: ocrText.length })
       const fields0 = extractFields(ocrText)
       const candidates = buildFieldCandidates(ocrText)
       const allowAiFallback = Boolean(allowAi && !aiAttempted)
-      const aiResult = allowAiFallback ? await extractFieldsWithAI(ocrText, candidates, languageHint) : null
+      const aiResult = allowAiFallback ? await extractFieldsWithAI(ocrText, candidates, languageHint, requestId) : null
       const aiFields = aiResult && aiResult.fields ? aiResult : null
       const aiErrorFallback = aiResult && aiResult.error ? aiResult.error : null
       if (aiFields?.fields) {
@@ -2965,19 +3215,27 @@ export async function handler(event) {
               updated_at: now.toISOString(),
             }, { onConflict: 'user_id' })
         }
+        usageCounted = true
       } catch {}
 
       aiAttempted = true
-      const aiResult = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint })
+      const aiResult = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint, requestId })
       aiError = aiResult && aiResult.error ? aiResult.error : null
       aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
       const aiFields = aiResult && aiResult.fields ? aiResult.fields : null
       if (aiFields) {
         const fields = sanitizeFieldsAiOnly(aiFields)
-        const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
-        return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
+        const missing = getMissingKeyFields(fields)
+        if (!missing.hasMissing) {
+          const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+          return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
+        }
+        aiError = aiError || 'ai_missing_fields'
+        aiDetail = aiDetail || `missing:${missing.missing.join(',')}`
+        console.warn('[OCR] AI vision missing key fields; falling back to Google OCR.', { requestId, missing: missing.missing })
+      } else {
+        console.error('[OCR] AI vision failed; falling back to Google OCR.', { error: aiError, detail: aiDetail })
       }
-      console.error('[OCR] AI vision failed; falling back to Google OCR.', { error: aiError, detail: aiDetail })
     }
 
     const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
@@ -3136,30 +3394,33 @@ export async function handler(event) {
     }
 
     // Increment OCR usage on success before returning
-    try {
-      const newUsed = used + 1
-      if (hasEntRow) {
-        await supabase
-          .from('entitlements')
-          .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
-          .eq('user_id', userId)
-      } else {
-        await supabase
-          .from('entitlements')
-          .upsert({
-            user_id: userId,
-            plan: 'free',
-            payer_limit: 1,
-            exports_enabled: false,
-            ocr_quota_monthly: 3,
-            ocr_used_this_month: newUsed,
-            subscription_source: 'free',
-            status: 'active',
-            updated_at: now.toISOString(),
-          }, { onConflict: 'user_id' })
+    if (!usageCounted) {
+      try {
+        const newUsed = used + 1
+        if (hasEntRow) {
+          await supabase
+            .from('entitlements')
+            .update({ ocr_used_this_month: newUsed, updated_at: now.toISOString() })
+            .eq('user_id', userId)
+        } else {
+          await supabase
+            .from('entitlements')
+            .upsert({
+              user_id: userId,
+              plan: 'free',
+              payer_limit: 1,
+              exports_enabled: false,
+              ocr_quota_monthly: 3,
+              ocr_used_this_month: newUsed,
+              subscription_source: 'free',
+              status: 'active',
+              updated_at: now.toISOString(),
+            }, { onConflict: 'user_id' })
+        }
+        usageCounted = true
+      } catch {
+        // If this fails, we still return success; usage may be slightly off but users are not blocked
       }
-    } catch {
-      // If this fails, we still return success; usage may be slightly off but users are not blocked
     }
 
     const annotation = raw?.responses?.[0]
@@ -3169,7 +3430,7 @@ export async function handler(event) {
     const fields0 = extractFields(full)
     const candidates = buildFieldCandidates(full)
     const allowAiFallback = Boolean(allowAi && !aiAttempted)
-    const aiResult = allowAiFallback ? await extractFieldsWithAI(full, candidates, languageHint) : null
+    const aiResult = allowAiFallback ? await extractFieldsWithAI(full, candidates, languageHint, requestId) : null
     const aiFields = aiResult && aiResult.fields ? aiResult : null
     const aiErrorFallback = aiResult && aiResult.error ? aiResult.error : null
     if (aiFields?.fields) {

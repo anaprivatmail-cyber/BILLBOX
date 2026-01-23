@@ -1036,8 +1036,10 @@ type Bill = {
   creditor_name?: string | null
   iban?: string | null
   reference?: string | null
+  reference_model?: string | null
   purpose?: string | null
   invoice_number?: string | null
+  category?: string | null
   space_id?: string | null
 }
 
@@ -1050,8 +1052,10 @@ type CreateBillInput = {
   creditor_name?: string | null
   iban?: string | null
   reference?: string | null
+  reference_model?: string | null
   purpose?: string | null
   invoice_number?: string | null
+  category?: string | null
   space_id?: string | null
 }
 
@@ -1527,6 +1531,7 @@ async function ensureInstallmentBills(params: {
 }
 
 const LS_BILLS_PREFIX = 'billbox.local.bills.'
+const LS_CATEGORY_OVERRIDES_PREFIX = 'billbox.categoryOverrides.'
 
 function normalizeSpaceId(id?: string | null): string {
   return id && id.trim().length > 0 ? id : 'default'
@@ -1534,6 +1539,16 @@ function normalizeSpaceId(id?: string | null): string {
 
 function billsKey(spaceId?: string | null) {
   return `${LS_BILLS_PREFIX}${normalizeSpaceId(spaceId)}`
+}
+
+async function getCategoryOverridesStorageKey(supabase: SupabaseClient | null): Promise<string | null> {
+  if (!supabase) return `${LS_CATEGORY_OVERRIDES_PREFIX}local`
+  try {
+    const userId = await getCurrentUserId(supabase)
+    return userId ? `${LS_CATEGORY_OVERRIDES_PREFIX}${userId}` : `${LS_CATEGORY_OVERRIDES_PREFIX}local`
+  } catch {
+    return `${LS_CATEGORY_OVERRIDES_PREFIX}local`
+  }
 }
 
 async function loadLocalBills(spaceId?: string | null): Promise<LocalBill[]> {
@@ -1824,6 +1839,8 @@ async function performOCRFromBase64(
     const err: any = new Error(message)
     err.status = resp.status
     err.code = data?.error || null
+    err.requestId = data?.requestId || null
+    err.detail = data?.detail || null
     throw err
   }
   const f = data.fields || {}
@@ -1980,6 +1997,8 @@ async function performOCR(
     const err: any = new Error(message)
     err.status = resp.status
     err.code = data?.error || null
+    err.requestId = data?.requestId || null
+    err.detail = data?.detail || null
     throw err
   }
   const f = data.fields || {}
@@ -3073,6 +3092,7 @@ function ScanBillScreen() {
   const [debugAiInfo, setDebugAiInfo] = useState<{ called: boolean; model?: string | null; tier?: string | null; enabled?: boolean | null; attempted?: boolean | null; error?: string | null; mode?: string | null } | null>(null)
   const [debugOcrMode, setDebugOcrMode] = useState<string | null>(null)
   const [debugFileInfo, setDebugFileInfo] = useState<{ source: 'original' | 'preview'; size?: number | null } | null>(null)
+  const [debugRequestId, setDebugRequestId] = useState<string | null>(null)
 
   const [supplier, setSupplier] = useState('')
   const [purchaseItem, setPurchaseItem] = useState('')
@@ -3085,10 +3105,12 @@ function ScanBillScreen() {
 
   const [creditorName, setCreditorName] = useState('')
   const [iban, setIban] = useState('')
+  const [referenceModel, setReferenceModel] = useState('')
   const [reference, setReference] = useState('')
   const [purpose, setPurpose] = useState('')
   const [paymentDetails, setPaymentDetails] = useState('')
   const [payerName, setPayerName] = useState('')
+  const [category, setCategory] = useState('')
   const [missingBasicFields, setMissingBasicFields] = useState({ supplier: false, invoice: false, amount: false, currency: false })
 
   // Track manual edits so new scans can overwrite stale autofill,
@@ -3102,9 +3124,11 @@ function ScanBillScreen() {
     dueDate: false,
     creditorName: false,
     iban: false,
+    referenceModel: false,
     reference: false,
     purpose: false,
     paymentDetails: false,
+    category: false,
   })
 
   // Per-field source precedence (lower is stronger):
@@ -3113,6 +3137,10 @@ function ScanBillScreen() {
 
   const [ibanHint, setIbanHint] = useState<string | null>(null)
   const [referenceHint, setReferenceHint] = useState<string | null>(null)
+  const [ibanOptions, setIbanOptions] = useState<string[]>([])
+  const [ibanPickerVisible, setIbanPickerVisible] = useState(false)
+  const [categoryPickerVisible, setCategoryPickerVisible] = useState(false)
+  const [categoryOverrides, setCategoryOverrides] = useState<Record<string, string>>({})
 
   const [lastQR, setLastQR] = useState('')
   const [torch, setTorch] = useState<'on' | 'off'>('off')
@@ -3127,6 +3155,10 @@ function ScanBillScreen() {
     const buildProfile = String(process.env.EXPO_PUBLIC_BUILD_PROFILE || (Constants as any)?.expoConfig?.extra?.eas?.buildProfile || (Constants as any)?.manifest2?.extra?.eas?.buildProfile || '')
     return __DEV__ || /preview|development/i.test(buildProfile)
   }, [])
+
+  useEffect(() => {
+    loadCategoryOverrides()
+  }, [supabase])
 
   function looksLikeMisassignedName(input: any): boolean {
     const s = (input ?? '').toString().trim()
@@ -3268,6 +3300,117 @@ function ScanBillScreen() {
   function normalizeReference(input: string): string {
     // Bank-safe: uppercase, no whitespace, allow common separators from QR payloads.
     return String(input || '').toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/g, '')
+  }
+
+  function splitReferenceModel(raw: string): { model: string | null; number: string | null } {
+    const compact = normalizeReference(raw)
+    const m = compact.match(/^(SI|RF)(\d{2})([0-9A-Z\-\/]{4,})$/i)
+    if (!m) return { model: null, number: null }
+    return { model: `${m[1].toUpperCase()} ${m[2]}`, number: String(m[3] || '') }
+  }
+
+  function normalizeReferenceNumber(input: string): string {
+    return String(input || '').toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/g, '')
+  }
+
+  function buildReferenceFromModel(model: string, number: string): string {
+    const m = String(model || '').replace(/\s+/g, '').toUpperCase()
+    const n = normalizeReferenceNumber(number)
+    if (!m || !n) return ''
+    return `${m}${n}`
+  }
+
+  const CATEGORY_RULES = [
+    { key: 'utilities', pattern: /(elektri\S*|power|electricity|plin|gas|voda\b|water|komunal\S*|waste|ogrevanj\S*|heating)/i },
+    { key: 'telecom', pattern: /(telekom|telefon|mobile|mobitel|internet|broadband|fiber|fibre|tv|cable)/i },
+    { key: 'grocery', pattern: /(trgovin|market|supermarket|grocer|lidl|spar|hofer|aldi|mercator|muller|dm|shop)/i },
+    { key: 'fuel', pattern: /(gorivo|petrol|diesel|bencin|bencin|fuel|pumpa|gas\s*station|shell|omv|ina)/i },
+    { key: 'subscription', pattern: /(naro\u010dnin|subscription|membership|plan|monthly|mese\u010dno)/i },
+    { key: 'service', pattern: /(storitev|service|vzdr\u017eevanje|maintenance|servis|repair|popravilo)/i },
+    { key: 'warranty_product', pattern: /(garanc|warranty|izdelek|product|artikel|item|device|aparat)/i },
+  ]
+
+  const CATEGORY_OPTIONS = [
+    { key: 'utilities', labelKey: 'Category: utilities' },
+    { key: 'telecom', labelKey: 'Category: telecom' },
+    { key: 'grocery', labelKey: 'Category: grocery' },
+    { key: 'fuel', labelKey: 'Category: fuel' },
+    { key: 'subscription', labelKey: 'Category: subscription' },
+    { key: 'service', labelKey: 'Category: service' },
+    { key: 'warranty_product', labelKey: 'Category: warranty product' },
+    { key: 'other', labelKey: 'Category: other' },
+  ]
+
+  const getCategoryLabel = (key: string): string => {
+    const found = CATEGORY_OPTIONS.find((c) => c.key === key)
+    return found ? tr(found.labelKey) : key
+  }
+
+  const normalizeSupplierKey = (input: string): string =>
+    String(input || '').toLowerCase().replace(/\s+/g, ' ').replace(/[^a-z0-9\s]/g, '').trim()
+
+  const detectCategoryFromText = (supplierName: string, purposeText: string, itemText: string): string | null => {
+    const hay = `${supplierName} ${purposeText} ${itemText}`
+    for (const rule of CATEGORY_RULES) {
+      if (rule.pattern.test(hay)) return rule.key
+    }
+    return null
+  }
+
+  const loadCategoryOverrides = async (): Promise<void> => {
+    try {
+      const key = await getCategoryOverridesStorageKey(supabase)
+      if (!key) return
+      const raw = await AsyncStorage.getItem(key)
+      const parsed = raw ? JSON.parse(raw) : {}
+      const base = parsed && typeof parsed === 'object' ? parsed : {}
+
+      if (supabase) {
+        try {
+          const userId = await getCurrentUserId(supabase)
+          if (userId) {
+            const { data } = await supabase
+              .from('bill_category_overrides')
+              .select('supplier_key, category')
+              .eq('user_id', userId)
+            if (Array.isArray(data)) {
+              for (const row of data) {
+                if (row?.supplier_key && row?.category) base[String(row.supplier_key)] = String(row.category)
+              }
+            }
+          }
+        } catch {}
+      }
+
+      setCategoryOverrides(base)
+      await saveCategoryOverrides(base)
+    } catch {}
+  }
+
+  const saveCategoryOverrides = async (next: Record<string, string>): Promise<void> => {
+    try {
+      const key = await getCategoryOverridesStorageKey(supabase)
+      if (!key) return
+      await AsyncStorage.setItem(key, JSON.stringify(next))
+    } catch {}
+  }
+
+  const persistCategoryOverride = async (supplierKey: string, nextCategory: string): Promise<void> => {
+    if (!supplierKey || !nextCategory) return
+    const next = { ...categoryOverrides, [supplierKey]: nextCategory }
+    setCategoryOverrides(next)
+    await saveCategoryOverrides(next)
+
+    if (supabase) {
+      try {
+        const userId = await getCurrentUserId(supabase)
+        if (userId) {
+          await supabase
+            .from('bill_category_overrides')
+            .upsert({ user_id: userId, supplier_key: supplierKey, category: nextCategory, updated_at: new Date().toISOString() })
+        }
+      } catch {}
+    }
   }
 
   function extractReferenceCandidate(text: string): string | null {
@@ -3868,38 +4011,56 @@ function ScanBillScreen() {
       }
     }
 
-    const isValidReferenceFormat = (r: string): boolean => {
+    const isValidReferenceFormat = (r: string, model?: string): boolean => {
       const v = normalizeReference(r)
       if (!v) return false
-      // Accept SIxx/RFxx reference formats.
-      if (!/^(SI|RF)\d{2}/i.test(v)) return false
-      // Require more than just the prefix/model; avoids IBAN prefix fragments like "SI56".
-      if (v.length < 6) return false
-      // Must not be a full IBAN.
+      const hasModel = Boolean(String(model || '').trim())
+      if (!hasModel) {
+        if (!/^(SI|RF)\d{2}/i.test(v)) return false
+        if (v.length < 6) return false
+        if (looksLikeIban(v) && isValidIbanChecksum(v)) return false
+        return true
+      }
+      // If model is provided, allow shorter numeric references (sklic number).
+      if (v.length < 4) return false
       if (looksLikeIban(v) && isValidIbanChecksum(v)) return false
       return true
     }
     if (allowPaymentFields) {
       const refFromDoc = extractReferenceCandidate(rawText)
-      let ref = normalizeReference(rawRef) || ''
+      const rawModel = fields?.reference_model ? String(fields.reference_model) : ''
+      const rawRefNumber = fields?.reference_number ? String(fields.reference_number) : ''
+      const split = splitReferenceModel(rawRef)
+      const modelCandidate = normalizeReferenceModel(rawModel || split.model || '')
+      let ref = ''
+      if (modelCandidate) {
+        ref = normalizeReferenceNumber(rawRefNumber || split.number || rawRef)
+      } else {
+        ref = normalizeReference(rawRef) || ''
+      }
       // If the extracted reference is missing or suspicious, fall back to labeled Sklic/Reference lines.
-      if (!ref || !isValidReferenceFormat(ref)) {
-        if (isAiOnly && rawRef && isValidReferenceFormat(rawRef)) ref = normalizeReference(rawRef)
-        else if (refFromDoc && isValidReferenceFormat(refFromDoc)) ref = refFromDoc
+      if (!ref || !isValidReferenceFormat(ref, modelCandidate)) {
+        if (isAiOnly && rawRef && isValidReferenceFormat(rawRef, modelCandidate)) ref = modelCandidate ? normalizeReferenceNumber(rawRef) : normalizeReference(rawRef)
+        else if (refFromDoc && isValidReferenceFormat(refFromDoc, modelCandidate)) ref = modelCandidate ? normalizeReferenceNumber(refFromDoc) : refFromDoc
       }
       if (isAiOnly && rawRef && !ref) {
-        ref = normalizeReference(rawRef)
+        ref = modelCandidate ? normalizeReferenceNumber(rawRef) : normalizeReference(rawRef)
       }
       if (ref) {
-        if (foundIban && ref === foundIban) {
+        const fullRef = modelCandidate ? buildReferenceFromModel(modelCandidate, ref) : ref
+        if (foundIban && fullRef && fullRef === foundIban) {
           warnings.push(tr('Reference matched the IBAN; it was ignored.'))
           ref = ''
         }
         // Only treat as IBAN fragment when it does NOT match a valid reference pattern.
-        if (foundIban && ref && !isValidReferenceFormat(ref) && ref.length < 10 && String(foundIban || '').startsWith(ref)) {
+        if (foundIban && ref && !isValidReferenceFormat(ref, modelCandidate) && ref.length < 10 && String(foundIban || '').startsWith(ref)) {
           warnings.push(tr('Reference looked like an IBAN fragment; it was ignored.'))
           ref = ''
         }
+      }
+      if (modelCandidate && canSetField('reference_model', modelCandidate, editedRef.current.referenceModel, referenceModel)) {
+        setReferenceModel(modelCandidate)
+        markFieldSource('reference_model')
       }
       if (ref && canSetField('reference', ref, editedRef.current.reference, reference)) {
         setReference(ref)
@@ -3915,6 +4076,15 @@ function ScanBillScreen() {
         setPurpose(preferredPurpose)
         markFieldSource('purpose')
       }
+    }
+
+    // Category: prefer per-user override, otherwise infer from supplier + keywords.
+    const supplierKey = normalizeSupplierKey(nameCandidate || rawSupplier || rawCreditor || '')
+    const overrideCategory = supplierKey ? categoryOverrides[supplierKey] : ''
+    const inferredCategory = overrideCategory || detectCategoryFromText(nameCandidate || rawSupplier || rawCreditor || '', String(rawPurpose || ''), String(rawItem || ''))
+    if (inferredCategory && canSetField('category', inferredCategory, editedRef.current.category, category)) {
+      setCategory(inferredCategory)
+      markFieldSource('category')
     }
 
     // Purpose is mandatory for payment flows (non-QR): fill deterministic fallback in strict order.
@@ -3975,9 +4145,12 @@ function ScanBillScreen() {
           setAmountStr(nextAmount)
           markFieldSource('amount')
         }
-        if (extractedAmount.currency && canSetField('currency', String(extractedAmount.currency), editedRef.current.currency, currency)) {
-          setCurrency(String(extractedAmount.currency))
-          markFieldSource('currency')
+        if (extractedAmount.currency) {
+          const cur = String(extractedAmount.currency || '').toUpperCase()
+          if (cur && cur !== 'UNKNOWN' && canSetField('currency', cur, editedRef.current.currency, currency)) {
+            setCurrency(cur)
+            markFieldSource('currency')
+          }
         }
       }
     }
@@ -4051,51 +4224,55 @@ function ScanBillScreen() {
     setIbanHint(null)
   }
 
+  function applyReferenceInput(raw: string, opts?: { markEdited?: boolean }) {
+    const split = splitReferenceModel(raw)
+    const number = split.number ? normalizeReferenceNumber(split.number) : normalizeReferenceNumber(raw)
+    const currentModel = split.model || referenceModel
+    const normalizedModel = currentModel ? normalizeReferenceModel(currentModel) : ''
+    if (opts?.markEdited) {
+      editedRef.current.reference = true
+      if (split.model) editedRef.current.referenceModel = true
+    }
+    if (split.model) setReferenceModel(normalizedModel)
+    if (number) setReference(number)
+    return { model: normalizedModel, number, full: normalizedModel ? buildReferenceFromModel(normalizedModel, number) : normalizeReference(raw) }
+  }
+
   function handleReferenceChange(next: string) {
-    editedRef.current.reference = true
-    const norm = normalizeReference(next)
-    setReference(norm)
+    const parsed = applyReferenceInput(next, { markEdited: true })
+    const full = parsed.full || normalizeReference(next)
     const currentIban = normalizeIban(iban)
-    if (norm && currentIban && norm === currentIban) {
+    if (full && currentIban && full === currentIban) {
       setReferenceHint(tr('Reference matched the IBAN; it was ignored.'))
       return
     }
     // Only warn about IBAN-looking references when the IBAN field is empty (otherwise SI references can false-positive).
-    if (!currentIban && norm && looksLikeIban(norm) && isValidIbanChecksum(norm)) {
+    if (!currentIban && full && looksLikeIban(full) && isValidIbanChecksum(full)) {
       setReferenceHint(tr('This looks like an IBAN, not a reference.'))
     } else {
       setReferenceHint(null)
     }
   }
 
-  function splitReferenceForUi(input: string): { country: string; model: string; number: string } {
-    const raw = normalizeReference(input)
-    const upper = String(raw || '').toUpperCase()
-    const country = (upper.match(/^[A-Z]{2}/)?.[0] || '').toUpperCase()
-    const rest = country ? upper.slice(2) : upper
-    const model = (rest.match(/^\d{2}/)?.[0] || '')
-    const number = model ? rest.slice(2) : rest
-    return { country, model, number }
+  function handleReferenceModelChange(next: string) {
+    editedRef.current.referenceModel = true
+    const cleaned = normalizeReferenceModel(next)
+    setReferenceModel(cleaned)
+    if (reference.trim()) {
+      const full = cleaned ? buildReferenceFromModel(cleaned, normalizeReferenceNumber(reference)) : normalizeReference(reference)
+      const currentIban = normalizeIban(iban)
+      if (full && currentIban && full === currentIban) setReferenceHint(tr('Reference matched the IBAN; it was ignored.'))
+      else if (!currentIban && full && looksLikeIban(full) && isValidIbanChecksum(full)) setReferenceHint(tr('This looks like an IBAN, not a reference.'))
+      else setReferenceHint(null)
+    }
   }
 
-  function setReferenceFromParts(next: { country?: string; model?: string; number?: string }) {
-    const current = splitReferenceForUi(reference)
-
-    // If the user pastes a full reference into any field (most commonly the number field),
-    // accept it as-is instead of prefixing the currently selected country/model.
-    if (next.number != null) {
-      const pasted = normalizeReference(next.number)
-      if (/^[A-Z]{2}\d{2}[A-Z0-9\-\/]{1,}$/.test(pasted)) {
-        handleReferenceChange(pasted)
-        return
-      }
-    }
-
-    const country = String(next.country ?? current.country ?? '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2)
-    const model = String(next.model ?? current.model ?? '').replace(/[^0-9]/g, '').slice(0, 2)
-    const number = String(next.number ?? current.number ?? '').replace(/[^0-9A-Z\-\/]/gi, '').toUpperCase()
-    const composed = `${country}${model}${number}`
-    handleReferenceChange(composed)
+  function normalizeReferenceModel(input: string): string {
+    const raw = String(input || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (!raw) return ''
+    const letters = /^[A-Z]{2}/.test(raw) ? raw.slice(0, 2) : 'SI'
+    const digits = raw.replace(/^[A-Z]{2}/, '').replace(/[^0-9]/g, '').slice(0, 2)
+    return digits ? `${letters} ${digits}` : letters
   }
 
   function handlePaymentDetailsChange(next: string) {
@@ -4108,8 +4285,14 @@ function ScanBillScreen() {
     }
     if (!reference.trim()) {
       const extractedRef = extractReferenceCandidate(next)
-      if (extractedRef) setReference(extractedRef)
+      if (extractedRef) applyReferenceInput(extractedRef)
     }
+  }
+
+  function handleCategoryPick(next: string) {
+    editedRef.current.category = true
+    setCategory(next)
+    setCategoryPickerVisible(false)
   }
 
   const handleSupplierInput = (v: string) => {
@@ -4130,7 +4313,7 @@ function ScanBillScreen() {
   }
   const handleCurrencyInput = (v: string) => {
     editedRef.current.currency = true
-    setCurrency(v)
+    setCurrency(v.toUpperCase())
     if (missingBasicFields.currency) setMissingBasicFields((prev) => ({ ...prev, currency: false }))
   }
   const handleDueDateInput = (v: string) => { editedRef.current.dueDate = true; setDueDate(v) }
@@ -4188,10 +4371,12 @@ function ScanBillScreen() {
     setArchiveOnly(archiveOnlyFromBillDraftSelection(DEFAULT_BILL_DRAFT_SELECTION))
     setCreditorName('')
     setIban('')
+    setReferenceModel('')
     setReference('')
     setPurpose('')
     setPaymentDetails('')
     setPayerName('')
+    setCategory('')
     setMissingBasicFields({ supplier: false, invoice: false, amount: false, currency: false })
     setInboxSourceId(null)
     setLastQR('')
@@ -4202,6 +4387,9 @@ function ScanBillScreen() {
     setDebugOcrLength(0)
     setDebugAiInfo(null)
     setDebugFileInfo(null)
+    setDebugRequestId(null)
+    setIbanOptions([])
+    setIbanPickerVisible(false)
     editedRef.current = {
       supplier: false,
       purchaseItem: false,
@@ -4211,9 +4399,11 @@ function ScanBillScreen() {
       dueDate: false,
       creditorName: false,
       iban: false,
+      referenceModel: false,
       reference: false,
       purpose: false,
       paymentDetails: false,
+      category: false,
     }
     fieldSourceRankRef.current = {}
   }, [])
@@ -4390,6 +4580,7 @@ function ScanBillScreen() {
       setDebugStatus('RUNNING')
       setDebugQrFound(null)
       setDebugAiInfo(null)
+      setDebugRequestId(null)
       try {
         const info = await FileSystem.getInfoAsync(uri)
         if (info) setDebugFileInfo({ source: 'original', size: typeof info.size === 'number' ? info.size : null })
@@ -4417,40 +4608,53 @@ function ScanBillScreen() {
       const msg = e?.message || 'OCR failed'
       const status = (e as any)?.status
       const code = (e as any)?.code
+      const requestId = (e as any)?.requestId
+      if (requestId) setDebugRequestId(requestId)
+      const withRequestId = (base: string) => requestId ? `${base}\n${tr('Request ID')}: ${requestId}` : base
       console.warn('OCR failed:', { status, code, msg })
 
       if (status === 401 || code === 'auth_required' || /sign in/i.test(msg)) {
-        setOcrError(tr('Please sign in again.'))
-        Alert.alert(tr('OCR unavailable'), tr('Please sign in again.'))
+        const text = withRequestId(tr('Please sign in again.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR unavailable'), text)
+        setDebugStatus('ERROR')
         return
       }
 
       if (code === 'ocr_not_allowed') {
-        setOcrError(tr('OCR not available on your plan.'))
+        setOcrError(withRequestId(tr('OCR not available on your plan.')))
         showUpgradeAlert('ocr')
+        setDebugStatus('ERROR')
         return
       }
 
       if (code === 'ocr_quota_exceeded' || /quota/i.test(msg)) {
-        setOcrError(tr('OCR monthly quota exceeded.'))
+        setOcrError(withRequestId(tr('OCR monthly quota exceeded.')))
         showUpgradeAlert('ocr')
+        setDebugStatus('ERROR')
         return
       }
 
       if (code === 'pdf_no_text') {
-        setOcrError(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
-        Alert.alert(tr('OCR failed'), tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        const text = withRequestId(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR failed'), text)
+        setDebugStatus('ERROR')
         return
       }
 
       if (code === 'file_too_large') {
-        setOcrError(tr('File too large for OCR.'))
-        Alert.alert(tr('OCR failed'), tr('File too large for OCR.'))
+        const text = withRequestId(tr('File too large for OCR.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR failed'), text)
+        setDebugStatus('ERROR')
         return
       }
 
       // Default: show the server/user-facing message (not stack traces).
-      setOcrError(String(msg || tr('OCR failed')))
+      const text = withRequestId(String(msg || tr('OCR failed')))
+      setOcrError(text)
+      Alert.alert(tr('OCR failed'), text)
       setDebugStatus('ERROR')
     } finally {
       setOcrBusy(false)
@@ -4465,6 +4669,17 @@ function ScanBillScreen() {
     }
     if (meta && Array.isArray((meta as any).not_found) && (meta as any).not_found.length) {
       console.warn('OCR not found fields:', { mode, not_found: (meta as any).not_found, scanned: (meta as any).scanned })
+    }
+    const ibanCandidates = Array.isArray(meta?.candidates?.ibans)
+      ? Array.from(new Set((meta.candidates.ibans as string[]).filter(Boolean)))
+      : []
+    if (meta?.doubt?.iban && ibanCandidates.length > 1 && !iban.trim()) {
+      setIbanOptions(ibanCandidates)
+      setIbanPickerVisible(true)
+      setIbanHint(tr('Multiple IBANs found — choose one.'))
+    } else {
+      setIbanOptions([])
+      setIbanPickerVisible(false)
     }
     applyExtractedPaymentFields({ ...f, rawText: ocrText }, String(mode || '').trim())
     // Do not directly overwrite form fields here; mapping happens via applyExtractedPaymentFields with strict precedence.
@@ -4486,6 +4701,7 @@ function ScanBillScreen() {
       setDebugQrFound(null)
       setDebugAiInfo(null)
       setDebugFileInfo({ source: 'preview', size: Math.floor(String(base64 || '').length * 0.75) })
+      setDebugRequestId(null)
       const { fields: f, summary, rawText: ocrText, mode, meta, ai, aiModel, aiTier } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
       applyOcr(f, String(ocrText || ''), mode, meta)
       setDebugStatus('DONE')
@@ -4570,40 +4786,53 @@ function ScanBillScreen() {
       if (!isIOS) setShowDuePicker(false)
       return
     }
+      const requestId = (e as any)?.requestId
+      if (requestId) setDebugRequestId(requestId)
+      const withRequestId = (base: string) => requestId ? `${base}\n${tr('Request ID')}: ${requestId}` : base
     const y = selectedDate.getFullYear()
     const m = String(selectedDate.getMonth() + 1).padStart(2, '0')
     const d = String(selectedDate.getDate()).padStart(2, '0')
-    editedRef.current.dueDate = true
-    setDueDate(`${y}-${m}-${d}`)
+        const text = withRequestId(tr('Please sign in again.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR unavailable'), text)
+        setDebugStatus('ERROR')
     if (!isIOS) setShowDuePicker(false)
   }
 
   const handleSaveBill = async (overrideArchiveOnly?: boolean, opts?: { showAlert?: boolean }): Promise<boolean> => {
-    const isArchiveOnly = typeof overrideArchiveOnly === 'boolean' ? overrideArchiveOnly : archiveOnly
+        setOcrError(withRequestId(tr('OCR not available on your plan.')))
     const showAlert = opts?.showAlert !== false
+        setDebugStatus('ERROR')
     const supplierTrimmed = supplier.trim()
     const invoiceTrimmed = invoiceNumber.trim()
-    const currencyTrimmed = currency.trim()
+    const currencyTrimmed = currency.trim().toUpperCase()
     const amt = Number(String(amountStr).replace(',', '.'))
-    const nextMissing = {
+        setOcrError(withRequestId(tr('OCR monthly quota exceeded.')))
       supplier: !supplierTrimmed,
+        setDebugStatus('ERROR')
       invoice: !invoiceTrimmed,
       amount: !Number.isFinite(amt) || amt <= 0,
-      currency: !currencyTrimmed,
+      currency: !currencyTrimmed || currencyTrimmed === 'UNKNOWN',
     }
-    setMissingBasicFields(nextMissing)
-    if (nextMissing.supplier || nextMissing.invoice || nextMissing.amount || nextMissing.currency) {
+        const text = withRequestId(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR failed'), text)
+        setDebugStatus('ERROR')
       Alert.alert(tr('Missing data'), tr('Please fill all required fields.'))
       return false
     }
 
-    if (!isArchiveOnly) {
-      if (Number.isNaN(amt) || amt <= 0) {
+        const text = withRequestId(tr('File too large for OCR.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR failed'), text)
+        setDebugStatus('ERROR')
         Alert.alert(tr('Invalid amount'), tr('Provide a numeric amount greater than 0.'))
         return false
       }
     }
-
+      const text = withRequestId(String(msg || tr('OCR failed')))
+      setOcrError(text)
+      Alert.alert(tr('OCR failed'), text)
     const trimmedDue = dueDate.trim()
     const effectiveDueDate = trimmedDue || new Date().toISOString().slice(0, 10)
 
@@ -4612,6 +4841,11 @@ function ScanBillScreen() {
     const defaultPurposeFromInvoice = inv ? `${paymentLabel} ${inv}` : ''
     const purchaseItemTrimmed = purchaseItem.trim()
     const payerForPurpose = payerName.trim()
+    const referenceModelTrimmed = normalizeReferenceModel(referenceModel)
+    const referenceNumberTrimmed = normalizeReferenceNumber(reference.trim())
+    const referenceFull = referenceModelTrimmed
+      ? buildReferenceFromModel(referenceModelTrimmed, referenceNumberTrimmed)
+      : normalizeReference(referenceNumberTrimmed)
 
     if (!isArchiveOnly) {
       const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
@@ -4629,11 +4863,11 @@ function ScanBillScreen() {
           Alert.alert(tr('Invalid IBAN'), tr('IBAN checksum failed. Please double-check it.'))
           return false
         }
-        if (!reference.trim()) {
+        if (!referenceNumberTrimmed) {
           Alert.alert(tr('Reference required'), tr('Enter the payment reference.'))
           return false
         }
-        const refNorm = normalizeReference(reference)
+        const refNorm = normalizeReference(referenceFull)
         if (looksLikeIban(refNorm) && isValidIbanChecksum(refNorm)) {
           Alert.alert(tr('Invalid reference'), tr('Reference looks like an IBAN. Please move it to the IBAN field.'))
           return false
@@ -4718,6 +4952,11 @@ function ScanBillScreen() {
         } catch {}
       }
       let savedId: string | null = null
+
+      if (editedRef.current.category && category && supplierTrimmed) {
+        const supplierKey = normalizeSupplierKey(supplierTrimmed)
+        if (supplierKey) await persistCategoryOverride(supplierKey, category)
+      }
       if (s) {
         const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
         const details = paymentDetails.trim()
@@ -4736,7 +4975,9 @@ function ScanBillScreen() {
           status: isArchiveOnly ? 'archived' : 'unpaid',
           creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
-          reference: reference.trim() || null,
+          reference: referenceFull || null,
+          reference_model: referenceModelTrimmed || null,
+          category: category || null,
           purpose: combinedPurpose || null,
           invoice_number: invoiceTrimmed || null,
           space_id: dbSpaceId,
@@ -4765,7 +5006,9 @@ function ScanBillScreen() {
           status: isArchiveOnly ? 'archived' : 'unpaid',
           creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
-          reference: reference.trim() || null,
+          reference: referenceFull || null,
+          reference_model: referenceModelTrimmed || null,
+          category: category || null,
           purpose: combinedPurpose || null,
           invoice_number: invoiceTrimmed || null,
         })
@@ -5010,6 +5253,15 @@ function ScanBillScreen() {
               </View>
               <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={handlePurchaseItemInput} />
               <View style={{ gap: 6 }}>
+                <Text style={styles.fieldLabel}>{tr('Category')}</Text>
+                <AppButton
+                  label={category ? getCategoryLabel(category) : tr('Select category')}
+                  variant="secondary"
+                  iconName="list-outline"
+                  onPress={() => setCategoryPickerVisible(true)}
+                />
+              </View>
+              <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>
                   {tr('Invoice number')}
                   <Text style={styles.requiredStar}> *</Text>
@@ -5147,33 +5399,22 @@ function ScanBillScreen() {
                       {tr('Reference')}
                     </Text>
                     <View style={{ flexDirection: 'row', gap: 8 }}>
-                      <View style={{ width: 64 }}>
+                      <View style={{ width: 90 }}>
                         <AppInput
-                          placeholder="SI"
-                          value={splitReferenceForUi(reference).country}
-                          onChangeText={(v: string) => setReferenceFromParts({ country: v })}
+                          placeholder={tr('SI 12')}
+                          value={referenceModel}
+                          onChangeText={handleReferenceModelChange}
                           autoCapitalize="characters"
                           autoCorrect={false}
                           keyboardType="default"
-                          maxLength={2}
-                        />
-                      </View>
-                      <View style={{ width: 64 }}>
-                        <AppInput
-                          placeholder="00"
-                          value={splitReferenceForUi(reference).model}
-                          onChangeText={(v: string) => setReferenceFromParts({ model: v })}
-                          autoCapitalize="none"
-                          autoCorrect={false}
-                          keyboardType={Platform.OS === 'ios' ? 'number-pad' : 'numeric'}
-                          maxLength={2}
+                          maxLength={5}
                         />
                       </View>
                       <View style={{ flex: 1 }}>
                         <AppInput
-                          placeholder={tr('Reference')}
-                          value={splitReferenceForUi(reference).number}
-                          onChangeText={(v: string) => setReferenceFromParts({ number: v })}
+                          placeholder={tr('Reference number')}
+                          value={reference}
+                          onChangeText={handleReferenceChange}
                           autoCapitalize="characters"
                           autoCorrect={false}
                           keyboardType="default"
@@ -5298,6 +5539,7 @@ function ScanBillScreen() {
           <Text style={styles.debugLine}>{tr('AI called')}: {debugAiInfo?.called ? 'true' : 'false'}{debugAiInfo?.model || debugAiInfo?.tier ? ` (${[debugAiInfo?.model, debugAiInfo?.tier].filter(Boolean).join(', ')})` : ''}</Text>
           <Text style={styles.debugLine}>{tr('AI enabled')}: {String(debugAiInfo?.enabled ?? 'n/a')} • {tr('Attempted')}: {String(debugAiInfo?.attempted ?? 'n/a')}</Text>
           <Text style={styles.debugLine}>{tr('AI error')}: {debugAiInfo?.error || '—'}</Text>
+          <Text style={styles.debugLine}>{tr('Request ID')}: {debugRequestId || '—'}</Text>
           <Text style={styles.debugLine}>{tr('Fields')}: {[
             supplier ? tr('Issuer') : null,
             invoiceNumber ? tr('Invoice') : null,
@@ -5308,6 +5550,64 @@ function ScanBillScreen() {
           ].filter(Boolean).join(', ') || '—'}</Text>
         </View>
       )}
+
+      <Modal
+        visible={ibanPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIbanPickerVisible(false)}
+      >
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={{ width: '100%', maxWidth: 520, alignSelf: 'center' }}>
+            <Text style={styles.screenHeaderTitle}>{tr('Choose IBAN')}</Text>
+            <Text style={[styles.bodyText, { marginTop: themeSpacing.xs }]}>{tr('Multiple IBANs found — choose one.')}</Text>
+            <View style={{ marginTop: themeSpacing.md, gap: themeSpacing.xs }}>
+              {ibanOptions.map((candidate) => (
+                <AppButton
+                  key={candidate}
+                  label={candidate}
+                  variant="secondary"
+                  onPress={() => {
+                    editedRef.current.iban = true
+                    setIban(candidate)
+                    setIbanHint(null)
+                    setIbanOptions([])
+                    setIbanPickerVisible(false)
+                  }}
+                />
+              ))}
+            </View>
+            <View style={{ marginTop: themeSpacing.md, alignItems: 'flex-end' }}>
+              <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setIbanPickerVisible(false)} />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={categoryPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCategoryPickerVisible(false)}
+      >
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={{ width: '100%', maxWidth: 520, alignSelf: 'center' }}>
+            <Text style={styles.screenHeaderTitle}>{tr('Category')}</Text>
+            <Text style={[styles.bodyText, { marginTop: themeSpacing.xs }]}>{tr('Select category')}</Text>
+            <View style={{ marginTop: themeSpacing.md, gap: themeSpacing.xs }}>
+              {CATEGORY_OPTIONS.map((option) => (
+                <AppButton
+                  key={option.key}
+                  label={tr(option.labelKey)}
+                  variant={category === option.key ? 'primary' : 'secondary'}
+                  onPress={() => handleCategoryPick(option.key)}
+                />
+              ))}
+              <AppButton label={tr('Clear')} variant="ghost" onPress={() => handleCategoryPick('')} />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
 
       <Modal
         visible={missingManualVisible}

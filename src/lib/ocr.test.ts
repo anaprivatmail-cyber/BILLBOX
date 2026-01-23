@@ -204,6 +204,113 @@ describe('OCR extraction (text heuristics)', () => {
   })
 })
 
+describe('Reference model parsing', () => {
+  it('splits SI reference into model + number', () => {
+    const rawText = [
+      'Sklic: SI12 12345678',
+    ].join('\n')
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.reference).toBe('SI1212345678')
+    expect(sanitized.reference_model).toBe('SI 12')
+    expect(sanitized.reference_number).toBe('12345678')
+  })
+
+  it('uses explicit model line to build reference', () => {
+    const rawText = [
+      'Model: 12',
+      'Sklic: 1234-56',
+    ].join('\n')
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.reference_model).toBe('SI 12')
+    expect(sanitized.reference_number).toBe('1234-56')
+    expect(sanitized.reference).toBe('SI121234-56')
+  })
+
+  it('keeps RF model when specified', () => {
+    const rawText = [
+      'Model RF 05',
+      'Sklic: 7788-99',
+    ].join('\n')
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.reference_model).toBe('RF 05')
+    expect(sanitized.reference_number).toBe('7788-99')
+    expect(sanitized.reference).toBe('RF057788-99')
+  })
+
+  it('chooses the closest model to the sklic line', () => {
+    const rawText = [
+      'Model: 12',
+      'Random line',
+      'Sklic: 123456',
+      'Model: 99',
+    ].join('\n')
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.reference_model).toBe('SI 99')
+    expect(sanitized.reference_number).toBe('123456')
+    expect(sanitized.reference).toBe('SI99123456')
+  })
+
+  it('parses model-in-sklic combo sentence', () => {
+    const rawText = 'Model 12 in sklic 2636 1234'
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.reference_model).toBe('SI 12')
+    expect(sanitized.reference_number).toBe('26361234')
+    expect(sanitized.reference).toBe('SI1226361234')
+  })
+
+  it('parses spaced SI model+number references', () => {
+    const rawText = 'Sklic: SI 12 1234 5678'
+
+    const extracted = extractFields(rawText)
+    const sanitized = sanitizeFields(rawText, extracted)
+
+    expect(sanitized.reference_model).toBe('SI 12')
+    expect(sanitized.reference_number).toBe('12345678')
+    expect(sanitized.reference).toBe('SI1212345678')
+  })
+})
+
+describe('Currency inference', () => {
+  it('infers EUR from IBAN country when currency is missing', () => {
+    const rawText = 'Amount due: 10.00'
+    const fields = { amount: 10, iban: 'SI56192001234567892' }
+    const sanitized = sanitizeFields(rawText, fields as any)
+
+    expect(sanitized.currency).toBe('EUR')
+  })
+
+  it('infers USD from $ symbol', () => {
+    const rawText = 'Amount due: $10.00'
+    const fields = { amount: 10 }
+    const sanitized = sanitizeFields(rawText, fields as any)
+
+    expect(sanitized.currency).toBe('USD')
+  })
+
+  it('marks currency UNKNOWN when no hints exist', () => {
+    const rawText = 'Amount due: 10.00'
+    const fields = { amount: 10, iban: 'NO9386011117947' }
+    const sanitized = sanitizeFields(rawText, fields as any)
+
+    expect(sanitized.currency).toBe('UNKNOWN')
+  })
+})
+
 describe('Final required fields logic (golden)', () => {
   const assertIssuerNotDomain = (issuer: any) => {
     expect(String(issuer || '')).not.toMatch(/(\bhttps?:\/\/|\bwww\.|\.(?:com|si|net)\b|@)/i)

@@ -13,8 +13,10 @@ export interface Bill {
   creditor_name?: string | null
   iban?: string | null
   reference?: string | null
+  reference_model?: string | null
   purpose?: string | null
   invoice_number?: string | null
+  category?: string | null
 }
 
 export interface CreateBillInput {
@@ -26,8 +28,10 @@ export interface CreateBillInput {
   creditor_name?: string | null
   iban?: string | null
   reference?: string | null
+  reference_model?: string | null
   purpose?: string | null
   invoice_number?: string | null
+  category?: string | null
 }
 
 export interface UpdateBillInput {
@@ -39,6 +43,8 @@ export interface UpdateBillInput {
   creditor_name?: string | null
   iban?: string | null
   reference?: string | null
+  reference_model?: string | null
   purpose?: string | null
   invoice_number?: string | null
+  category?: string | null
 }
