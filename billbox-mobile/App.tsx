@@ -5235,11 +5235,11 @@ function ScanBillScreen() {
         {!permission?.granted ? (
           <Surface elevated>
             <SectionHeader title={tr('Capture bill')} />
-            <Text style={styles.bodyText}>{tr('Scan a QR code or import a bill image/PDF to start a draft.')}</Text>
+            <Text style={styles.mutedText}>{tr('Scan a QR code or import a bill image/PDF to start a draft.')}</Text>
             <View style={styles.actionRow}>
-              <AppButton label={tr('Enable camera')} iconName="camera-outline" onPress={requestPermission} />
-              <AppButton label={ocrBusy ? tr('Extracting…') : tr('Import photo')} variant="secondary" iconName="image-outline" onPress={pickImage} loading={ocrBusy} />
-              <AppButton label={ocrBusy ? tr('Extracting…') : tr('Import PDF')} variant="secondary" iconName="document-text-outline" onPress={pickPdfForOCR} loading={ocrBusy} />
+              <AppButton label={tr('Enable camera')} iconName="camera-outline" onPress={requestPermission} style={styles.addBillActionButton} />
+              <AppButton label={ocrBusy ? tr('Extracting…') : tr('Import photo')} variant="secondary" iconName="image-outline" onPress={pickImage} loading={ocrBusy} style={styles.addBillActionButton} />
+              <AppButton label={ocrBusy ? tr('Extracting…') : tr('Import PDF')} variant="secondary" iconName="document-text-outline" onPress={pickPdfForOCR} loading={ocrBusy} style={styles.addBillActionButton} />
             </View>
           </Surface>
         ) : (
@@ -5277,6 +5277,7 @@ function ScanBillScreen() {
                     iconName="image-outline"
                     onPress={pickImage}
                     loading={ocrBusy}
+                    style={styles.addBillActionButton}
                   />
                   <AppButton
                     label={ocrBusy ? tr('Extracting…') : tr('Import PDF')}
@@ -5284,6 +5285,7 @@ function ScanBillScreen() {
                     iconName="document-text-outline"
                     onPress={pickPdfForOCR}
                     loading={ocrBusy}
+                    style={styles.addBillActionButton}
                   />
                 </View>
               </>
@@ -5301,6 +5303,7 @@ function ScanBillScreen() {
                       setLastQR('')
                       setTorch('off')
                     }}
+                    style={styles.addBillActionButton}
                   />
                   <AppButton
                     label={ocrBusy ? tr('Extracting…') : tr('Import photo')}
@@ -5308,6 +5311,7 @@ function ScanBillScreen() {
                     iconName="image-outline"
                     onPress={pickImage}
                     loading={ocrBusy}
+                    style={styles.addBillActionButton}
                   />
                   <AppButton
                     label={ocrBusy ? tr('Extracting…') : tr('Import PDF')}
@@ -5315,6 +5319,7 @@ function ScanBillScreen() {
                     iconName="document-text-outline"
                     onPress={pickPdfForOCR}
                     loading={ocrBusy}
+                    style={styles.addBillActionButton}
                   />
                 </View>
               </View>
@@ -7048,13 +7053,19 @@ function BillsListScreen() {
     const trackedDate = getBillDate(item, dateMode)
     const isOverdue = dueDate ? item.status === 'unpaid' && dueDate.getTime() < today.getTime() : false
     const statusLabel = item.status === 'archived' ? 'Archived' : isOverdue ? 'Overdue' : item.status === 'paid' ? 'Paid' : 'Unpaid'
-    const statusTone: 'danger' | 'success' | 'info' = item.status === 'archived' ? 'info' : isOverdue ? 'danger' : item.status === 'paid' ? 'success' : 'info'
+    const statusTone: 'danger' | 'success' | 'info' | 'warning' = item.status === 'archived' ? 'info' : isOverdue ? 'warning' : item.status === 'paid' ? 'success' : 'info'
     const attachments = attachmentCounts[item.id] || 0
 
     return (
       <Surface
         elevated
-        style={[styles.billCard, highlightId === item.id && styles.billHighlighted]}
+        style={[
+          styles.billCard,
+          item.status === 'paid' && styles.billCardPaid,
+          item.status === 'unpaid' && !isOverdue && styles.billCardUnpaid,
+          isOverdue && styles.billCardOverdue,
+          highlightId === item.id && styles.billHighlighted,
+        ]}
       >
         <Pressable
           onPress={() => navigation.navigate('Bill Details', { bill: item })}
@@ -7782,7 +7793,7 @@ function HomeScreen() {
 
   return (
     <Screen>
-      <View style={[styles.pageStack, { gap: themeSpacing.xs }]}>
+      <View style={[styles.pageStack, { gap: themeSpacing.sm }]}>
         <TabTopBar
           titleKey="home"
           right={
@@ -7838,7 +7849,7 @@ function HomeScreen() {
           <View style={styles.homeHeroHeaderRow}>
             <View style={{ flexShrink: 1 }}>
               <Text style={styles.homeHeroTitle}>{tr('Home summary')}</Text>
-              <Text style={styles.mutedText} numberOfLines={1}>
+              <Text style={styles.homeHeroSubtitle} numberOfLines={1}>
                 {activeSummary ? `${payerLabelFromSpaceId(activeSummary.spaceId)} • ${activeSummary.spaceName}` : '—'}
               </Text>
             </View>
@@ -7851,12 +7862,12 @@ function HomeScreen() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 borderWidth: StyleSheet.hairlineWidth,
-                borderColor: colors.border,
-                backgroundColor: colors.surface,
+                borderColor: colors.primarySoft,
+                backgroundColor: colors.primary,
               }}
               accessibilityLabel={tr('Home summary settings')}
             >
-              <Ionicons name="options-outline" size={18} color={colors.text} />
+              <Ionicons name="options-outline" size={18} color="#FFFFFF" />
             </TouchableOpacity>
           </View>
 
@@ -7934,11 +7945,15 @@ function HomeScreen() {
                   tile.target === 'Pay' && styles.homePrimaryTilePay,
                 ]}
               >
-                <View style={styles.statIconWrap}>
-                  <Ionicons name={tile.icon as keyof typeof Ionicons.glyphMap} size={20} color={colors.text} />
+                <View style={[styles.statIconWrap, tile.target === 'Scan' && styles.statIconWrapPrimary]}>
+                  <Ionicons
+                    name={tile.icon as keyof typeof Ionicons.glyphMap}
+                    size={20}
+                    color={tile.target === 'Scan' ? '#FFFFFF' : colors.text}
+                  />
                 </View>
-                <Text style={styles.statLabel}>{tile.label}</Text>
-                <Text style={styles.statValue} numberOfLines={1}>
+                <Text style={[styles.statLabel, tile.target === 'Scan' && styles.statLabelPrimary]}>{tile.label}</Text>
+                <Text style={[styles.statValue, tile.target === 'Scan' && styles.statValuePrimary]} numberOfLines={1}>
                   {tile.description}
                 </Text>
               </Surface>
@@ -9024,7 +9039,7 @@ function WarrantiesScreen() {
                       <Text style={styles.cardTitle} numberOfLines={1}>
                         {item.item_name}{(item as any)?.unsynced ? ` • ${tr('Not synced')}` : ''}
                       </Text>
-                      <Text style={styles.mutedText}>
+                      <Text style={styles.warrantyMetaText}>
                         {(() => {
                           const duration = computeDurationMonthsBetween((item as any)?.purchase_date, (item as any)?.expires_at)
                           return (
@@ -9040,7 +9055,7 @@ function WarrantiesScreen() {
                       const label = status === 'expired'
                         ? tr('Expired')
                         : (status === 'expiring' ? tr('Expiring') : (status === 'active' ? tr('Active') : tr('No expiry')))
-                      const tone = status === 'expired' || status === 'expiring'
+                      const tone = status === 'expiring'
                         ? 'warning'
                         : (status === 'active' ? 'info' : 'neutral')
                       return <Badge label={label} tone={tone as any} />
@@ -9876,7 +9891,7 @@ function ReportsScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('Report exports')} />
-          <Text style={styles.bodyText}>{tr('Export this report as PDF, ZIP, or JSON.')}</Text>
+          <Text style={styles.mutedText}>{tr('Export this report as PDF, ZIP, or JSON.')}</Text>
           {exportBusy ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
               <ActivityIndicator size="small" color={themeColors.primary} />
@@ -9886,7 +9901,7 @@ function ReportsScreen() {
           <View style={{ marginTop: themeSpacing.sm }}>
             <AppButton
               label={tr('Export report')}
-              variant="secondary"
+              variant="primary"
               iconName={entitlements.exportsEnabled ? 'cloud-download-outline' : 'sparkles-outline'}
               onPress={onExportPress}
               disabled={exportBusy}
@@ -9906,9 +9921,15 @@ function ReportsScreen() {
         <Surface elevated>
           <SectionHeader title={tr('Totals in range')} />
           <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.xs }}>
-            <Text style={styles.bodyText}>{tr('Bills in range')}: {totals.totalBillsInRange}</Text>
-            <Text style={styles.bodyText}>{tr('Total amount (EUR)')}: EUR {totals.totalAmountEur.toFixed(2)}</Text>
-            <Text style={styles.bodyText}>{tr('Unpaid total (EUR)')}: EUR {totals.unpaidTotalEur.toFixed(2)}</Text>
+            <Text style={styles.reportStatLabel}>
+              {tr('Bills in range')}: <Text style={styles.reportStatValue}>{totals.totalBillsInRange}</Text>
+            </Text>
+            <Text style={styles.reportStatLabel}>
+              {tr('Total amount (EUR)')}: <Text style={styles.reportStatValue}>EUR {totals.totalAmountEur.toFixed(2)}</Text>
+            </Text>
+            <Text style={styles.reportStatLabel}>
+              {tr('Unpaid total (EUR)')}: <Text style={styles.reportStatValue}>EUR {totals.unpaidTotalEur.toFixed(2)}</Text>
+            </Text>
           </View>
         </Surface>
 
@@ -10988,10 +11009,12 @@ function PayScreen() {
     Alert.alert(tr('Updated'), t(getCurrentLang(), 'Moved {count} bill(s) by {days} day(s).', { count: list.length, days }))
   }
   function toggleSel(id: string) { setSelected(prev=> ({ ...prev, [id]: !prev[id] })) }
-  function Chip({ text }: { text: string }) {
+  function Chip({ text, tone = 'neutral' }: { text: string; tone?: 'neutral' | 'warning' }) {
+    const bg = tone === 'warning' ? '#FEF3C7' : themeColors.primarySoft
+    const fg = tone === 'warning' ? '#92400E' : themeColors.primary
     return (
-      <View style={{ backgroundColor: '#EDF2F7', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3 }}>
-        <Text style={{ color: '#4A5568', fontSize: 12 }} numberOfLines={1}>
+      <View style={{ backgroundColor: bg, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3 }}>
+        <Text style={{ color: fg, fontSize: 12, fontWeight: '600' }} numberOfLines={1}>
           {text}
         </Text>
       </View>
@@ -11039,13 +11062,18 @@ function PayScreen() {
               data={upcoming}
               keyExtractor={(b)=>b.id}
               contentContainerStyle={styles.listContent}
-              renderItem={({ item })=> (
+              renderItem={({ item })=> {
+                const dueDate = parseDateValue(item.due_date)
+                const todayDate = parseDateValue(today)
+                const isOverdue = dueDate && todayDate ? dueDate.getTime() < todayDate.getTime() : false
+                return (
                 <Surface elevated style={styles.billRowCard}>
                   <View style={styles.billRowHeader}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.cardTitle}>{item.supplier}</Text>
-                      <Text style={styles.mutedText}>
-                        {item.currency} {item.amount.toFixed(2)} • {tr('Due')}: {item.due_date}{(item as any).pay_date? ` • ${tr('Planned')}: ${(item as any).pay_date}`:''}
+                      <Text style={styles.payBillMeta}>
+                        {item.currency} {item.amount.toFixed(2)} • {tr('Due')}: <Text style={isOverdue ? styles.payDueOverdue : styles.payDueText}>{item.due_date}</Text>
+                        {(item as any).pay_date ? ` • ${tr('Planned')}: ${(item as any).pay_date}` : ''}
                       </Text>
                     </View>
                     <Pressable onPress={()=>toggleSel(item.id)}>
@@ -11057,7 +11085,10 @@ function PayScreen() {
                     </Pressable>
                   </View>
                   <View style={styles.billActionsRow}>
-                    <Chip text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : (new Date(item.due_date).getTime()-Date.now())/(24*3600*1000) < 1 ? tr('Due today') : tr('Upcoming')} />
+                    <Chip
+                      text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : (new Date(item.due_date).getTime()-Date.now())/(24*3600*1000) < 1 ? tr('Due today') : tr('Upcoming')}
+                      tone={isOverdue ? 'warning' : 'neutral'}
+                    />
                     <AppButton
                       label={tr('Mark as paid')}
                       variant="secondary"
@@ -11081,7 +11112,7 @@ function PayScreen() {
                     />
                   </View>
                 </Surface>
-              )}
+              )}}
             />
           )}
         </Surface>
@@ -11413,7 +11444,7 @@ function ProfileRenameGate() {
 
 function MainTabs() {
   const insets = useSafeAreaInsets()
-  const bottomPadding = Math.max(insets.bottom, 2)
+  const bottomPadding = Math.max(insets.bottom - 2, 0)
   const { lang } = useLangContext()
 
   return (
@@ -11438,12 +11469,12 @@ function MainTabs() {
               )[route.name] || route.name
             ),
           tabBarStyle: {
-            borderTopColor: '#E5E7EB',
-            borderTopWidth: StyleSheet.hairlineWidth,
-            backgroundColor: '#FFFFFF',
-            paddingTop: 0,
+            borderTopColor: 'transparent',
+            borderTopWidth: 0,
+            backgroundColor: themeColors.surface,
+            paddingTop: 4,
             paddingBottom: bottomPadding,
-            height: 38 + bottomPadding,
+            height: 50 + bottomPadding,
           },
           tabBarLabelStyle: {
             fontSize: 10,
@@ -11460,7 +11491,7 @@ function MainTabs() {
               Scan: 'add-circle-outline',
               Bills: 'document-text-outline',
               Pay: 'card-outline',
-              Settings: 'settings-outline',
+              Settings: 'menu-outline',
             }
 
             const iconName = icons[route.name] ?? 'ellipse-outline'
@@ -12273,13 +12304,13 @@ const styles = StyleSheet.create({
       color: '#111827',
     },
     payUrgencyToday: {
-      backgroundColor: '#FEE2E2',
+      backgroundColor: '#FEF3C7',
     },
     payUrgencyWeek: {
       backgroundColor: '#FFEDD5',
     },
     payUrgencyMonth: {
-      backgroundColor: '#E0F2FE',
+      backgroundColor: themeColors.primarySoft,
     },
     payUrgencySummaryRow: {
       flexDirection: 'row',
@@ -12324,7 +12355,7 @@ const styles = StyleSheet.create({
   tabTopBarLeft: { flexDirection: 'row', alignItems: 'center', flexShrink: 1 },
   tabTopBarRight: { flexDirection: 'row', alignItems: 'center', marginLeft: 'auto' },
   tabTopBarLogo: { width: 24, height: 24, marginRight: themeSpacing.xs },
-  tabTopBarTitle: { fontSize: 18, fontWeight: '700', color: themeColors.text, flexShrink: 1 },
+  tabTopBarTitle: { fontSize: 18, fontWeight: '700', color: themeColors.primary, flexShrink: 1 },
   tabTopBarBackButton: {
     width: 30,
     height: 30,
@@ -12332,7 +12363,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: themeColors.border,
+    borderColor: themeColors.primarySoft,
     backgroundColor: themeColors.surface,
   },
 
@@ -12347,9 +12378,9 @@ const styles = StyleSheet.create({
   primaryBtn: { backgroundColor: themeColors.primary, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   primaryBtnDisabled: { opacity: 0.6 },
   primaryBtnText: { color: '#FFFFFF', fontWeight: '600' },
-  secondaryBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, backgroundColor: '#EEF2FF' },
+  secondaryBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, backgroundColor: themeColors.primarySoft },
   secondaryBtnActive: { backgroundColor: themeColors.primary },
-  secondaryBtnText: { color: '#1F2937', fontWeight: '600' },
+  secondaryBtnText: { color: themeColors.primary, fontWeight: '600' },
   secondaryBtnTextActive: { color: '#FFFFFF' },
   inboxControlsRow: { flexDirection: 'row', gap: themeLayout.gap, flexWrap: 'wrap', alignItems: 'center' },
   inboxFilterRow: { flexDirection: 'row', gap: 8 },
@@ -12369,7 +12400,7 @@ const styles = StyleSheet.create({
   // Inbox
   inboxHeroCard: { marginTop: themeSpacing.sm, marginBottom: themeSpacing.md },
   inboxHeroRow: { flexDirection: 'row', gap: themeLayout.gap, marginBottom: themeSpacing.md, alignItems: 'flex-start' },
-  inboxHeroIconWrap: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center' },
+  inboxHeroIconWrap: { width: 40, height: 40, borderRadius: 20, backgroundColor: themeColors.primarySoft, alignItems: 'center', justifyContent: 'center' },
   segmentWrap: { marginBottom: themeSpacing.md },
   inboxItemCard: { marginBottom: themeSpacing.md },
   inboxItemHighlighted: { borderWidth: 1, borderColor: '#22C55E' },
@@ -12404,17 +12435,21 @@ const styles = StyleSheet.create({
   emptyStateWrapper: { marginTop: themeSpacing.lg },
   billsPrimaryActionsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: themeLayout.gap },
   billCard: { marginBottom: themeSpacing.sm, borderRadius: 12, padding: themeLayout.cardPadding, backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
+  billCardUnpaid: { borderColor: themeColors.primarySoft },
+  billCardPaid: { borderColor: 'rgba(34, 197, 94, 0.5)' },
+  billCardOverdue: { borderColor: 'rgba(217, 119, 6, 0.65)' },
   billHighlighted: { borderColor: themeColors.primary, borderWidth: 2 },
   billCardPressable: { flex: 1, gap: themeSpacing.sm },
   billCardPressed: { opacity: 0.86 },
   billHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: themeLayout.gap },
-  billSupplier: { fontSize: 15, fontWeight: '600', color: '#111827', flex: 1 },
-  billAmount: { fontSize: 15, fontWeight: '700', color: themeColors.primary },
+  billSupplier: { fontSize: 16, fontWeight: '700', color: '#111827', flex: 1 },
+  billAmount: { fontSize: 16, fontWeight: '800', color: themeColors.primary },
   billMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: themeSpacing.sm },
   billMetaGroup: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs },
-  billMetaText: { fontSize: 12, color: '#4B5563' },
+  billMetaText: { fontSize: 13, color: '#374151' },
   billMetaSecondary: { fontSize: 12, color: '#6B7280' },
-  attachmentPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: 'rgba(30, 78, 216, 0.12)' },
+  warrantyMetaText: { fontSize: 12, color: '#4B5563' },
+  attachmentPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: themeColors.primarySoft },
   attachmentText: { fontSize: 12, color: themeColors.primary },
   fab: { position: 'absolute', right: themeSpacing.xl, bottom: isIOS ? themeSpacing.xl : themeSpacing.xxl + themeSpacing.lg },
   iosPickerOverlay: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.35)', justifyContent: 'flex-end', padding: themeLayout.screenPadding },
@@ -12424,6 +12459,11 @@ const styles = StyleSheet.create({
   billRowHighlighted: { borderWidth: 1, borderColor: '#22C55E' },
   billRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: themeLayout.gap, flexWrap: 'wrap' },
   billActionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.xs, marginTop: themeSpacing.xs },
+  payBillMeta: { fontSize: 13, color: '#374151' },
+  payDueText: { fontWeight: '700', color: themeColors.primary },
+  payDueOverdue: { fontWeight: '700', color: '#92400E' },
+  reportStatLabel: { fontSize: 13, color: '#4B5563' },
+  reportStatValue: { fontSize: 15, fontWeight: '700', color: themeColors.text },
 
   // Add bill
   helperText: { fontSize: 12, color: '#6B7280', marginTop: themeSpacing.xs },
@@ -12438,6 +12478,7 @@ const styles = StyleSheet.create({
   cameraOverlay: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
   cameraFocusBox: { width: '64%', height: '64%', borderRadius: 18, borderWidth: 2, borderColor: '#FFFFFFAA' },
   cameraActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-start', gap: themeLayout.gap, marginTop: themeSpacing.xs },
+  addBillActionButton: { minHeight: 52, paddingHorizontal: 18 },
   formCard: { gap: themeSpacing.sm },
   formIntro: { fontSize: 13, color: themeColors.textMuted },
   formNotice: { alignSelf: 'stretch' },
@@ -12477,28 +12518,32 @@ const styles = StyleSheet.create({
 
   // Home tiles
   gridWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
-  statCardPressable: { width: '48%', height: 104, marginBottom: themeSpacing.sm },
+  statCardPressable: { width: '48%', height: 112, marginBottom: themeSpacing.md },
   statCardPressed: { opacity: 0.9 },
   homeSummaryCard: { padding: themeSpacing.sm },
-  homeHeroCard: { padding: themeSpacing.sm },
+  homeHeroCard: { padding: themeSpacing.md, backgroundColor: themeColors.primary, borderColor: themeColors.primary },
   homeHeroHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap },
-  homeHeroTitle: { fontSize: 14, fontWeight: '700', color: themeColors.text },
-  homeMetricsRow: { marginTop: themeSpacing.sm, flexDirection: 'row', gap: themeSpacing.xs },
-  homeMetricCard: { flex: 1, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, paddingVertical: themeSpacing.sm, paddingHorizontal: themeSpacing.sm, backgroundColor: themeColors.surface },
-  homeMetricCardUnpaid: { backgroundColor: '#E0F2FE', borderColor: '#BAE6FD' },
+  homeHeroTitle: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
+  homeHeroSubtitle: { fontSize: 12, color: 'rgba(255, 255, 255, 0.8)' },
+  homeMetricsRow: { marginTop: themeSpacing.md, flexDirection: 'row', gap: themeSpacing.sm },
+  homeMetricCard: { flex: 1, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, paddingVertical: themeSpacing.sm, paddingHorizontal: themeSpacing.sm, backgroundColor: '#FFFFFF' },
+  homeMetricCardUnpaid: { backgroundColor: themeColors.primarySoft, borderColor: '#BFDBFE' },
   homeMetricCardOverdue: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
   homeMetricCardNext: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
-  homeMetricValue: { fontSize: 12, fontWeight: '700', color: themeColors.text },
-  homeMetricLabel: { marginTop: 2, fontSize: 11, color: themeColors.textMuted },
+  homeMetricValue: { fontSize: 16, fontWeight: '800', color: themeColors.text },
+  homeMetricLabel: { marginTop: 4, fontSize: 11, color: themeColors.textMuted },
   statCard: { paddingVertical: themeSpacing.xs, paddingHorizontal: themeSpacing.sm, gap: themeSpacing.xs, flex: 1, justifyContent: 'space-between' },
-  statCardPrimary: { borderWidth: 1, borderColor: themeColors.border },
+  statCardPrimary: { borderWidth: 1, borderColor: themeColors.primary },
   homePrimaryTile: { borderWidth: 1, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
-  homePrimaryTileScan: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
+  homePrimaryTileScan: { backgroundColor: themeColors.primary, borderColor: themeColors.primary },
   homePrimaryTileBills: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
   homePrimaryTilePay: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
   statIconWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },
-  statLabel: { fontSize: 13, fontWeight: '600', color: themeColors.text },
+  statIconWrapPrimary: { backgroundColor: 'rgba(255, 255, 255, 0.18)', borderColor: 'rgba(255, 255, 255, 0.5)' },
+  statLabel: { fontSize: 13, fontWeight: '700', color: themeColors.text },
+  statLabelPrimary: { color: '#FFFFFF' },
   statValue: { fontSize: 11, color: themeColors.textMuted },
+  statValuePrimary: { color: 'rgba(255, 255, 255, 0.9)' },
 
   payerNameTitle: { fontSize: 16, fontWeight: '600', color: themeColors.text },
   payerSlotLabel: { fontSize: 12, color: themeColors.textMuted },

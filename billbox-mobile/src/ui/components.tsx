@@ -127,8 +127,8 @@ export function AppButton({
   const styles = useMemo(() => makeStyles(colors), [colors])
   const palette = useMemo(() => {
     if (variant === 'ghost') return { bg: 'transparent', border: 'transparent', text: colors.primary }
-    if (variant === 'outline') return { bg: 'transparent', border: colors.border, text: colors.text }
-    if (variant === 'secondary') return { bg: colors.primarySoft, border: colors.primarySoft, text: colors.text }
+    if (variant === 'outline') return { bg: 'transparent', border: colors.primary, text: colors.primary }
+    if (variant === 'secondary') return { bg: colors.primarySoft, border: colors.primarySoft, text: colors.primary }
     return { bg: colors.primary, border: colors.primary, text: '#FFFFFF' }
   }, [variant])
 
