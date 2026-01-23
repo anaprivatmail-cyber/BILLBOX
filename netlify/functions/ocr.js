@@ -2802,32 +2802,36 @@ export async function handler(event) {
           }
         }
 
+        let aiAttempted = false
+        let aiError = null
+        let aiDetail = null
         if (aiVisionOnly) {
-          console.log('[OCR] AI-only PDF text:', { mode: 'ai_pdf_text', ocrLength: text.length })
+          console.log('[OCR] AI-first PDF text:', { mode: 'ai_pdf_text', ocrLength: text.length })
+          aiAttempted = true
           const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint)
-          const aiError = aiResult && aiResult.error ? aiResult.error : null
-          const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
-          if (!aiResult?.fields) {
-            console.error('[OCR] AI PDF text failed:', { error: aiError, detail: aiDetail })
-            return jsonResponse(500, { ok: false, error: 'ai_pdf_text_failed', detail: aiDetail || aiError || 'unknown' })
+          aiError = aiResult && aiResult.error ? aiResult.error : null
+          aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+          if (aiResult?.fields) {
+            const fields = sanitizeFieldsAiOnly(aiResult.fields)
+            const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+            return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
           }
-          const fields = sanitizeFieldsAiOnly(aiResult.fields)
-          const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
-          return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
+          console.error('[OCR] AI PDF text failed; falling back to rule-based.', { error: aiError, detail: aiDetail })
         }
 
         console.log('[OCR] QR found:', false, { mode: 'pdf_text', ocrLength: text.length })
         const fields0 = extractFields(text)
         const candidates = buildFieldCandidates(text)
-        const aiResult = allowAi ? await extractFieldsWithAI(text, candidates, languageHint) : null
+        const allowAiFallback = Boolean(allowAi && !aiAttempted)
+        const aiResult = allowAiFallback ? await extractFieldsWithAI(text, candidates, languageHint) : null
         const aiFields = aiResult && aiResult.fields ? aiResult : null
-        const aiError = aiResult && aiResult.error ? aiResult.error : null
+        const aiErrorFallback = aiResult && aiResult.error ? aiResult.error : null
         if (aiFields?.fields) {
           const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
           console.log('[OCR] AI extracted fields:', keys)
         }
         const fields = mergeFields(fields0, aiFields, text)
-        const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
+        const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
         const aiModel = aiFields ? resolveModel() : null
         const aiTier = aiFields ? 'document' : null
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
@@ -2897,38 +2901,45 @@ export async function handler(event) {
         }
       } catch {}
 
+      let aiAttempted = false
+      let aiError = null
+      let aiDetail = null
       if (aiVisionOnly) {
-        console.log('[OCR] AI-only PDF scan:', { mode: 'ai_pdf_vision', ocrLength: ocrText.length })
+        console.log('[OCR] AI-first PDF scan:', { mode: 'ai_pdf_vision', ocrLength: ocrText.length })
+        aiAttempted = true
         const aiResult = await extractFieldsFromTextWithAIOnly(ocrText, languageHint)
-        const aiError = aiResult && aiResult.error ? aiResult.error : null
-        const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
-        if (!aiResult?.fields) {
-          console.error('[OCR] AI PDF vision failed:', { error: aiError, detail: aiDetail })
-          return jsonResponse(500, { ok: false, error: 'ai_pdf_vision_failed', detail: aiDetail || aiError || 'unknown' })
+        aiError = aiResult && aiResult.error ? aiResult.error : null
+        aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+        if (aiResult?.fields) {
+          const fields = sanitizeFieldsAiOnly(aiResult.fields)
+          const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+          return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
         }
-        const fields = sanitizeFieldsAiOnly(aiResult.fields)
-        const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
-        return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
+        console.error('[OCR] AI PDF vision failed; falling back to rule-based.', { error: aiError, detail: aiDetail })
       }
 
       console.log('[OCR] QR found:', false, { mode: 'pdf_vision', ocrLength: ocrText.length })
       const fields0 = extractFields(ocrText)
       const candidates = buildFieldCandidates(ocrText)
-      const aiResult = allowAi ? await extractFieldsWithAI(ocrText, candidates, languageHint) : null
+      const allowAiFallback = Boolean(allowAi && !aiAttempted)
+      const aiResult = allowAiFallback ? await extractFieldsWithAI(ocrText, candidates, languageHint) : null
       const aiFields = aiResult && aiResult.fields ? aiResult : null
-      const aiError = aiResult && aiResult.error ? aiResult.error : null
+      const aiErrorFallback = aiResult && aiResult.error ? aiResult.error : null
       if (aiFields?.fields) {
         const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
         console.log('[OCR] AI extracted fields:', keys)
       }
       const fields = mergeFields(fields0, aiFields, ocrText)
-      const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
+      const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
       const aiModel = aiFields ? resolveModel() : null
       const aiTier = aiFields ? 'document' : null
       return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_vision' })
     }
 
     // Image path: AI-vision-only extraction (cheapest + closest to chat behavior).
+    let aiAttempted = false
+    let aiError = null
+    let aiDetail = null
     if (aiVisionOnly) {
       const effectiveContentType = imageContentType || contentType
       // Increment usage (counts as OCR/document extraction)
@@ -2956,18 +2967,17 @@ export async function handler(event) {
         }
       } catch {}
 
+      aiAttempted = true
       const aiResult = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint })
-      const aiError = aiResult && aiResult.error ? aiResult.error : null
-      const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+      aiError = aiResult && aiResult.error ? aiResult.error : null
+      aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
       const aiFields = aiResult && aiResult.fields ? aiResult.fields : null
-      if (!aiFields) {
-        console.error('[OCR] AI vision failed:', { error: aiError, detail: aiDetail })
-        return jsonResponse(500, { ok: false, error: 'ai_vision_failed', detail: aiDetail || aiError || 'unknown' })
+      if (aiFields) {
+        const fields = sanitizeFieldsAiOnly(aiFields)
+        const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+        return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
       }
-
-      const fields = sanitizeFieldsAiOnly(aiFields)
-      const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
-      return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
+      console.error('[OCR] AI vision failed; falling back to Google OCR.', { error: aiError, detail: aiDetail })
     }
 
     const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
@@ -3158,15 +3168,16 @@ export async function handler(event) {
     console.log('[OCR] QR found:', false, { mode: 'vision_text', ocrLength: full.length })
     const fields0 = extractFields(full)
     const candidates = buildFieldCandidates(full)
-    const aiResult = allowAi ? await extractFieldsWithAI(full, candidates, languageHint) : null
+    const allowAiFallback = Boolean(allowAi && !aiAttempted)
+    const aiResult = allowAiFallback ? await extractFieldsWithAI(full, candidates, languageHint) : null
     const aiFields = aiResult && aiResult.fields ? aiResult : null
-    const aiError = aiResult && aiResult.error ? aiResult.error : null
+    const aiErrorFallback = aiResult && aiResult.error ? aiResult.error : null
     if (aiFields?.fields) {
       const keys = Object.keys(aiFields.fields).filter((k) => aiFields.fields[k] != null)
       console.log('[OCR] AI extracted fields:', keys)
     }
     const fields = mergeFields(fields0, aiFields, full)
-    const meta = { ...buildExtractionMeta(full, fields), ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
+    const meta = { ...buildExtractionMeta(full, fields), ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
 
     const aiModel = aiFields ? resolveModel() : null
     const aiTier = aiFields ? 'document' : null
