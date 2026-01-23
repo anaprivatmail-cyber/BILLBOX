@@ -3098,7 +3098,7 @@ function ScanBillScreen() {
   const [purchaseItem, setPurchaseItem] = useState('')
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [amountStr, setAmountStr] = useState('')
-  const [currency, setCurrency] = useState('EUR')
+  const [currency, setCurrency] = useState('')
   const [dueDate, setDueDate] = useState('')
   const [showDuePicker, setShowDuePicker] = useState(false)
   const [archiveOnly, setArchiveOnly] = useState(archiveOnlyFromBillDraftSelection(DEFAULT_BILL_DRAFT_SELECTION))
@@ -3150,11 +3150,6 @@ function ScanBillScreen() {
   const [inboxSourceId, setInboxSourceId] = useState<string | null>(null)
   const [cameraVisible, setCameraVisible] = useState(true)
   const [missingManualVisible, setMissingManualVisible] = useState(false)
-
-  const debugOverlayEnabled = useMemo(() => {
-    const buildProfile = String(process.env.EXPO_PUBLIC_BUILD_PROFILE || (Constants as any)?.expoConfig?.extra?.eas?.buildProfile || (Constants as any)?.manifest2?.extra?.eas?.buildProfile || '')
-    return __DEV__ || /preview|development/i.test(buildProfile)
-  }, [])
 
   useEffect(() => {
     loadCategoryOverrides()
@@ -3466,6 +3461,15 @@ function ScanBillScreen() {
     const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean)
     if (!lines.length) return null
 
+    const detectCurrencyFromLine = (line: string): string => {
+      const l = String(line || '')
+      if (/€/.test(l)) return 'EUR'
+      if (/\$/.test(l)) return 'USD'
+      if (/£/.test(l)) return 'GBP'
+      const code = l.match(/\b(EUR|USD|GBP|CHF|SEK|NOK|DKK|PLN|HUF|CZK|RON|HRK|BAM|MKD|RSD|TRY)\b/i)
+      return code ? code[1].toUpperCase() : ''
+    }
+
     const payableLabels = /(total\s*due|amount\s*due|balance\s*due|grand\s*total|za\s*pla\S*|za\s*pla\u010dat\S*|za\s*pla\u010dilo|za\s*pla\u010dati|payable|to\s*pay|pay\s*now|za\s*pla\u010dilo\s*z\s*ddv|za\s*pla\u010dilo\s*z\s*ddv)/i
     const ignoreContext = /(\bddv\b|\bvat\b|\btax\b|\bdavek\b|osnova|base\s*amount|\bsubtotal\b|sub\s*total|popust|discount|provizi\S*|fee\b|shipping|po\u0161tnina|delivery|surcharge)/i
 
@@ -3503,6 +3507,16 @@ function ScanBillScreen() {
         const val = picked ? parseMoney(picked) : null
         if (val != null && val > 0) return { amount: val, currency: 'EUR' }
       }
+      const code = l.match(/\b(USD|GBP|CHF|SEK|NOK|DKK|PLN|HUF|CZK|RON|HRK|BAM|MKD|RSD|TRY)\b\s*([0-9][0-9.,\s-]{0,24})/i)
+      if (code) {
+        const val = parseMoney(code[2])
+        if (val != null && val > 0) return { amount: val, currency: code[1].toUpperCase() }
+      }
+      const sym = l.match(/([0-9][0-9.,\s-]{0,24})\s*(\$|£)/)
+      if (sym) {
+        const val = parseMoney(sym[1])
+        if (val != null && val > 0) return { amount: val, currency: sym[2] === '$' ? 'USD' : 'GBP' }
+      }
       return null
     }
 
@@ -3522,7 +3536,7 @@ function ScanBillScreen() {
       if (fromPrev && !hasIgnore) return fromPrev
     }
 
-    // Fallback: any EUR/€ amount (very conservative: pick the largest under a reasonable cap)
+    // Fallback: any currency amount (very conservative: pick the largest under a reasonable cap)
     let best: { amount: number; currency: string } | null = null
     for (const l of lines) {
       const cand = tryLine(l)
@@ -3530,7 +3544,57 @@ function ScanBillScreen() {
       if (cand.amount <= 0 || cand.amount > 1000000) continue
       if (!best || cand.amount > best.amount) best = cand
     }
-    return best
+    if (best && best.currency) return best
+
+    // Final fallback: detect currency on the same line as the largest amount.
+    let bestRaw: { amount: number; currency: string } | null = null
+    for (const l of lines) {
+      const val = (() => {
+        const m = l.match(/\b([0-9]+(?:[\.,][0-9]{1,2})?)\b/)
+        if (!m) return null
+        return parseMoney(m[1])
+      })()
+      if (val == null || val <= 0 || val > 1000000) continue
+      const cur = detectCurrencyFromLine(l)
+      if (!bestRaw || val > bestRaw.amount) bestRaw = { amount: val, currency: cur || '' }
+    }
+    return bestRaw
+  }
+
+  function extractIbanCandidates(text: string, rawIban?: string): string[] {
+    const raw = String(text || '')
+    const all = new Set<string>()
+    const add = (s: string) => { if (s) all.add(s) }
+    const matches = raw.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
+    for (const m of matches) {
+      const cand = normalizeIban(m)
+      if (cand && isValidIbanChecksum(cand)) add(cand)
+    }
+    if (rawIban) {
+      const cand = normalizeIban(rawIban)
+      if (cand && isValidIbanChecksum(cand)) add(cand)
+    }
+    return Array.from(all)
+  }
+
+  function detectCurrencyFromText(rawText: string, ibanCandidate?: string): string {
+    const text = String(rawText || '')
+    if (/€/.test(text) || /\bEUR\b/i.test(text)) return 'EUR'
+    if (/\$/.test(text) || /\bUSD\b/i.test(text)) return 'USD'
+    if (/£/.test(text) || /\bGBP\b/i.test(text)) return 'GBP'
+    const code = text.match(/\b(EUR|USD|GBP|CHF|SEK|NOK|DKK|PLN|HUF|CZK|RON|HRK|BAM|MKD|RSD|TRY)\b/i)
+    if (code) return code[1].toUpperCase()
+    const iban = normalizeIban(ibanCandidate || '')
+    const cc = iban ? iban.slice(0, 2) : ''
+    if (cc === 'SI' || cc === 'DE' || cc === 'AT' || cc === 'IT' || cc === 'FR' || cc === 'ES' || cc === 'PT' || cc === 'NL' || cc === 'BE' || cc === 'IE' || cc === 'SK' || cc === 'FI' || cc === 'EE' || cc === 'LV' || cc === 'LT' || cc === 'LU' || cc === 'MT' || cc === 'CY' || cc === 'GR') return 'EUR'
+    if (cc === 'GB') return 'GBP'
+    if (cc === 'US') return 'USD'
+    return ''
+  }
+
+  function applyDataToForm(source: 'QR' | 'OCR' | 'GOOGLE', fields: any, rawText?: string) {
+    const src = source === 'QR' ? 'qr' : (source === 'GOOGLE' ? 'google' : 'ocr')
+    applyExtractedPaymentFields({ ...fields, rawText: rawText || fields?.rawText || '', _source: src }, src)
   }
 
   function isPayerLabelLine(line: string): boolean {
@@ -3840,10 +3904,8 @@ function ScanBillScreen() {
     const rankForSource = (s: string): number => {
       if (!s) return 3
       if (s === 'qr' || s === 'qr_text' || s === 'qr_barcode') return 0
-      if (s === 'pdf_text' || s === 'text') return 1
-      if (s === 'pdf_vision') return 2
-      if (s === 'vision_text') return 3
-      if (s === 'ai') return 4
+      if (s === 'ocr' || s === 'pdf_text' || s === 'text' || s === 'ai' || s.startsWith('ai_')) return 1
+      if (s === 'google' || s === 'pdf_vision' || s === 'vision_text') return 1
       return 3
     }
     const incomingRank = rankForSource(sourceKey)
@@ -3993,7 +4055,26 @@ function ScanBillScreen() {
 
     // Bank-level rule: do not guess critical payment fields.
     // Only map payment details when explicitly marked for payment.
-    const foundIban = allowPaymentFields ? extractFirstValidIban(rawIban) : null
+    const ibanCandidates = allowPaymentFields ? extractIbanCandidates(rawText || '', rawIban) : []
+    if (allowPaymentFields) {
+      if (ibanCandidates.length > 1) {
+        setIbanOptions(ibanCandidates)
+        setIbanPickerVisible(true)
+      }
+      if (ibanCandidates.length === 1) {
+        if (canSetField('iban', ibanCandidates[0], editedRef.current.iban, iban)) {
+          setIban(ibanCandidates[0])
+          markFieldSource('iban')
+        }
+      }
+      if (ibanCandidates.length === 0 && !editedRef.current.iban && !iban.trim()) {
+        setIbanHint(tr('IBAN not found.'))
+      }
+    }
+    const foundIban = ibanCandidates.length === 1 ? ibanCandidates[0] : null
+    if (allowPaymentFields && ibanCandidates.length) {
+      console.log('[OCR] IBAN candidates:', ibanCandidates)
+    }
     if (allowPaymentFields) {
       if (isAiOnly && rawIban) {
         const rawNorm = normalizeIban(rawIban)
@@ -4128,12 +4209,12 @@ function ScanBillScreen() {
 
       let extractedAmount: { amount: number; currency: string } | null = null
       if (typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0) {
-        extractedAmount = { amount: fields.amount, currency: String(fields?.currency || 'EUR') }
+        extractedAmount = { amount: fields.amount, currency: String(fields?.currency || '') }
       } else if (isAiOnly && typeof fields?.amount === 'string') {
         const amt = parseMoney(fields.amount)
         if (amt && amt > 0) {
-          const cur = typeof fields?.currency === 'string' ? fields.currency.toUpperCase() : (/\bEUR\b/i.test(fields.amount) || /€/.test(fields.amount) ? 'EUR' : '')
-          extractedAmount = { amount: amt, currency: cur || 'EUR' }
+          const cur = typeof fields?.currency === 'string' ? fields.currency.toUpperCase() : detectCurrencyFromText(fields.amount, foundIban || undefined)
+          extractedAmount = { amount: amt, currency: cur || '' }
         }
       } else {
         extractedAmount = extractAmountFromText(rawText)
@@ -4149,6 +4230,16 @@ function ScanBillScreen() {
           const cur = String(extractedAmount.currency || '').toUpperCase()
           if (cur && cur !== 'UNKNOWN' && canSetField('currency', cur, editedRef.current.currency, currency)) {
             setCurrency(cur)
+            markFieldSource('currency')
+          }
+        }
+        if (!extractedAmount.currency) {
+          const detected = detectCurrencyFromText(rawText, foundIban || undefined)
+          if (detected && canSetField('currency', detected, editedRef.current.currency, currency)) {
+            setCurrency(detected)
+            markFieldSource('currency')
+          } else if (canSetField('currency', 'UNKNOWN', editedRef.current.currency, currency)) {
+            setCurrency('UNKNOWN')
             markFieldSource('currency')
           }
         }
@@ -4366,7 +4457,7 @@ function ScanBillScreen() {
     setPurchaseItem('')
     setInvoiceNumber('')
     setAmountStr('')
-    setCurrency('EUR')
+    setCurrency('')
     setDueDate('')
     setArchiveOnly(archiveOnlyFromBillDraftSelection(DEFAULT_BILL_DRAFT_SELECTION))
     setCreditorName('')
@@ -4418,7 +4509,7 @@ function ScanBillScreen() {
       if (supplierName) setSupplier(supplierName)
       const cred = pickNameCandidate(f.creditor_name, supplierName)
       if (cred) setCreditorName(cred)
-      applyExtractedPaymentFields({ ...f, rawText: raw })
+      applyDataToForm('OCR', { ...f }, raw)
       if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
       if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
       if (typeof f.amount === 'number') setAmountStr(String(f.amount))
@@ -4459,7 +4550,11 @@ function ScanBillScreen() {
       // Try QR decode first (web via ZXing), with up to 3 retries; fallback to OCR
       const decoded = await decodeImageQR(cached.uri, 3)
       if (decoded) {
-        handleDecodedText(decoded)
+        const isPaymentQr = handleDecodedText(decoded)
+        if (!isPaymentQr) {
+          const languageHint = getCurrentLang()
+          await extractWithOCR(cached.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
+        }
       } else {
         const languageHint = getCurrentLang()
         await extractWithOCR(cached.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
@@ -4529,19 +4624,19 @@ function ScanBillScreen() {
     }
   }
 
-  function handleDecodedText(text: string) {
+  function handleDecodedText(text: string): boolean {
     const t = (text ?? '').toString()
     setRawText(t || '')
-    if (!t) { setFormat('Unknown'); setParsed(null); Alert.alert(tr('QR detected but no text decoded')); return }
+    if (!t) { setFormat('Unknown'); setParsed(null); Alert.alert(tr('QR detected but no text decoded')); return false }
     const epc = parseEPC(t)
     const upn = !epc ? parseUPN(t) : null
-    const urlPay = !epc && !upn ? parseUrlPayment(t) : null
-    const p = epc || upn || urlPay
+    const p = epc || upn
     if (!p) {
-      setFormat('Unknown')
+      setFormat(tr('QR is not a payment QR.'))
       setParsed(null)
-      Alert.alert(tr('Unsupported QR format'))
-      return
+      setOcrError(tr('QR is not a payment QR.'))
+      Alert.alert(tr('QR is not a payment QR.'))
+      return false
     }
     setDebugFileInfo({ source: 'original', size: null })
     setDebugStatus('DONE')
@@ -4561,12 +4656,13 @@ function ScanBillScreen() {
     if (!p.due_date) missing.push('due_date')
     setParsed({ ...p, needsReview: missing.length > 0, missingFields: missing })
     if (missing.length) console.warn('QR missing fields:', missing)
-    applyExtractedPaymentFields({ ...p, rawText: t }, 'qr')
+    applyDataToForm('QR', { ...p }, t)
 
     // QR mapping is deterministic: AI is never used for QR mapping.
     setUseDataActive(true)
     setCameraVisible(false)
     setTorch('off')
+    return true
   }
 
   async function extractWithOCR(uri: string, contentType?: string, opts?: { preferQr?: boolean; allowAi?: boolean; aiMode?: string; languageHint?: string }) {
@@ -4585,20 +4681,28 @@ function ScanBillScreen() {
         const info = await FileSystem.getInfoAsync(uri)
         if (info) setDebugFileInfo({ source: 'original', size: typeof info.size === 'number' ? info.size : null })
       } catch {}
-      const { fields: f, summary, rawText: ocrText, mode, meta, ai, aiModel, aiTier } = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
-      applyOcr(f, String(ocrText || ''), mode, meta)
+      const primary = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+      const ocrText = String(primary?.rawText || '')
+      const f = primary?.fields || {}
+      const isEmpty = !ocrText.trim() && !f?.iban && !f?.reference && !(typeof f?.amount === 'number')
+      if (isEmpty) {
+        const fallback = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: false, aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+        applyOcr(fallback?.fields || {}, String(fallback?.rawText || ''), fallback?.mode, fallback?.meta)
+      } else {
+        applyOcr(f, ocrText, primary?.mode, primary?.meta)
+      }
       setDebugStatus('DONE')
-      setDebugQrFound(/qr/i.test(String(mode || '')))
+      setDebugQrFound(/qr/i.test(String(primary?.mode || '')))
       setDebugOcrLength(String(ocrText || '').length)
-      setDebugOcrMode(String(mode || '') || null)
+      setDebugOcrMode(String(primary?.mode || '') || null)
       setDebugAiInfo({
-        called: Boolean(ai),
-        model: aiModel || null,
-        tier: aiTier || null,
-        enabled: meta?.ai?.enabled ?? null,
-        attempted: meta?.ai?.attempted ?? null,
-        error: meta?.ai?.error ?? null,
-        mode: String(mode || '') || null,
+        called: Boolean(primary?.ai),
+        model: primary?.aiModel || null,
+        tier: primary?.aiTier || null,
+        enabled: primary?.meta?.ai?.enabled ?? null,
+        attempted: primary?.meta?.ai?.attempted ?? null,
+        error: primary?.meta?.ai?.error ?? null,
+        mode: String(primary?.mode || '') || null,
       })
       // Keep UX non-technical; the draft is already filled and still editable.
       if (summary && summary !== 'No fields found') {
@@ -4619,6 +4723,22 @@ function ScanBillScreen() {
         Alert.alert(tr('OCR unavailable'), text)
         setDebugStatus('ERROR')
         return
+      }
+
+      const shouldFallback = status === 500 || status === 502 || status === 503 || status === 504 || code === 'timeout' || /timeout/i.test(msg)
+      if (shouldFallback) {
+        try {
+          const fallback = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: false, aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+          applyOcr(fallback?.fields || {}, String(fallback?.rawText || ''), fallback?.mode, fallback?.meta)
+          setDebugStatus('DONE')
+          return
+        } catch (fallbackErr: any) {
+          const fallbackMsg = withRequestId(tr('OCR failed'))
+          setOcrError(fallbackMsg)
+          Alert.alert(tr('OCR failed'), fallbackMsg)
+          setDebugStatus('ERROR')
+          return
+        }
       }
 
       if (code === 'ocr_not_allowed') {
@@ -4670,18 +4790,11 @@ function ScanBillScreen() {
     if (meta && Array.isArray((meta as any).not_found) && (meta as any).not_found.length) {
       console.warn('OCR not found fields:', { mode, not_found: (meta as any).not_found, scanned: (meta as any).scanned })
     }
-    const ibanCandidates = Array.isArray(meta?.candidates?.ibans)
-      ? Array.from(new Set((meta.candidates.ibans as string[]).filter(Boolean)))
-      : []
-    if (meta?.doubt?.iban && ibanCandidates.length > 1 && !iban.trim()) {
-      setIbanOptions(ibanCandidates)
-      setIbanPickerVisible(true)
-      setIbanHint(tr('Multiple IBANs found — choose one.'))
-    } else {
-      setIbanOptions([])
-      setIbanPickerVisible(false)
-    }
-    applyExtractedPaymentFields({ ...f, rawText: ocrText }, String(mode || '').trim())
+    const normalizedMode = String(mode || '').trim().toLowerCase()
+    const source: 'QR' | 'OCR' | 'GOOGLE' = /qr/.test(normalizedMode)
+      ? 'QR'
+      : (/vision/.test(normalizedMode) ? 'GOOGLE' : 'OCR')
+    applyDataToForm(source, { ...f }, ocrText)
     // Do not directly overwrite form fields here; mapping happens via applyExtractedPaymentFields with strict precedence.
 
     setUseDataActive(true)
@@ -4702,20 +4815,28 @@ function ScanBillScreen() {
       setDebugAiInfo(null)
       setDebugFileInfo({ source: 'preview', size: Math.floor(String(base64 || '').length * 0.75) })
       setDebugRequestId(null)
-      const { fields: f, summary, rawText: ocrText, mode, meta, ai, aiModel, aiTier } = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
-      applyOcr(f, String(ocrText || ''), mode, meta)
+      const primary = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+      const ocrText = String(primary?.rawText || '')
+      const f = primary?.fields || {}
+      const isEmpty = !ocrText.trim() && !f?.iban && !f?.reference && !(typeof f?.amount === 'number')
+      if (isEmpty) {
+        const fallback = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: false, aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+        applyOcr(fallback?.fields || {}, String(fallback?.rawText || ''), fallback?.mode, fallback?.meta)
+      } else {
+        applyOcr(f, ocrText, primary?.mode, primary?.meta)
+      }
       setDebugStatus('DONE')
-      setDebugQrFound(/qr/i.test(String(mode || '')))
+      setDebugQrFound(/qr/i.test(String(primary?.mode || '')))
       setDebugOcrLength(String(ocrText || '').length)
-      setDebugOcrMode(String(mode || '') || null)
+      setDebugOcrMode(String(primary?.mode || '') || null)
       setDebugAiInfo({
-        called: Boolean(ai),
-        model: aiModel || null,
-        tier: aiTier || null,
-        enabled: meta?.ai?.enabled ?? null,
-        attempted: meta?.ai?.attempted ?? null,
-        error: meta?.ai?.error ?? null,
-        mode: String(mode || '') || null,
+        called: Boolean(primary?.ai),
+        model: primary?.aiModel || null,
+        tier: primary?.aiTier || null,
+        enabled: primary?.meta?.ai?.enabled ?? null,
+        attempted: primary?.meta?.ai?.attempted ?? null,
+        error: primary?.meta?.ai?.error ?? null,
+        mode: String(primary?.mode || '') || null,
       })
       if (summary && summary !== 'No fields found') {
         // Optional: leave silent, but keep summary available via rawText.
@@ -4724,40 +4845,63 @@ function ScanBillScreen() {
       const msg = e?.message || 'OCR failed'
       const status = (e as any)?.status
       const code = (e as any)?.code
+      const requestId = (e as any)?.requestId
+      if (requestId) setDebugRequestId(requestId)
+      const withRequestId = (base: string) => requestId ? `${base}\n${tr('Request ID')}: ${requestId}` : base
       console.warn('OCR failed:', { status, code, msg })
 
+      const shouldFallback = status === 500 || status === 502 || status === 503 || status === 504 || code === 'timeout' || /timeout/i.test(msg)
+      if (shouldFallback) {
+        try {
+          const fallback = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: false, aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+          applyOcr(fallback?.fields || {}, String(fallback?.rawText || ''), fallback?.mode, fallback?.meta)
+          setDebugStatus('DONE')
+          return
+        } catch {
+          const fallbackMsg = withRequestId(tr('OCR failed'))
+          setOcrError(fallbackMsg)
+          Alert.alert(tr('OCR failed'), fallbackMsg)
+          setDebugStatus('ERROR')
+          return
+        }
+      }
+
       if (status === 401 || code === 'auth_required' || /sign in/i.test(msg)) {
-        setOcrError(tr('Please sign in again.'))
-        Alert.alert(tr('OCR unavailable'), tr('Please sign in again.'))
+        const text = withRequestId(tr('Please sign in again.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR unavailable'), text)
         return
       }
 
       if (code === 'ocr_not_allowed') {
-        setOcrError(tr('OCR not available on your plan.'))
+        setOcrError(withRequestId(tr('OCR not available on your plan.')))
         showUpgradeAlert('ocr')
         return
       }
 
       if (code === 'ocr_quota_exceeded' || /quota/i.test(msg)) {
-        setOcrError(tr('OCR monthly quota exceeded.'))
+        setOcrError(withRequestId(tr('OCR monthly quota exceeded.')))
         showUpgradeAlert('ocr')
         return
       }
 
       if (code === 'pdf_no_text') {
-        setOcrError(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
-        Alert.alert(tr('OCR failed'), tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        const text = withRequestId(tr('This PDF has no selectable text (scanned). Please import an image instead.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR failed'), text)
         return
       }
 
       if (code === 'file_too_large') {
-        setOcrError(tr('File too large for OCR.'))
-        Alert.alert(tr('OCR failed'), tr('File too large for OCR.'))
+        const text = withRequestId(tr('File too large for OCR.'))
+        setOcrError(text)
+        Alert.alert(tr('OCR failed'), text)
         return
       }
 
-      setOcrError(msg)
-      Alert.alert(tr('OCR failed'), msg)
+      const text = withRequestId(String(msg || tr('OCR failed')))
+      setOcrError(text)
+      Alert.alert(tr('OCR failed'), text)
       setDebugStatus('ERROR')
     } finally {
       setOcrBusy(false)
@@ -4769,7 +4913,25 @@ function ScanBillScreen() {
       setMissingManualVisible(true)
       return
     }
-    handleDecodedText(manual)
+    const text = manual.trim()
+    if (/\bBCD\b|UPNQR/i.test(text)) {
+      handleDecodedText(text)
+      return
+    }
+    void (async () => {
+      try {
+        setOcrError(null)
+        const res = await extractTextWithAI(text)
+        applyDataToForm('OCR', res.fields || {}, res.rawText || text)
+        setUseDataActive(true)
+        setCameraVisible(false)
+        setTorch('off')
+      } catch (e: any) {
+        const msg = e?.message || tr('OCR failed')
+        setOcrError(msg)
+        Alert.alert(tr('OCR failed'), msg)
+      }
+    })()
   }
 
   function getDueDateValue() {
@@ -5175,7 +5337,7 @@ function ScanBillScreen() {
             </View>
           </Disclosure>
 
-          <Disclosure title={tr('Last captured raw text (debug)')}>
+          <Disclosure title={tr('Last captured text')}>
             {rawText?.trim() ? (
               <>
                 <Text style={styles.mutedText}>{tr('This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.')}</Text>
@@ -5511,30 +5673,6 @@ function ScanBillScreen() {
         </Surface>
       </View>
 
-      {debugOverlayEnabled && (
-        <View style={styles.debugOverlay} pointerEvents="none">
-          <Text style={styles.debugTitle}>{tr('Debug')}</Text>
-          <Text style={styles.debugLine}>{tr('Build')}: {(Constants as any)?.expoConfig?.android?.versionCode || 'n/a'} • {String((Constants as any)?.expoConfig?.extra?.commitHash || 'unknown').slice(0, 7)}</Text>
-          <Text style={styles.debugLine}>{tr('Mode')}: {archiveOnly ? tr('Archive') : tr('To pay')}</Text>
-          <Text style={styles.debugLine}>{tr('Extraction')}: {debugStatus}</Text>
-          <Text style={styles.debugLine}>{tr('File')}: {debugFileInfo?.source || 'original'} • {(typeof debugFileInfo?.size === 'number' ? `${debugFileInfo.size} B` : 'n/a')}</Text>
-          <Text style={styles.debugLine}>{tr('OCR mode')}: {debugOcrMode || 'n/a'}</Text>
-          <Text style={styles.debugLine}>{tr('QR found')}: {String(debugQrFound)}</Text>
-          <Text style={styles.debugLine}>{tr('OCR length')}: {debugOcrLength}</Text>
-          <Text style={styles.debugLine}>{tr('AI called')}: {debugAiInfo?.called ? 'true' : 'false'}{debugAiInfo?.model || debugAiInfo?.tier ? ` (${[debugAiInfo?.model, debugAiInfo?.tier].filter(Boolean).join(', ')})` : ''}</Text>
-          <Text style={styles.debugLine}>{tr('AI enabled')}: {String(debugAiInfo?.enabled ?? 'n/a')} • {tr('Attempted')}: {String(debugAiInfo?.attempted ?? 'n/a')}</Text>
-          <Text style={styles.debugLine}>{tr('AI error')}: {debugAiInfo?.error || '—'}</Text>
-          <Text style={styles.debugLine}>{tr('Request ID')}: {debugRequestId || '—'}</Text>
-          <Text style={styles.debugLine}>{tr('Fields')}: {[
-            supplier ? tr('Issuer') : null,
-            invoiceNumber ? tr('Invoice') : null,
-            amountStr ? tr('Amount') : null,
-            dueDate ? tr('Due') : null,
-            iban ? tr('IBAN') : null,
-            reference ? tr('Reference') : null,
-          ].filter(Boolean).join(', ') || '—'}</Text>
-        </View>
-      )}
 
       <Modal
         visible={ibanPickerVisible}
