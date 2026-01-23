@@ -45,6 +45,9 @@
     },
     "production": {
       "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle"
+      },
       "env": {
         "EXPO_PUBLIC_BUILD_PROFILE": "production",
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
