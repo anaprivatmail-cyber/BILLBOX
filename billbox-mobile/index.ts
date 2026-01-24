@@ -16,6 +16,8 @@ if (sentryDsn) {
 		enableInExpoDevelopment: true,
 		debug: false,
 	})
+	Sentry.captureMessage('app_init')
+	Sentry.flush(2000)
 }
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);

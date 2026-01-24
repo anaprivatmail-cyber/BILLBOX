@@ -3,7 +3,7 @@
     "name": "billbox-mobile",
     "slug": "billbox-mobile",
     "scheme": "billbox",
-    "version": "1.0.30",
+    "version": "1.0.31",
     "orientation": "portrait",
     "icon": "./assets/logo/logo-icon.png",
     "userInterfaceStyle": "light",
@@ -29,7 +29,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 111,
+      "versionCode": 112,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
@@ -116,7 +116,8 @@
     "plugins": [
       "@react-native-community/datetimepicker",
       "expo-font",
-      "expo-localization"
+      "expo-localization",
+      "sentry-expo"
     ],
     "extra": {
       "eas": {
