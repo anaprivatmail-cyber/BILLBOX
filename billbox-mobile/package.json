@@ -1,7 +1,7 @@
 {
   "name": "billbox-mobile",
   "version": "1.0.7",
-  "main": "index.ts",
+  "main": "index.tsx",
   "scripts": {
     "i18n:sync": "node tools/i18n-sync.js",
     "i18n:extract": "node tools/extract-i18n-phrases.js --out tools/i18n-phrases.json --root .",
