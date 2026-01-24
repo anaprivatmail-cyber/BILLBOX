@@ -33,7 +33,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 110,
+      "versionCode": 122,
       "supportedArchitectures": [
         "arm64-v8a",
         "armeabi-v7a"
