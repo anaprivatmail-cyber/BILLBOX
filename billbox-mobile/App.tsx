@@ -161,6 +161,48 @@ const __originalAlert = Alert.alert.bind(Alert)
   )
 }
 
+type FatalErrorSnapshot = {
+  message: string
+  stack?: string
+  time: string
+  isFatal?: boolean
+}
+
+function formatErrorMessage(err: any): string {
+  if (!err) return 'Unknown error'
+  if (typeof err === 'string') return err
+  if (err?.message) return String(err.message)
+  try {
+    return JSON.stringify(err)
+  } catch {
+    return String(err)
+  }
+}
+
+function ErrorOverlay({ error }: { error: FatalErrorSnapshot | null }) {
+  if (!error) return null
+  return (
+    <View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        left: 8,
+        right: 8,
+        bottom: 8,
+        padding: 10,
+        borderRadius: 10,
+        backgroundColor: 'rgba(0,0,0,0.75)',
+        zIndex: 9999,
+      }}
+    >
+      <RNText style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>App error</RNText>
+      <RNText style={{ color: '#fff', fontSize: 11, marginTop: 4 }} numberOfLines={4}>
+        {error.message}
+      </RNText>
+    </View>
+  )
+}
+
 type AiChatMessage = {
   id: string
   role: 'user' | 'assistant'
@@ -12776,6 +12818,7 @@ function PaymentReminderOverlay() {
 
 export default function App() {
   const supabase = useMemo(() => getSupabase(), [])
+  const [fatalError, setFatalError] = useState<FatalErrorSnapshot | null>(null)
   const [loggedIn, setLoggedIn] = useState(false)
   const [authLoading, setAuthLoading] = useState(true)
   const [lang, setLang] = useState<Lang>('en')
@@ -12853,14 +12896,40 @@ export default function App() {
     }
     return () => { sub && Notifications.removeNotificationSubscription(sub) }
   })() }, [])
+
+  useEffect(() => {
+    const ErrorUtilsRef = (global as any)?.ErrorUtils
+    const defaultHandler = ErrorUtilsRef?.getGlobalHandler?.() || ErrorUtilsRef?._globalHandler
+    if (ErrorUtilsRef?.setGlobalHandler) {
+      ErrorUtilsRef.setGlobalHandler((err: any, isFatal?: boolean) => {
+        setFatalError({
+          message: formatErrorMessage(err),
+          stack: err?.stack ? String(err.stack) : undefined,
+          time: new Date().toISOString(),
+          isFatal: !!isFatal,
+        })
+        if (__DEV__ && typeof defaultHandler === 'function') {
+          defaultHandler(err, isFatal)
+        }
+      })
+      return () => {
+        if (typeof defaultHandler === 'function') {
+          ErrorUtilsRef.setGlobalHandler(defaultHandler)
+        }
+      }
+    }
+  }, [])
   return (
     <SafeAreaProvider>
       <ThemeProvider>
         <EntitlementsProvider supabase={supabase}>
           <SpaceProvider>
             <ThemedAppShell>
-              <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={setLangAndPersist} authLoading={authLoading} />
-              <PaymentReminderOverlay />
+              <View style={{ flex: 1, position: 'relative' }}>
+                <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={setLangAndPersist} authLoading={authLoading} />
+                <PaymentReminderOverlay />
+                <ErrorOverlay error={fatalError} />
+              </View>
             </ThemedAppShell>
           </SpaceProvider>
         </EntitlementsProvider>
