@@ -16,8 +16,6 @@ if (sentryDsn) {
 		enableInExpoDevelopment: true,
 		debug: false,
 	})
-	Sentry.captureMessage('app_init')
-	Sentry.flush(2000)
 }
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
@@ -26,6 +24,7 @@ if (sentryDsn) {
 function Bootstrap() {
 	const [AppComponent, setAppComponent] = useState<React.ComponentType | null>(null)
 	const [error, setError] = useState<Error | null>(null)
+	const [didSendInit, setDidSendInit] = useState(false)
 
 	useEffect(() => {
 		try {
@@ -39,10 +38,18 @@ function Bootstrap() {
 			setError(e)
 			try {
 				Sentry.captureException(e)
-				Sentry.flush(2000)
 			} catch {}
 		}
 	}, [])
+
+	useEffect(() => {
+		if (!sentryDsn || didSendInit) return
+		// Send a lightweight "app_init" event only after the JS app has actually mounted.
+		try {
+			Sentry.captureMessage('app_init')
+		} catch {}
+		setDidSendInit(true)
+	}, [didSendInit])
 
 	if (error) {
 		return (
@@ -67,4 +74,5 @@ function Bootstrap() {
 	return <AppComponent />
 }
 
-registerRootComponent(Sentry.wrap(Bootstrap))
+const Root = sentryDsn ? Sentry.wrap(Bootstrap) : Bootstrap
+registerRootComponent(Root)
