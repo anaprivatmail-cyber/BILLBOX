@@ -3,9 +3,9 @@
     "name": "billbox-mobile",
     "slug": "billbox-mobile",
     "scheme": "billbox",
-    "version": "1.0.24",
+    "version": "1.0.25",
     "orientation": "portrait",
-    "icon": "./assets/logo/logo-icon.png",
+        "version": "1.0.25",
     "userInterfaceStyle": "light",
     "newArchEnabled": false,
     "splash": {
@@ -28,9 +28,9 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 97,
+      "versionCode": 103,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/logo/logo-icon-foreground.png",
+          "versionCode": 103,
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
@@ -119,6 +119,19 @@
           "android": {
             "ndkVersion": "26.1.10909125",
             "useLegacyPackaging": true
+             "packagingOptions": {
+               "pickFirsts": [
+                "packagingOptions": {
+                  "pickFirsts": [
+                    "**/libc++_shared.so"
+                  ]
+                }
+                 "**/libc++_shared.so"
+               ],
+               "doNotStrip": [
+                 "**/libc++_shared.so"
+               ]
+             }
           }
         }
       ],
