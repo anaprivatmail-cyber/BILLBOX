@@ -14,8 +14,13 @@
       "backgroundColor": "#ffffff"
     },
     "updates": {
-      "enabled": false,
-      "checkAutomatically": "NEVER"
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/b201d860-e579-4734-acf9-71594e8d0054"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
     },
     "ios": {
       "supportsTablet": true,
@@ -28,7 +33,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 109,
+      "versionCode": 110,
       "supportedArchitectures": [
         "arm64-v8a",
         "armeabi-v7a"
