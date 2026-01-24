@@ -7,6 +7,7 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "channel": "development",
       "env": {
         "EXPO_PUBLIC_BUILD_PROFILE": "development",
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
@@ -16,7 +17,7 @@
       }
     },
     "preview": {
-      "releaseChannel": "preview",
+      "channel": "preview",
       "distribution": "store",
       "android": {
         "buildType": "app-bundle"
@@ -30,7 +31,7 @@
       }
     },
     "preview-apk": {
-      "releaseChannel": "preview",
+      "channel": "preview",
       "distribution": "internal",
       "android": {
         "buildType": "apk"
@@ -45,6 +46,7 @@
     },
     "production": {
       "autoIncrement": true,
+      "channel": "production",
       "env": {
         "EXPO_PUBLIC_BUILD_PROFILE": "production",
         "EXPO_PUBLIC_FUNCTIONS_BASE": "https://getbillbox.com",
