@@ -2845,6 +2845,7 @@ export async function handler(event) {
     const contentType = getContentType(event)
 
     let allowAi = true
+    let aiVisionOnly = Boolean(allowAi && isAiOcrEnabled())
     let languageHint = null
     let usageCounted = false
     let textPayload = null
@@ -2906,6 +2907,7 @@ export async function handler(event) {
         const body = JSON.parse(event.body || '{}')
         if (typeof body.preferQr === 'boolean') preferQr = body.preferQr
         if (typeof body.allowAi === 'boolean') allowAi = body.allowAi
+        aiVisionOnly = Boolean(allowAi && isAiOcrEnabled())
         if (typeof body.language === 'string') languageHint = String(body.language || '').trim()
         if (typeof body.contentType === 'string') imageContentType = String(body.contentType || '').trim()
         const textValue = typeof body.text === 'string'
@@ -3046,11 +3048,34 @@ export async function handler(event) {
       used = newUsed
     }
 
-    const aiVisionOnly = Boolean(allowAi && isAiOcrEnabled())
-
     if (textPayload) {
       const text = String(textPayload || '').trim()
       if (!text) return jsonResponse(400, { ok: false, error: 'missing_text' })
+
+      // When AI OCR is enabled, make AI the primary extractor for pasted CSV/text payloads too.
+      // Fall back to deterministic parsing only if AI misses core fields.
+      if (aiVisionOnly) {
+        const aiResult = await extractFieldsFromTextWithAIOnly(text, languageHint, requestId)
+        const aiError = aiResult && aiResult.error ? aiResult.error : null
+        const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+        if (aiResult?.fields) {
+          const fields = sanitizeFieldsAiOnly(aiResult.fields)
+          const missing0 = getMissingKeyFields(fields)
+          const missingCore = (missing0?.missing || []).filter((k) => k !== 'due_date')
+          if (missingCore.length === 0) {
+            const meta = {
+              ...buildExtractionMeta(text, fields),
+              ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError, detail: aiDetail },
+              input: { contentType: textPayloadContentType || 'text/plain' },
+            }
+            await incrementUsage()
+            return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_text' })
+          }
+          console.log('[OCR] AI text payload missing core fields; falling back:', { requestId, missing: missingCore })
+        } else {
+          console.error('[OCR] AI text payload failed; falling back:', { requestId, error: aiError, detail: aiDetail })
+        }
+      }
 
       const fields0 = extractFields(text)
       const candidates = buildFieldCandidates(text)

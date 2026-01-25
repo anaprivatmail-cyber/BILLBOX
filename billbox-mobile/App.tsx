@@ -569,13 +569,13 @@ async function removeAllLocalKeysWithPrefix(prefix: string): Promise<void> {
 function planLabel(plan: PlanId): string {
   if (plan === 'pro') return 'Več'
   if (plan === 'basic') return 'Moje'
-  return 'Free'
+  return 'Trial'
 }
 
 function planPrice(plan: PlanId): string {
-  if (plan === 'pro') return '€4 / month or €38 / year'
-  if (plan === 'basic') return '€2.20 / month or €20 / year'
-  return '€0'
+  if (plan === 'pro') return '€5 / month or €48 / year'
+  if (plan === 'basic') return '€2.60 / month or €25 / year'
+  return ''
 }
 
 const isIOS = Platform.OS === 'ios'
@@ -8262,9 +8262,11 @@ function HomeScreen() {
         <Surface elevated padded={false} style={[styles.card, styles.homeHeroCard]}>
           <View style={styles.homeHeroHeaderRow}>
             <View style={{ flexShrink: 1 }}>
-              <Text style={styles.homeHeroTitle}>{tr('Home summary')}</Text>
+              <Text style={styles.homeHeroTitle}>Billbox</Text>
               <Text style={styles.homeHeroSubtitle} numberOfLines={1}>
-                {activeSummary ? `${payerLabelFromSpaceId(activeSummary.spaceId)} • ${activeSummary.spaceName}` : '—'}
+                {activeSummary
+                  ? `${tr('Home summary')} • ${payerLabelFromSpaceId(activeSummary.spaceId)} • ${activeSummary.spaceName}`
+                  : tr('Home summary')}
               </Text>
             </View>
             <TouchableOpacity
@@ -8276,8 +8278,8 @@ function HomeScreen() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 borderWidth: StyleSheet.hairlineWidth,
-                borderColor: colors.primarySoft,
-                backgroundColor: colors.primary,
+                borderColor: '#DDD6FE',
+                backgroundColor: '#5B21B6',
               }}
               accessibilityLabel={tr('Home summary settings')}
             >
@@ -8328,24 +8330,6 @@ function HomeScreen() {
               </View>
             ) : null}
 
-            <View style={{ marginTop: themeSpacing.md }}>
-              <Text style={styles.mutedText}>{tr('Language')}</Text>
-              <View style={[styles.languageGrid, { marginTop: themeSpacing.xs }]}>
-                {languageOptions.map((opt) => {
-                  const active = lang === opt.code
-                  return (
-                    <Pressable
-                      key={opt.code}
-                      onPress={() => setLang(opt.code)}
-                      style={[styles.languageOption, active && styles.languageOptionSelected]}
-                      accessibilityLabel={opt.label}
-                    >
-                      <Text style={[styles.languageOptionLabel, active && styles.languageOptionLabelSelected]}>{opt.label}</Text>
-                    </Pressable>
-                  )
-                })}
-              </View>
-            </View>
           </View>
         </Surface>
         <View style={styles.gridWrap}>
@@ -11744,7 +11728,6 @@ function PaymentsScreen() {
   function PlanIcon({ plan }: { plan: PlanId }) {
     const color = themeColors.primary
     const size = 16
-    if (plan === 'free') return <Ionicons name="gift-outline" size={size} color={color} />
     if (plan === 'basic') return <Ionicons name="star-outline" size={size} color={color} />
     return (
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
@@ -11784,7 +11767,7 @@ function PaymentsScreen() {
 
   const focusPlan: PlanId | null = useMemo(() => {
     const raw = route?.params?.focusPlan
-    return raw === 'basic' || raw === 'pro' || raw === 'free' ? raw : null
+    return raw === 'basic' || raw === 'pro' ? raw : null
   }, [route?.params?.focusPlan])
 
   const formatDate = useCallback((iso?: string | null) => {
@@ -11837,7 +11820,7 @@ function PaymentsScreen() {
           </Surface>
         ) : null}
 
-        {(['free', 'basic', 'pro'] as PlanId[]).map((plan) => {
+        {(['basic', 'pro'] as PlanId[]).map((plan) => {
           const active = entitlements.plan === plan
           const suggested = focusPlan === plan
           return (
@@ -11865,24 +11848,22 @@ function PaymentsScreen() {
                 ))}
               </View>
 
-              {plan === 'free' ? null : (
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
-                  <AppButton
-                    label={tr('Monthly')}
-                    variant="outline"
-                    iconName="card-outline"
-                    onPress={() => handleSubscribe(plan, 'monthly')}
-                    disabled={busy}
-                  />
-                  <AppButton
-                    label={tr('Yearly')}
-                    variant="primary"
-                    iconName="card-outline"
-                    onPress={() => handleSubscribe(plan, 'yearly')}
-                    disabled={busy}
-                  />
-                </View>
-              )}
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
+                <AppButton
+                  label={tr('Monthly')}
+                  variant="outline"
+                  iconName="card-outline"
+                  onPress={() => handleSubscribe(plan, 'monthly')}
+                  disabled={busy}
+                />
+                <AppButton
+                  label={tr('Yearly')}
+                  variant="primary"
+                  iconName="card-outline"
+                  onPress={() => handleSubscribe(plan, 'yearly')}
+                  disabled={busy}
+                />
+              </View>
 
               <Text style={[styles.mutedText, { marginTop: themeSpacing.sm }]}>
                 {t(lang, 'OCR helps extract data from photos/PDFs. Limits reset monthly.')}
@@ -11985,7 +11966,7 @@ function ProfileRenameGate() {
 
 function MainTabs() {
   const insets = useSafeAreaInsets()
-  const bottomPadding = Math.max(insets.bottom - 2, 0)
+  const bottomPadding = Math.max(insets.bottom - 8, 0)
   const { lang } = useLangContext()
 
   return (
@@ -12013,9 +11994,9 @@ function MainTabs() {
             borderTopColor: 'transparent',
             borderTopWidth: 0,
             backgroundColor: themeColors.surface,
-            paddingTop: 4,
+            paddingTop: 0,
             paddingBottom: bottomPadding,
-            height: 50 + bottomPadding,
+            height: 44 + bottomPadding,
           },
           tabBarLabelStyle: {
             fontSize: 10,
@@ -13138,21 +13119,21 @@ const styles = StyleSheet.create({
   statCardPressable: { width: '48%', height: 112, marginBottom: themeSpacing.md },
   statCardPressed: { opacity: 0.9 },
   homeSummaryCard: { padding: themeSpacing.sm },
-  homeHeroCard: { padding: themeSpacing.md, backgroundColor: themeColors.primary, borderColor: themeColors.primary },
+  homeHeroCard: { padding: themeSpacing.md, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' },
   homeHeroHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap },
-  homeHeroTitle: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
-  homeHeroSubtitle: { fontSize: 12, color: 'rgba(255, 255, 255, 0.8)' },
+  homeHeroTitle: { fontSize: 16, fontWeight: '800', color: '#2E1065' },
+  homeHeroSubtitle: { fontSize: 12, color: 'rgba(46, 16, 101, 0.75)' },
   homeMetricsRow: { marginTop: themeSpacing.md, flexDirection: 'row', gap: themeSpacing.sm },
   homeMetricCard: { flex: 1, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, paddingVertical: themeSpacing.sm, paddingHorizontal: themeSpacing.sm, backgroundColor: '#FFFFFF' },
-  homeMetricCardUnpaid: { backgroundColor: themeColors.primarySoft, borderColor: '#BFDBFE' },
+  homeMetricCardUnpaid: { backgroundColor: '#F3E8FF', borderColor: '#DDD6FE' },
   homeMetricCardOverdue: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
   homeMetricCardNext: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
   homeMetricValue: { fontSize: 16, fontWeight: '800', color: themeColors.text },
   homeMetricLabel: { marginTop: 4, fontSize: 11, color: themeColors.textMuted },
   statCard: { paddingVertical: themeSpacing.xs, paddingHorizontal: themeSpacing.sm, gap: themeSpacing.xs, flex: 1, justifyContent: 'space-between' },
-  statCardPrimary: { borderWidth: 1, borderColor: themeColors.primary },
+  statCardPrimary: { borderWidth: 1, borderColor: '#5B21B6' },
   homePrimaryTile: { borderWidth: 1, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
-  homePrimaryTileScan: { backgroundColor: themeColors.primary, borderColor: themeColors.primary },
+  homePrimaryTileScan: { backgroundColor: '#5B21B6', borderColor: '#5B21B6' },
   homePrimaryTileBills: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
   homePrimaryTilePay: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
   statIconWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },
