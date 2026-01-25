@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { ScrollView, Text, View } from 'react-native'
 import { registerRootComponent } from 'expo'
 import Constants from 'expo-constants'
-import * as Sentry from 'sentry-expo'
+import * as Sentry from '@sentry/react-native'
 
 const sentryDsn =
 	process.env.EXPO_PUBLIC_SENTRY_DSN ||
@@ -13,7 +13,6 @@ const sentryDsn =
 if (sentryDsn) {
 	Sentry.init({
 		dsn: sentryDsn,
-		enableInExpoDevelopment: true,
 		debug: false,
 	})
 }
