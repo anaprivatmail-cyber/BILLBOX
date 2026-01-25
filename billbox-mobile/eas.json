@@ -17,6 +17,7 @@
       }
     },
     "preview": {
+      "autoIncrement": true,
       "channel": "preview",
       "distribution": "store",
       "android": {
@@ -31,6 +32,7 @@
       }
     },
     "preview-apk": {
+      "autoIncrement": true,
       "channel": "preview",
       "distribution": "internal",
       "android": {
