@@ -32,7 +32,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 130,
+      "versionCode": 131,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
@@ -119,14 +119,12 @@
     "plugins": [
       "@react-native-community/datetimepicker",
       "expo-font",
-      "expo-localization",
-      "@sentry/react-native/expo"
+      "expo-localization"
     ],
     "extra": {
       "eas": {
         "projectId": "b201d860-e579-4734-acf9-71594e8d0054"
       },
-      "sentryDsn": "https://15780dcdebccfa594c3d062fa46bc20a@o4510766162444288.ingest.de.sentry.io/4510766174240848",
       "commitHash": "6a4f293"
     }
   }

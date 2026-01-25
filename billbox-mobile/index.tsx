@@ -1,21 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { ScrollView, Text, View } from 'react-native'
 import { registerRootComponent } from 'expo'
-import Constants from 'expo-constants'
-import * as Sentry from '@sentry/react-native'
-
-const sentryDsn =
-	process.env.EXPO_PUBLIC_SENTRY_DSN ||
-	(Constants as any)?.expoConfig?.extra?.sentryDsn ||
-	(Constants as any)?.manifest2?.extra?.sentryDsn ||
-	''
-
-if (sentryDsn) {
-	Sentry.init({
-		dsn: sentryDsn,
-		debug: false,
-	})
-}
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,
@@ -23,7 +8,6 @@ if (sentryDsn) {
 function Bootstrap() {
 	const [AppComponent, setAppComponent] = useState<React.ComponentType | null>(null)
 	const [error, setError] = useState<Error | null>(null)
-	const [didSendInit, setDidSendInit] = useState(false)
 
 	useEffect(() => {
 		try {
@@ -35,20 +19,8 @@ function Bootstrap() {
 		} catch (err: any) {
 			const e = err instanceof Error ? err : new Error(String(err))
 			setError(e)
-			try {
-				Sentry.captureException(e)
-			} catch {}
 		}
 	}, [])
-
-	useEffect(() => {
-		if (!sentryDsn || didSendInit) return
-		// Send a lightweight "app_init" event only after the JS app has actually mounted.
-		try {
-			Sentry.captureMessage('app_init')
-		} catch {}
-		setDidSendInit(true)
-	}, [didSendInit])
 
 	if (error) {
 		return (
@@ -73,5 +45,4 @@ function Bootstrap() {
 	return <AppComponent />
 }
 
-const Root = sentryDsn ? Sentry.wrap(Bootstrap) : Bootstrap
-registerRootComponent(Root)
+registerRootComponent(Bootstrap)
