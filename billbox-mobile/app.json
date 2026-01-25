@@ -33,7 +33,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 123,
+      "versionCode": 126,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
@@ -118,6 +118,7 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "expo-updates",
       [
         "expo-build-properties",
         {
