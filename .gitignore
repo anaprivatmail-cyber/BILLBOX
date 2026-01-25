@@ -15,6 +15,9 @@ android-tools/
 
 # Node & Expo
 node_modules/
+
+# Tooling can accidentally generate an empty Expo config at repo root
+/app.json
 dist/
 .expo/
 .expo-shared/
