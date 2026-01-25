@@ -1,4 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
+import Busboy from 'busboy'
+import { Readable } from 'node:stream'
 
 function jsonResponse(statusCode, payload) {
   return {
@@ -129,6 +131,120 @@ function isAllowedMime(mime) {
   return false
 }
 
+function looksLikeMultipart(contentType) {
+  const ct = String(contentType || '').toLowerCase()
+  return ct.includes('multipart/form-data')
+}
+
+async function parseMultipartForm(event, { maxBytes } = {}) {
+  const contentType = event.headers['content-type'] || event.headers['Content-Type'] || ''
+  if (!looksLikeMultipart(contentType)) return { fields: {}, files: [] }
+
+  const bodyBuf = event.isBase64Encoded ? Buffer.from(event.body || '', 'base64') : Buffer.from(event.body || '', 'utf8')
+  const bb = Busboy({ headers: { 'content-type': contentType } })
+
+  const fields = {}
+  const files = []
+  let totalFileBytes = 0
+
+  const done = new Promise((resolve, reject) => {
+    bb.on('field', (name, val) => {
+      const key = String(name || '').trim()
+      if (!key) return
+      // Keep first value if duplicates are present.
+      if (fields[key] === undefined) fields[key] = val
+    })
+
+    bb.on('file', (name, fileStream, info) => {
+      const filename = safeString(info?.filename) || 'document'
+      const mimeType = safeString(info?.mimeType) || 'application/octet-stream'
+
+      const chunks = []
+      let size = 0
+      let exceeded = false
+
+      fileStream.on('data', (chunk) => {
+        if (exceeded) return
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        size += buf.length
+        totalFileBytes += buf.length
+
+        if (typeof maxBytes === 'number' && maxBytes > 0) {
+          if (size > maxBytes || totalFileBytes > maxBytes) {
+            exceeded = true
+            chunks.length = 0
+            fileStream.resume()
+            return
+          }
+        }
+        chunks.push(buf)
+      })
+
+      fileStream.on('end', () => {
+        // Only keep files that have non-trivial size.
+        if (!exceeded && size >= 16) {
+          files.push({ fieldName: name, filename, mimeType, buffer: Buffer.concat(chunks), sizeBytes: size })
+        }
+      })
+
+      fileStream.on('error', reject)
+    })
+
+    bb.on('error', reject)
+    bb.on('finish', () => resolve())
+  })
+
+  Readable.from(bodyBuf).pipe(bb)
+  await done
+
+  return { fields, files }
+}
+
+async function parseInboundPayload(event) {
+  const contentType = event.headers['content-type'] || event.headers['Content-Type'] || ''
+  const maxBytes = Number(process.env.INBOUND_EMAIL_MAX_BYTES || 12 * 1024 * 1024)
+
+  if (looksLikeMultipart(contentType)) {
+    const { fields, files } = await parseMultipartForm(event, { maxBytes })
+
+    // Mailgun inbound (routes/forward) sends multipart/form-data.
+    // Docs/fields can vary: "recipient", "To", "sender", "from", "subject",
+    // "stripped-text", "body-plain", "stripped-html", "body-html", etc.
+    const payload = {
+      provider: 'mailgun',
+      recipient: fields.recipient || fields.Recipient || fields.to || fields.To || fields.TO || null,
+      to: fields.to || fields.To || null,
+      recipients: fields.recipients || null,
+      from: fields.sender || fields.from || fields.From || null,
+      sender: fields.sender || null,
+      subject: fields.subject || fields.Subject || null,
+      date: fields.Date || fields.date || null,
+      messageId: fields['Message-Id'] || fields['message-id'] || fields['message_id'] || null,
+      'message-id': fields['Message-Id'] || fields['message-id'] || fields['message_id'] || null,
+      'stripped-text': fields['stripped-text'] || fields['stripped_text'] || null,
+      'stripped-html': fields['stripped-html'] || fields['stripped_html'] || null,
+      text: fields.text || fields['body-plain'] || fields['body_plain'] || null,
+      html: fields.html || fields['body-html'] || fields['body_html'] || null,
+      attachments: files.map((f) => ({
+        filename: f.filename,
+        contentType: f.mimeType,
+        content: f.buffer.toString('base64'),
+        size: f.sizeBytes,
+      })),
+    }
+
+    return payload
+  }
+
+  let payload = {}
+  try {
+    payload = JSON.parse(event.body || '{}')
+  } catch {
+    payload = {}
+  }
+  return payload
+}
+
 export async function handler(event) {
   try {
     if (event.httpMethod !== 'POST') {
@@ -149,12 +265,7 @@ export async function handler(event) {
       return jsonResponse(401, { ok: false, error: 'unauthorized' })
     }
 
-    let payload = {}
-    try {
-      payload = JSON.parse(event.body || '{}')
-    } catch {
-      payload = {}
-    }
+    const payload = await parseInboundPayload(event)
 
     const recipients = collectRecipients(payload)
     const overrideToken = (event.headers['x-billbox-alias-token'] || event.headers['X-Billbox-Alias-Token'] || '').trim()
