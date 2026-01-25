@@ -7903,6 +7903,17 @@ function HomeScreen() {
 
   const dayKey = useDayKey()
 
+  const formatDate = useCallback((iso?: string | null) => {
+    if (!iso) return '-'
+    try {
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return String(iso)
+      return d.toISOString().slice(0, 10)
+    } catch {
+      return String(iso)
+    }
+  }, [])
+
   const [languagePickerVisible, setLanguagePickerVisible] = useState(false)
   const [homeSummarySettingsVisible, setHomeSummarySettingsVisible] = useState(false)
   const [homeSummaryVisibility, setHomeSummaryVisibility] = useState({ totalUnpaid: true, overdue: true, nextDue: true })
