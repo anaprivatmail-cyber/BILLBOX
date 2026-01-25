@@ -4843,12 +4843,22 @@ function ScanBillScreen() {
       const primary = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
       const ocrText = String(primary?.rawText || '')
       const f = primary?.fields || {}
+      const summary = String(primary?.summary || '')
       const isEmpty = !ocrText.trim() && !f?.iban && !f?.reference && !(typeof f?.amount === 'number')
       if (isEmpty) {
         const fallback = await performOCR(uri, { preferQr: Boolean(opts?.preferQr), contentType, allowAi: false, aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+        const fallbackSummary = String(fallback?.summary || '')
         applyOcr(fallback?.fields || {}, String(fallback?.rawText || ''), fallback?.mode, fallback?.meta)
+        // Keep UX non-technical; the draft is already filled and still editable.
+        if (fallbackSummary && fallbackSummary !== tr('No fields found')) {
+          // Optional: leave silent, but keep summary available via rawText.
+        }
       } else {
         applyOcr(f, ocrText, primary?.mode, primary?.meta)
+        // Keep UX non-technical; the draft is already filled and still editable.
+        if (summary && summary !== tr('No fields found')) {
+          // Optional: leave silent, but keep summary available via rawText.
+        }
       }
       setDebugStatus('DONE')
       setDebugQrFound(/qr/i.test(String(primary?.mode || '')))
@@ -4863,10 +4873,6 @@ function ScanBillScreen() {
         error: primary?.meta?.ai?.error ?? null,
         mode: String(primary?.mode || '') || null,
       })
-      // Keep UX non-technical; the draft is already filled and still editable.
-      if (summary && summary !== tr('No fields found')) {
-        // Optional: leave silent, but keep summary available via rawText.
-      }
     } catch (e: any) {
       const msg = e?.message || tr('OCR failed')
       const status = (e as any)?.status
@@ -4994,12 +5000,20 @@ function ScanBillScreen() {
       const primary = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: Boolean(opts?.allowAi), aiMode: opts?.aiMode, languageHint: opts?.languageHint })
       const ocrText = String(primary?.rawText || '')
       const f = primary?.fields || {}
+      const summary = String(primary?.summary || '')
       const isEmpty = !ocrText.trim() && !f?.iban && !f?.reference && !(typeof f?.amount === 'number')
       if (isEmpty) {
         const fallback = await performOCRFromBase64(base64, contentType || 'image/jpeg', { preferQr: Boolean(opts?.preferQr), allowAi: false, aiMode: opts?.aiMode, languageHint: opts?.languageHint })
+        const fallbackSummary = String(fallback?.summary || '')
         applyOcr(fallback?.fields || {}, String(fallback?.rawText || ''), fallback?.mode, fallback?.meta)
+        if (fallbackSummary && fallbackSummary !== tr('No fields found')) {
+          // Optional: leave silent, but keep summary available via rawText.
+        }
       } else {
         applyOcr(f, ocrText, primary?.mode, primary?.meta)
+        if (summary && summary !== tr('No fields found')) {
+          // Optional: leave silent, but keep summary available via rawText.
+        }
       }
       setDebugStatus('DONE')
       setDebugQrFound(/qr/i.test(String(primary?.mode || '')))
@@ -5014,9 +5028,6 @@ function ScanBillScreen() {
         error: primary?.meta?.ai?.error ?? null,
         mode: String(primary?.mode || '') || null,
       })
-      if (summary && summary !== tr('No fields found')) {
-        // Optional: leave silent, but keep summary available via rawText.
-      }
     } catch (e: any) {
       const msg = e?.message || tr('OCR failed')
       const status = (e as any)?.status
