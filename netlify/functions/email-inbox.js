@@ -140,7 +140,12 @@ async function parseMultipartForm(event, { maxBytes } = {}) {
   const contentType = event.headers['content-type'] || event.headers['Content-Type'] || ''
   if (!looksLikeMultipart(contentType)) return { fields: {}, files: [] }
 
-  const bodyBuf = event.isBase64Encoded ? Buffer.from(event.body || '', 'base64') : Buffer.from(event.body || '', 'utf8')
+  // IMPORTANT: multipart bodies can contain arbitrary binary (PDF/images).
+  // Netlify sometimes passes multipart bodies as a "binary" string with isBase64Encoded=false.
+  // Using 'utf8' will corrupt bytes and cause Busboy to miss files.
+  const bodyBuf = event.isBase64Encoded
+    ? Buffer.from(event.body || '', 'base64')
+    : Buffer.from(event.body || '', 'latin1')
   const bb = Busboy({ headers: { 'content-type': contentType } })
 
   const fields = {}
@@ -278,6 +283,12 @@ export async function handler(event) {
 
     const payload = await parseInboundPayload(event)
 
+    // Optional: allow a no-side-effects diagnostic call.
+    // Useful to verify Mailgun forwarding/attachment parsing without writing to Supabase.
+    const dryRunRaw = event.queryStringParameters?.dryRun || event.queryStringParameters?.dry_run
+    const dryRun = String(dryRunRaw || '').trim().toLowerCase()
+    const isDryRun = dryRun === '1' || dryRun === 'true' || dryRun === 'yes'
+
     const recipients = collectRecipients(payload)
     const overrideToken = (event.headers['x-billbox-alias-token'] || event.headers['X-Billbox-Alias-Token'] || '').trim()
 
@@ -291,6 +302,20 @@ export async function handler(event) {
     const aliasToken = tokens.length ? String(tokens[0]) : null
     if (!aliasToken) {
       return jsonResponse(200, { ok: false, error: 'missing_alias_token' })
+    }
+
+    if (isDryRun) {
+      const attachments = collectAttachments(payload)
+      return jsonResponse(200, {
+        ok: true,
+        mode: 'dry_run',
+        httpMethod: event.httpMethod,
+        contentType: event.headers['content-type'] || event.headers['Content-Type'] || null,
+        isBase64Encoded: Boolean(event.isBase64Encoded),
+        aliasToken,
+        recipients,
+        attachments: attachments.map((a) => ({ filename: a.filename, mimeType: a.mimeType, sizeBytes: a.sizeBytes })),
+      })
     }
 
     const supabase = getSupabaseAdmin()
