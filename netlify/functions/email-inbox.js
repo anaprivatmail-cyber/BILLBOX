@@ -247,10 +247,6 @@ async function parseInboundPayload(event) {
 
 export async function handler(event) {
   try {
-    if (event.httpMethod !== 'POST') {
-      return jsonResponse(405, { ok: false, error: 'method_not_allowed' })
-    }
-
     const expected = String(process.env.INBOUND_EMAIL_SECRET || '').trim()
     if (!expected) {
       return jsonResponse(500, { ok: false, error: 'inbound_not_configured' })
@@ -263,6 +259,21 @@ export async function handler(event) {
     if (!provided || provided !== expected) {
       // Return 401 to surface misconfiguration; Brevo can be configured with a secret header/query.
       return jsonResponse(401, { ok: false, error: 'unauthorized' })
+    }
+
+    // Allow a simple secret-protected health check via browser/monitoring.
+    // No side effects; POST is still required for actual ingestion.
+    if (event.httpMethod === 'GET') {
+      return jsonResponse(200, {
+        ok: true,
+        mode: 'health',
+        configured: true,
+        provider: 'mailgun_or_brevo',
+      })
+    }
+
+    if (event.httpMethod !== 'POST') {
+      return jsonResponse(405, { ok: false, error: 'method_not_allowed' })
     }
 
     const payload = await parseInboundPayload(event)
