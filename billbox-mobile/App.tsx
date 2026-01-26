@@ -11526,7 +11526,7 @@ function PayScreen() {
               style={({ pressed }) => [
                 styles.payUrgencyTab,
                 styles.payUrgencyToday,
-                planBucket === 'today' ? styles.payUrgencyTabActive : null,
+                planBucket === 'today' ? styles.payUrgencyTabActiveToday : null,
                 pressed ? styles.payUrgencyTabPressed : null,
               ]}
             >
@@ -11538,7 +11538,7 @@ function PayScreen() {
               style={({ pressed }) => [
                 styles.payUrgencyTab,
                 styles.payUrgencyWeek,
-                planBucket === 'week' ? styles.payUrgencyTabActive : null,
+                planBucket === 'week' ? styles.payUrgencyTabActiveWeek : null,
                 pressed ? styles.payUrgencyTabPressed : null,
               ]}
             >
@@ -11550,7 +11550,7 @@ function PayScreen() {
               style={({ pressed }) => [
                 styles.payUrgencyTab,
                 styles.payUrgencyMonth,
-                planBucket === 'month' ? styles.payUrgencyTabActive : null,
+                planBucket === 'month' ? styles.payUrgencyTabActiveMonth : null,
                 pressed ? styles.payUrgencyTabPressed : null,
               ]}
             >
@@ -12844,8 +12844,18 @@ const styles = StyleSheet.create({
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: '#E5E7EB',
     },
-    payUrgencyTabActive: {
-      borderColor: themeColors.primary,
+    // Active styles only change color (no layout/behavior changes).
+    payUrgencyTabActiveToday: {
+      backgroundColor: '#BFDBFE',
+      borderColor: '#60A5FA',
+    },
+    payUrgencyTabActiveWeek: {
+      backgroundColor: '#FECACA',
+      borderColor: '#F87171',
+    },
+    payUrgencyTabActiveMonth: {
+      backgroundColor: '#BBF7D0',
+      borderColor: '#34D399',
     },
     payUrgencyTabPressed: {
       opacity: 0.92,
@@ -12856,13 +12866,19 @@ const styles = StyleSheet.create({
       color: '#111827',
     },
     payUrgencyToday: {
-      backgroundColor: '#FEF3C7',
+      // Match Home "Total unpaid" tile tone; keep slightly stronger to stand out.
+      backgroundColor: '#DBEAFE',
+      borderColor: '#BFDBFE',
     },
     payUrgencyWeek: {
-      backgroundColor: '#FFEDD5',
+      // Match Home "Overdue" tile tone.
+      backgroundColor: '#FEF2F2',
+      borderColor: '#FECACA',
     },
     payUrgencyMonth: {
-      backgroundColor: themeColors.primarySoft,
+      // Match Home "Next due date" tile tone.
+      backgroundColor: '#ECFDF5',
+      borderColor: '#BBF7D0',
     },
     payUrgencySummaryRow: {
       flexDirection: 'row',
