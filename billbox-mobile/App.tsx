@@ -6059,8 +6059,8 @@ function InboxScreen() {
 
             // Quiet auto-OCR for newly received email items so "Attach to bill" is immediately useful.
             const sourceUri = (it as any).localPath || it.uri
-            const { fields, summary, rawText, mode, meta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
-            const classification = meta?.classification || null
+            const { fields, summary, rawText, mode, meta: ocrMeta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
+            const classification = ocrMeta?.classification || null
             const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
             const archiveOnlyInferred = inferArchiveOnlyFromText(typeof rawText === 'string' ? rawText : '', fields)
             const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
