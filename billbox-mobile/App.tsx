@@ -12846,8 +12846,8 @@ const styles = StyleSheet.create({
     },
     // Active styles only change color (no layout/behavior changes).
     payUrgencyTabActiveToday: {
-      backgroundColor: '#BFDBFE',
-      borderColor: '#60A5FA',
+      backgroundColor: '#FCA5A5',
+      borderColor: '#EF4444',
     },
     payUrgencyTabActiveWeek: {
       backgroundColor: '#FECACA',
@@ -12866,9 +12866,9 @@ const styles = StyleSheet.create({
       color: '#111827',
     },
     payUrgencyToday: {
-      // Match Home "Total unpaid" tile tone; keep slightly stronger to stand out.
-      backgroundColor: '#DBEAFE',
-      borderColor: '#BFDBFE',
+      // Most important: make Today stand out (stronger red tone).
+      backgroundColor: '#FECACA',
+      borderColor: '#F87171',
     },
     payUrgencyWeek: {
       // Match Home "Overdue" tile tone.
