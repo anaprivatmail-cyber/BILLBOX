@@ -68,6 +68,7 @@ export const phraseDict = {
     'Free trial expired. Choose a plan to continue.': 'Free trial expired. Choose a plan to continue.',
     'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
       'AI assistance is currently limited. It will be available in the next period or with an upgrade.',
+    'You reached the monthly AI limit. Continue after {date} or upgrade.': 'You reached the monthly AI limit. Continue after {date} or upgrade.',
     'Export is available on Več.': 'Export is available on Več.',
     'Payment failed. Premium features are disabled until payment is completed.':
       'Payment failed. Premium features are disabled until payment is completed.',
@@ -878,6 +879,7 @@ export const phraseDict = {
     'Free trial expired. Choose a plan to continue.': 'Brezplačni preizkus je potekel. Za nadaljevanje izberi paket.',
     'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
       'AI pomoč je trenutno omejena. Na voljo bo v naslednjem obdobju ali z nadgradnjo.',
+    'You reached the monthly AI limit. Continue after {date} or upgrade.': 'Dosegli ste mesečno omejitev AI vprašanj. Nadaljujte po {date} ali nadgradite paket.',
     'Export is available on Več.': 'Izvoz je na voljo v paketu Več.',
     'Payment failed. Premium features are disabled until payment is completed.':
       'Plačilo ni uspelo. Premium funkcije so onemogočene do uspešnega plačila.',
@@ -1691,6 +1693,7 @@ export const phraseDict = {
     'Free trial expired. Choose a plan to continue.': 'Besplatno probno razdoblje je isteklo. Za nastavak odaberi paket.',
     'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
       'AI pomoć je trenutno ograničena. Bit će dostupna u sljedećem razdoblju ili uz nadogradnju.',
+    'You reached the monthly AI limit. Continue after {date} or upgrade.': 'Dosegnuli ste mjesečno ograničenje AI pitanja. Nastavite nakon {date} ili nadogradite paket.',
     'Export is available on Več.': 'Izvoz je dostupan u paketu Več.',
     'Payment failed. Premium features are disabled until payment is completed.':
       'Plaćanje nije uspjelo. Premium značajke su onemogućene do uspješnog plaćanja.',
@@ -2508,6 +2511,7 @@ export const phraseDict = {
     'Free trial expired. Choose a plan to continue.': 'La prova gratuita è terminata. Scegli un piano per continuare.',
     'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
       'L\'assistenza AI è attualmente limitata. Sarà disponibile nel prossimo periodo o con un upgrade.',
+    'You reached the monthly AI limit. Continue after {date} or upgrade.': 'Hai raggiunto il limite mensile di domande AI. Continua dopo {date} o aggiorna il piano.',
     'Export is available on Več.': 'L\'export è disponibile nel piano Več.',
     'Payment failed. Premium features are disabled until payment is completed.':
       'Pagamento non riuscito. Le funzioni premium sono disabilitate finché il pagamento non viene completato.',
@@ -3325,6 +3329,7 @@ export const phraseDict = {
     'Free trial expired. Choose a plan to continue.': 'Kostenlose Testphase abgelaufen. Bitte wähle einen Tarif, um fortzufahren.',
     'AI assistance is currently limited. It will be available in the next period or with an upgrade.':
       'KI‑Hilfe ist derzeit eingeschränkt. Sie ist im nächsten Zeitraum oder mit Upgrade verfügbar.',
+    'You reached the monthly AI limit. Continue after {date} or upgrade.': 'Monatliches KI‑Limit erreicht. Weiter nach {date} oder Upgrade.',
     'Export is available on Več.': 'Export ist im Paket Več verfügbar.',
     'Payment failed. Premium features are disabled until payment is completed.':
       'Zahlung fehlgeschlagen. Premium‑Funktionen sind deaktiviert, bis die Zahlung abgeschlossen ist.',

@@ -366,10 +366,28 @@ function AiAssistant({ context }: { context: any }) {
             setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'Free trial expired. Choose a plan to continue.') }]))
             return
           }
-          if (code === 'ai_quota_exceeded' || code === 'ai_not_allowed') {
-            setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI assistance is currently limited. It will be available in the next period or with an upgrade.') }]))
-            return
-          }
+            if (code === 'ai_quota_exceeded') {
+              const resetAt = (json as any)?.resetAt || null
+              const dateLabel = (() => {
+                if (!resetAt) return ''
+                try {
+                  const d = new Date(String(resetAt))
+                  if (Number.isNaN(d.getTime())) return String(resetAt)
+                  return d.toISOString().slice(0, 10)
+                } catch {
+                  return String(resetAt)
+                }
+              })()
+              const msg = dateLabel
+                ? t(lang, 'You reached the monthly AI limit. Continue after {date} or upgrade.', { date: dateLabel })
+                : t(lang, 'AI assistance is currently limited. It will be available in the next period or with an upgrade.')
+              setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: msg }]))
+              return
+            }
+            if (code === 'ai_not_allowed') {
+              setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI assistance is currently limited. It will be available in the next period or with an upgrade.') }]))
+              return
+            }
           setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI request failed.') }]))
           return
         }
@@ -3279,6 +3297,7 @@ function ScanBillScreen() {
     reference: false,
     purpose: false,
     paymentDetails: false,
+    category: false,
   })
 
   // Per-field source precedence (lower is stronger):
@@ -3290,6 +3309,8 @@ function ScanBillScreen() {
   const [ibanOptions, setIbanOptions] = useState<string[]>([])
   const [ibanPickerVisible, setIbanPickerVisible] = useState(false)
   const [categoryOverrides, setCategoryOverrides] = useState<Record<string, string>>({})
+  const [categoryPickerVisible, setCategoryPickerVisible] = useState(false)
+  const lastAutoExtractUriRef = useRef<string>('')
 
   const [lastQR, setLastQR] = useState('')
   const [torch, setTorch] = useState<'on' | 'off'>('off')
@@ -3303,6 +3324,20 @@ function ScanBillScreen() {
   useEffect(() => {
     loadCategoryOverrides()
   }, [supabase])
+
+  // Auto-run OCR/AI extraction when the user stages an attachment in the form.
+  // This ensures the draft is prefilled without requiring an extra tap.
+  useEffect(() => {
+    const uri = pendingAttachment?.uri || ''
+    if (!uri) {
+      lastAutoExtractUriRef.current = ''
+      return
+    }
+    if (lastAutoExtractUriRef.current === uri) return
+    lastAutoExtractUriRef.current = uri
+    const languageHint = getCurrentLang()
+    void extractWithOCR(uri, pendingAttachment?.type || undefined, { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
+  }, [pendingAttachment?.type, pendingAttachment?.uri])
 
   function looksLikeMisassignedName(input: any): boolean {
     const s = (input ?? '').toString().trim()
@@ -4327,7 +4362,7 @@ function ScanBillScreen() {
     const supplierKey = normalizeSupplierKey(nameCandidate || rawSupplier || rawCreditor || '')
     const overrideCategory = supplierKey ? categoryOverrides[supplierKey] : ''
     const inferredCategory = overrideCategory || detectCategoryFromText(nameCandidate || rawSupplier || rawCreditor || '', String(rawPurpose || ''), String(rawItem || ''))
-    if (inferredCategory && canSetField('category', inferredCategory, false, category)) {
+    if (inferredCategory && canSetField('category', inferredCategory, editedRef.current.category, category)) {
       setCategory(inferredCategory)
       markFieldSource('category')
     }
@@ -5591,9 +5626,27 @@ function ScanBillScreen() {
               <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={handlePurchaseItemInput} />
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>{tr('Category')}</Text>
-                <Text style={styles.mutedText}>
-                  {category ? getCategoryLabel(category) : tr('Determining category…')}
-                </Text>
+                <TouchableOpacity
+                  activeOpacity={0.88}
+                  onPress={() => setCategoryPickerVisible(true)}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    paddingVertical: 10,
+                    paddingHorizontal: 12,
+                    borderRadius: 12,
+                    backgroundColor: 'rgba(148, 163, 184, 0.10)',
+                    borderWidth: StyleSheet.hairlineWidth,
+                    borderColor: themeColors.border,
+                  }}
+                >
+                  <Text style={{ color: themeColors.text, fontSize: 13, fontWeight: '700' }}>
+                    {category ? getCategoryLabel(category) : tr('Determining category…')}
+                  </Text>
+                  <Ionicons name="chevron-down-outline" size={18} color={themeColors.muted} />
+                </TouchableOpacity>
               </View>
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>
@@ -5889,6 +5942,39 @@ function ScanBillScreen() {
             </View>
             <View style={{ marginTop: themeSpacing.md, alignItems: 'flex-end' }}>
               <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setIbanPickerVisible(false)} />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={categoryPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCategoryPickerVisible(false)}
+      >
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={{ width: '100%', maxWidth: 520, alignSelf: 'center' }}>
+            <Text style={styles.screenHeaderTitle}>{tr('Category')}</Text>
+            <Text style={[styles.bodyText, { marginTop: themeSpacing.xs }]}>{tr('Select category')}</Text>
+            <View style={{ marginTop: themeSpacing.md, gap: themeSpacing.xs }}>
+              {CATEGORY_OPTIONS.map((opt) => (
+                <AppButton
+                  key={opt.key}
+                  label={tr(opt.labelKey)}
+                  variant={category === opt.key ? 'primary' : 'secondary'}
+                  onPress={() => {
+                    try { editedRef.current.category = true } catch {}
+                    setCategory(opt.key)
+                    setCategoryPickerVisible(false)
+                    const supplierKey = normalizeSupplierKey(String(supplier || creditorName || '').trim())
+                    if (supplierKey) void persistCategoryOverride(supplierKey, opt.key)
+                  }}
+                />
+              ))}
+            </View>
+            <View style={{ marginTop: themeSpacing.md, alignItems: 'flex-end' }}>
+              <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setCategoryPickerVisible(false)} />
             </View>
           </Surface>
         </View>
@@ -11875,7 +11961,7 @@ function ProfileRenameGate() {
 
 function MainTabs() {
   const insets = useSafeAreaInsets()
-  const bottomPadding = Math.max(insets.bottom - 18, 0)
+  const bottomPadding = Math.max(insets.bottom, 12)
   const { lang } = useLangContext()
 
   return (
@@ -11905,7 +11991,7 @@ function MainTabs() {
             backgroundColor: themeColors.surface,
             paddingTop: 0,
             paddingBottom: bottomPadding,
-            height: 40 + bottomPadding,
+            height: 56 + bottomPadding,
           },
           tabBarLabelStyle: {
             fontSize: 10,
