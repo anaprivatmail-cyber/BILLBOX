@@ -7,6 +7,7 @@
     "npm": "10.x"
   },
   "dependencies": {
+    "@zxing/library": "0.21.3",
     "@supabase/supabase-js": "2.89.0",
     "archiver": "6.0.2",
     "busboy": "1.6.0",

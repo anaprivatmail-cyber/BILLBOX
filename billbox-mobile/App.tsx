@@ -8016,13 +8016,9 @@ function HomeScreen() {
   const [languagePickerVisible, setLanguagePickerVisible] = useState(false)
   const [homeSummarySettingsVisible, setHomeSummarySettingsVisible] = useState(false)
   const [homeSummaryVisibility, setHomeSummaryVisibility] = useState({ totalUnpaid: true, overdue: true, nextDue: true })
-
-  const [payerNameDraft, setPayerNameDraft] = useState('')
-  const [needsPayerName, setNeedsPayerName] = useState(false)
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
   const [upgradeModalVisible, setUpgradeModalVisible] = useState(false)
-  const [namePrompt, setNamePrompt] = useState<null | { messageKey: string }>(null)
 
   const languageOptions = useMemo(() => {
     const opts: Array<{ code: Lang; key: string }> = [
@@ -8034,10 +8030,6 @@ function HomeScreen() {
     ]
     return opts.map((o) => ({ ...o, label: t(lang, o.key) }))
   }, [lang])
-
-  const showNamePrompt = useCallback((messageKey: string) => {
-    setNamePrompt({ messageKey })
-  }, [])
 
   const safeNavigate = useCallback((routeName: string, params?: any) => {
     const requestId = createRequestId('nav')
@@ -8085,40 +8077,6 @@ function HomeScreen() {
     return base.concat([second])
   }, [entitlements.plan, spacesCtx.spaces])
 
-  useEffect(() => {
-    ;(async () => {
-      if (loading) return
-      if (!spaceId) return
-      try {
-        const key = 'billbox.onboarding.payer1Named'
-        const raw = await AsyncStorage.getItem(key)
-        void raw
-        const payer1 = spacesCtx.spaces.find((s) => s.id === 'personal') || null
-        const currentName = (payer1?.name || '').trim()
-        const looksDefault = !currentName || currentName.toLowerCase() === 'profil 1'
-        setNeedsPayerName(looksDefault)
-        if (looksDefault) setPayerNameDraft('')
-      } catch {}
-    })()
-  }, [loading, spaceId, spacesCtx.current, spacesCtx.spaces])
-
-  const savePayer1Name = useCallback(async () => {
-    const trimmed = payerNameDraft.trim()
-    if (!trimmed) {
-      showNamePrompt('Please enter a name for Profil 1.')
-      return
-    }
-    if (trimmed.toLowerCase() === 'profil 1') {
-      showNamePrompt('Please choose a custom name (not "Profil 1").')
-      return
-    }
-    await spacesCtx.rename('personal', trimmed)
-    try {
-      await AsyncStorage.setItem('billbox.onboarding.payer1Named', '1')
-    } catch {}
-    setNeedsPayerName(false)
-  }, [payerNameDraft, showNamePrompt, spacesCtx])
-
   const handlePayerChange = useCallback(async (id: string) => {
     if (id === '__locked_payer2__') {
       setUpgradeModalVisible(true)
@@ -8126,7 +8084,7 @@ function HomeScreen() {
     }
     if (id === '__create_payer2__') {
       setCreatingPayer2(true)
-      setPayer2NameDraft('Profil 2')
+      setPayer2NameDraft('')
       return
     }
     await spacesCtx.setCurrent(id)
@@ -8135,7 +8093,11 @@ function HomeScreen() {
   const savePayer2 = useCallback(async () => {
     const trimmed = payer2NameDraft.trim()
     if (!trimmed) {
-      showNamePrompt('Please enter a name for Profil 2.')
+      Alert.alert(tr('Name required'), tr('Please enter a name for Profil 2.'))
+      return
+    }
+    if (trimmed.toLowerCase() === 'profil 2') {
+      Alert.alert(tr('Name required'), tr('Please choose a custom name (not "Profil 2").'))
       return
     }
     await spacesCtx.addSpace({
@@ -8144,7 +8106,7 @@ function HomeScreen() {
       plan: spacesCtx.current?.plan || 'free',
     })
     setCreatingPayer2(false)
-  }, [payer2NameDraft, showNamePrompt, spacesCtx])
+  }, [payer2NameDraft, spacesCtx])
 
   useEffect(() => {
     ;(async () => {
@@ -8371,11 +8333,11 @@ function HomeScreen() {
           <View style={styles.homeHeroHeaderRow}>
             <View style={{ flexShrink: 1 }}>
               <Text style={styles.homeHeroTitle}>Billbox</Text>
-              <Text style={styles.homeHeroSubtitle} numberOfLines={1}>
-                {activeSummary
-                  ? `${tr('Home summary')} • ${payerLabelFromSpaceId(activeSummary.spaceId)} • ${activeSummary.spaceName}`
-                  : tr('Home summary')}
-              </Text>
+              {activeSummary ? (
+                <Text style={styles.homeHeroSubtitle} numberOfLines={1}>
+                  {`${payerLabelFromSpaceId(activeSummary.spaceId)} • ${activeSummary.spaceName}`}
+                </Text>
+              ) : null}
             </View>
             <TouchableOpacity
               onPress={() => setHomeSummarySettingsVisible(true)}
@@ -8419,14 +8381,6 @@ function HomeScreen() {
               style={{ marginTop: themeSpacing.xs }}
             />
 
-            {needsPayerName ? (
-              <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-                <Text style={styles.bodyText}>{tr('Please name Profil 1 to continue.')}</Text>
-                <AppInput placeholder={tr('Profil 1 name')} value={payerNameDraft} onChangeText={setPayerNameDraft} />
-                <AppButton label={tr('Save')} iconName="checkmark-outline" onPress={savePayer1Name} />
-              </View>
-            ) : null}
-
             {creatingPayer2 ? (
               <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
                 <Text style={styles.bodyText}>{tr('Create Profil 2 (Več only).')}</Text>
@@ -8445,10 +8399,6 @@ function HomeScreen() {
             <Pressable
               key={tile.label}
               onPress={() => {
-                if (needsPayerName) {
-                  showNamePrompt('Please name Profil 1 to continue.')
-                  return
-                }
                 const params = (tile as any)?.params
                 if (tile.target === 'Warranties') {
                   safeNavigate(tile.target, params)
@@ -8486,26 +8436,6 @@ function HomeScreen() {
           ))}
         </View>
       </View>
-
-      <Modal
-        visible={!!namePrompt}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setNamePrompt(null)}
-      >
-        <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
-          <Surface elevated style={styles.iosPickerSheet}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs }}>
-              <Ionicons name="alert-circle-outline" size={20} color={themeColors.primary} />
-              <Text style={styles.planRowTitle}>{tr('Name required')}</Text>
-            </View>
-            <Text style={styles.bodyText}>{namePrompt ? tr(namePrompt.messageKey) : ''}</Text>
-            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
-              <AppButton label={tr('OK')} iconName="checkmark-outline" onPress={() => setNamePrompt(null)} />
-            </View>
-          </Surface>
-        </View>
-      </Modal>
 
       <Modal visible={upgradeModalVisible} transparent animationType="fade" onRequestClose={() => setUpgradeModalVisible(false)}>
         <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>

@@ -28,6 +28,20 @@ function isGoogleVisionEnabled() {
   return true
 }
 
+function parsePositiveIntEnv(name, fallback) {
+  const raw = process.env[name]
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return Math.floor(n)
+}
+
+function isGoogleVisionFallbackAllowed() {
+  // Safety valve: if PDF rasterization fails in production, you can allow
+  // falling back to Google Vision OCR by setting ALLOW_GOOGLE_VISION_FALLBACK=true.
+  const flag = String(process.env.ALLOW_GOOGLE_VISION_FALLBACK || '').trim().toLowerCase()
+  return flag === 'true' || flag === '1' || flag === 'yes' || flag === 'on'
+}
+
 function looksLikeMisassignedName(input) {
   const s = String(input || '').trim()
   if (!s) return true
@@ -1845,6 +1859,88 @@ async function enhanceImageBase64IfPossible(base64Image) {
   }
 }
 
+async function tryDecodeQrTextFromImageBuffer(imageBuffer) {
+  // Optional dependency: QR decoding without Google Vision.
+  let sharp
+  try {
+    const mod = await import('sharp')
+    sharp = mod?.default || mod
+  } catch {
+    return null
+  }
+
+  let zxing
+  try {
+    zxing = await import('@zxing/library')
+  } catch {
+    return null
+  }
+
+  try {
+    const { QRCodeReader, BinaryBitmap, HybridBinarizer, RGBLuminanceSource } = zxing
+    const img = sharp(imageBuffer).rotate().ensureAlpha()
+    const { data, info } = await img.raw().toBuffer({ resolveWithObject: true })
+    const width = info?.width
+    const height = info?.height
+    if (!width || !height) return null
+
+    const luminance = new RGBLuminanceSource(new Uint8ClampedArray(data), width, height)
+    const bitmap = new BinaryBitmap(new HybridBinarizer(luminance))
+    const reader = new QRCodeReader()
+    const result = reader.decode(bitmap)
+    const text = result?.getText ? result.getText() : null
+    const out = String(text || '').trim()
+    return out || null
+  } catch {
+    return null
+  }
+}
+
+async function tryDecodeQrFromBase64Image(base64Image) {
+  try {
+    const input = Buffer.from(String(base64Image || ''), 'base64')
+    if (!input || input.length < 16) return null
+    return await tryDecodeQrTextFromImageBuffer(input)
+  } catch {
+    return null
+  }
+}
+
+async function renderPdfPagesToPngBuffers(pdfBuffer, { maxPages, density }) {
+  // Uses sharp/libvips PDF rasterization. If the runtime doesn't support PDF,
+  // this will return an empty array.
+  let sharp
+  try {
+    const mod = await import('sharp')
+    sharp = mod?.default || mod
+  } catch {
+    return []
+  }
+
+  const out = []
+  for (let page = 0; page < maxPages; page += 1) {
+    try {
+      const buf = await sharp(pdfBuffer, { density, page })
+        .rotate()
+        .png()
+        .toBuffer()
+      if (buf && buf.length) out.push({ page, buffer: buf })
+    } catch {
+      break
+    }
+  }
+  return out
+}
+
+function mergeFieldsPreferFirst(base, incoming) {
+  const out = base && typeof base === 'object' ? { ...base } : {}
+  const src = incoming && typeof incoming === 'object' ? incoming : {}
+  for (const k of Object.keys(src)) {
+    if (out[k] == null && src[k] != null) out[k] = src[k]
+  }
+  return out
+}
+
 async function visionAnnotateImage({ accessToken, base64Image, timeoutMs = 15000 }) {
   const payload = {
     requests: [
@@ -3449,14 +3545,114 @@ export async function handler(event) {
       }
 
       // Scanned PDF: use Vision PDF OCR to get text, then AI-only parse.
-      // If Google Vision is disabled, we cannot OCR scanned PDFs here.
-      if (!googleVisionEnabled) {
-        return jsonResponse(422, {
-          ok: false,
-          error: 'scanned_pdf_not_supported_without_google',
-          message: 'Scanned PDFs require OCR. Upload an image/photo instead, or enable Google Vision OCR on the server.',
-        })
+      // AI-first scanned PDF path: rasterize PDF pages to images and run AI vision extraction.
+      // This keeps behavior consistent with GPT chat (visual understanding + structured output).
+      if (aiVisionOnly) {
+        const density = parsePositiveIntEnv('OCR_AI_PDF_DENSITY', 220)
+        const maxPages = parsePositiveIntEnv('OCR_AI_PDF_MAX_PAGES', 3)
+        const pages = await renderPdfPagesToPngBuffers(pdfBuffer, { maxPages, density })
+        if (!pages.length) {
+          if (googleVisionEnabled && isGoogleVisionFallbackAllowed()) {
+            console.warn('[OCR] PDF rasterization unavailable; falling back to Google Vision PDF OCR.', { requestId })
+            forceVisionOcr = true
+          } else {
+            return jsonResponse(500, {
+              ok: false,
+              error: 'pdf_rasterize_failed',
+              message: 'Cannot rasterize scanned PDF on the server. Upload an image/photo instead, or enable Google Vision fallback.',
+            })
+          }
+        } else {
+          // Increment usage (counts as OCR/document extraction)
+          if (!usageCounted) {
+            try {
+              await incrementUsage()
+              usageCounted = true
+            } catch {}
+          }
+
+          if (preferQr) {
+            for (const p of pages) {
+              const qrText = await tryDecodeQrTextFromImageBuffer(p.buffer)
+              if (!qrText) continue
+              const parsedQr = parsePaymentQR_QR(qrText)
+              if (parsedQr) {
+                console.log('[OCR] QR found:', true, { mode: 'qr_pdf_raster', page: p.page })
+                return jsonResponse(200, {
+                  ok: true,
+                  rawText: qrText,
+                  fields: sanitizeFields(qrText, parsedQr),
+                  ai: false,
+                  aiModel: null,
+                  aiTier: null,
+                  mode: 'qr_pdf_raster',
+                })
+              }
+            }
+          }
+
+          let merged = {}
+          let anyAi = false
+          let lastError = null
+          let lastDetail = null
+          let classification = null
+
+          for (const p of pages) {
+            const base64 = p.buffer.toString('base64')
+            const aiResult = await extractFieldsFromImageWithAI({ base64Image: base64, contentType: 'image/png', languageHint, requestId })
+            const aiError = aiResult && aiResult.error ? aiResult.error : null
+            const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+            if (aiResult?.fields) {
+              anyAi = true
+              const fields = sanitizeFieldsAiOnly(aiResult.fields)
+              merged = mergeFieldsPreferFirst(merged, fields)
+              if (!classification && aiResult?.classification) classification = aiResult.classification
+              const missingNow = getMissingKeyFields(merged)
+              if (!missingNow.hasMissing) break
+            } else {
+              lastError = aiError
+              lastDetail = aiDetail
+            }
+          }
+
+          if (!anyAi) {
+            return jsonResponse(422, {
+              ok: false,
+              error: 'ai_scanned_pdf_failed',
+              message: 'AI could not extract data from this scanned PDF (likely low quality / blurry / too small).',
+              detail: lastDetail || lastError || null,
+            })
+          }
+
+          const missing = getMissingKeyFields(merged)
+          const scanned = { mode: 'pdf_raster_ai', pdf_pages: parsedPdf?.numpages || null, scanned_pages: pages.length }
+          const meta = {
+            ...buildExtractionMeta('', merged),
+            classification: buildClassification({ rawText: '', fields: merged, aiClassification: classification, filename: inputFilename, contentType }),
+            scanned,
+            ai: {
+              enabled: isAiOcrEnabled(),
+              attempted: true,
+              error: missing.hasMissing ? 'ai_missing_fields' : null,
+              detail: missing.hasMissing ? 'Some fields could not be reliably found. Please review.' : null,
+              missing: missing.hasMissing ? missing.missing : [],
+            },
+          }
+
+          return jsonResponse(200, {
+            ok: true,
+            rawText: '',
+            fields: merged,
+            meta,
+            ai: true,
+            aiModel: resolveModel(),
+            aiTier: 'vision',
+            mode: missing.hasMissing ? 'ai_pdf_raster_partial' : 'ai_pdf_raster',
+          })
+        }
       }
+
+      // If we reached here and forceVisionOcr was requested, continue to Google Vision OCR below.
 
       const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
       if (!rawCreds || String(rawCreds).trim() === '') {
@@ -3581,6 +3777,24 @@ export async function handler(event) {
     let aiDetail = null
     if (aiVisionOnly) {
       const effectiveContentType = imageContentType || contentType
+
+      // If preferQr=true, attempt local QR decode first (bank-app behavior).
+      if (preferQr) {
+        const qrText0 = await tryDecodeQrFromBase64Image(base64Image)
+        const qrText = qrText0 || (await tryDecodeQrFromBase64Image(await enhanceImageBase64IfPossible(base64Image)))
+        if (qrText) {
+          const parsedQr = parsePaymentQR_QR(qrText)
+          if (parsedQr) {
+            console.log('[OCR] QR found:', true, { mode: 'qr_local' })
+            try {
+              await incrementUsage()
+              usageCounted = true
+            } catch {}
+            return jsonResponse(200, { ok: true, rawText: qrText, fields: sanitizeFields(qrText, parsedQr), ai: false, aiModel: null, aiTier: null, mode: 'qr_local' })
+          }
+        }
+      }
+
       // Increment usage (counts as OCR/document extraction)
       try {
         const newUsed = used + 1
