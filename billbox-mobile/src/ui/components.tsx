@@ -4,6 +4,7 @@ import {
   StyleProp,
   StyleSheet,
   Text,
+  TextStyle,
   TextInput,
   TextInputProps,
   TouchableOpacity,
@@ -115,6 +116,7 @@ export function AppButton({
   disabled,
   variant = 'primary',
   style,
+  labelStyle,
 }: {
   label: string
   onPress?: () => void
@@ -122,6 +124,7 @@ export function AppButton({
   disabled?: boolean
   variant?: ButtonVariant
   style?: StyleProp<ViewStyle>
+  labelStyle?: StyleProp<TextStyle>
 }) {
   const colors = useThemeColors()
   const styles = useMemo(() => makeStyles(colors), [colors])
@@ -144,7 +147,7 @@ export function AppButton({
       ]}
     >
       {iconName ? <Ionicons name={iconName} size={16} color={palette.text} /> : null}
-      <Text style={[styles.buttonLabel, { color: palette.text }]}>{tr(label)}</Text>
+      <Text style={[styles.buttonLabel, { color: palette.text }, labelStyle]}>{tr(label)}</Text>
     </TouchableOpacity>
   )
 }

@@ -3,7 +3,7 @@
     "name": "billbox-mobile",
     "slug": "billbox-mobile",
     "scheme": "billbox",
-    "version": "1.0.40",
+    "version": "1.0.41",
     "orientation": "portrait",
     "icon": "./assets/logo/logo-icon.png",
     "userInterfaceStyle": "light",
@@ -32,7 +32,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 142,
+      "versionCode": 143,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"

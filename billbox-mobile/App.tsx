@@ -2448,11 +2448,14 @@ function BillDetailsScreen() {
   const navigation = useNavigation<any>()
   const supabase = useMemo(() => getSupabase(), [])
   const bill = (route.params?.bill || null) as Bill | null
+  const spaceIdOverride = typeof route.params?.spaceIdOverride === 'string' ? String(route.params.spaceIdOverride) : null
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [invoiceSaving, setInvoiceSaving] = useState(false)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+
+  const effectiveSpaceId = spaceIdOverride || spaceId
 
   useEffect(() => {
     setInvoiceNumber(String((bill as any)?.invoice_number || ''))
@@ -2460,28 +2463,28 @@ function BillDetailsScreen() {
 
   useEffect(() => { (async ()=>{
     if (!bill || spaceLoading || !space) return
-    if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, spaceId))
-    else setAttachments(await listLocalAttachments(spaceId, 'bills', bill.id))
+    if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, effectiveSpaceId))
+    else setAttachments(await listLocalAttachments(effectiveSpaceId, 'bills', bill.id))
 
     try {
       if (supabase) {
-        const { data } = await listWarranties(supabase!, spaceId)
+        const { data } = await listWarranties(supabase!, effectiveSpaceId)
         const match = (data || []).find((w: any) => w.bill_id === bill.id) || null
         setLinkedWarranty(match)
       } else {
-        const locals = await loadLocalWarranties(spaceId)
+        const locals = await loadLocalWarranties(effectiveSpaceId)
         const match = (locals || []).find((w: any) => w.bill_id === bill.id) || null
         setLinkedWarranty(match as any)
       }
     } catch {
       setLinkedWarranty(null)
     }
-  })() }, [bill, spaceLoading, space, supabase, spaceId])
+  })() }, [bill, effectiveSpaceId, spaceLoading, space, supabase])
 
   async function refresh() {
     if (!bill || spaceLoading || !space) return
-    if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, spaceId))
-    else setAttachments(await listLocalAttachments(spaceId, 'bills', bill.id))
+    if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, effectiveSpaceId))
+    else setAttachments(await listLocalAttachments(effectiveSpaceId, 'bills', bill.id))
   }
 
   async function addImage() {
@@ -2491,7 +2494,7 @@ function BillDetailsScreen() {
     if (!asset?.uri) return
     const name = asset.fileName || 'photo.jpg'
     const type = asset.type || 'image/jpeg'
-    const up = await uploadAttachmentFromUri(spaceId, 'bills', bill!.id, asset.uri, name, type)
+    const up = await uploadAttachmentFromUri(effectiveSpaceId, 'bills', bill!.id, asset.uri, name, type)
     if (up.error) Alert.alert(tr('Upload failed'), up.error)
     else Alert.alert(tr('Attachment uploaded'), tr('Image attached to bill'))
   }
@@ -2502,7 +2505,7 @@ function BillDetailsScreen() {
     const file = res.assets?.[0]
     if (!file?.uri) return
     const name = file.name || 'document.pdf'
-    const up = await uploadAttachmentFromUri(spaceId, 'bills', bill!.id, file.uri, name, 'application/pdf')
+    const up = await uploadAttachmentFromUri(effectiveSpaceId, 'bills', bill!.id, file.uri, name, 'application/pdf')
     if (up.error) Alert.alert(tr('Upload failed'), up.error)
     else Alert.alert(tr('Attachment uploaded'), tr('PDF attached to bill'))
     await refresh()
@@ -2522,7 +2525,7 @@ function BillDetailsScreen() {
   async function remove(path: string) {
     Alert.alert(tr('Delete attachment?'), tr('This file will be removed.'), [
       { text: tr('Cancel'), style: 'cancel' },
-      { text: tr('Delete'), style: 'destructive', onPress: async () => { const { error } = await deleteAttachment(spaceId, 'bills', bill!.id, path); if (error) Alert.alert(tr('Delete failed'), error); else await refresh() } }
+      { text: tr('Delete'), style: 'destructive', onPress: async () => { const { error } = await deleteAttachment(effectiveSpaceId, 'bills', bill!.id, path); if (error) Alert.alert(tr('Delete failed'), error); else await refresh() } }
     ])
   }
 
@@ -2533,10 +2536,10 @@ function BillDetailsScreen() {
     try {
       const next = invoiceNumber.trim() || null
       if (supabase) {
-        const { error } = await setBillInvoiceNumber(supabase, bill.id, next, spaceId)
+        const { error } = await setBillInvoiceNumber(supabase, bill.id, next, effectiveSpaceId)
         if (error) throw error
       } else {
-        await setLocalBillInvoiceNumber(spaceId, bill.id, next)
+        await setLocalBillInvoiceNumber(effectiveSpaceId, bill.id, next)
       }
       Alert.alert(tr('Updated'), tr('Invoice number saved.'))
     } catch (e: any) {
@@ -2611,7 +2614,7 @@ function BillDetailsScreen() {
                   try {
                     const s0 = getSupabase()
                     if (s0) {
-                      const { data } = await listWarranties(s0, spaceId)
+                      const { data } = await listWarranties(s0, effectiveSpaceId)
                       const existing = (data || []).find((w: any) => w.bill_id === bill.id) || null
                       if (existing?.id) {
                         Alert.alert(tr('Warranty already exists'), tr('Opening the existing warranty for this bill.'))
@@ -2619,7 +2622,7 @@ function BillDetailsScreen() {
                         return
                       }
                     } else {
-                      const locals = await loadLocalWarranties(spaceId)
+                      const locals = await loadLocalWarranties(effectiveSpaceId)
                       const existing = (locals || []).find((w: any) => w.bill_id === bill.id) || null
                       if ((existing as any)?.id) {
                         Alert.alert(tr('Warranty already exists'), tr('Opening the existing warranty for this bill.'))
@@ -2632,11 +2635,11 @@ function BillDetailsScreen() {
                   const s = getSupabase()
                   let createdId: string | null = null
                   if (s) {
-                    const { data, error } = await createWarranty(s, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id, space_id: spaceId })
+                    const { data, error } = await createWarranty(s, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id, space_id: effectiveSpaceId })
                     if (error) { Alert.alert(tr('Warranty error'), error.message); return }
                     createdId = data?.id || null
                   } else {
-                    const local = await addLocalWarranty(spaceId, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id })
+                    const local = await addLocalWarranty(effectiveSpaceId, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id })
                     createdId = local.id
                   }
                   if (createdId) {
@@ -2666,7 +2669,7 @@ function BillDetailsScreen() {
                   Alert.alert(tr('Enable reminders'), tr('Please enable notifications in system settings.'))
                   return
                 }
-                await scheduleBillReminders({ ...bill, space_id: spaceId } as any, undefined, spaceId)
+                await scheduleBillReminders({ ...bill, space_id: effectiveSpaceId } as any, undefined, effectiveSpaceId)
                 Alert.alert(tr('Reminders'), tr('Scheduled default reminders for this bill.'))
               }}
             />
@@ -2675,7 +2678,7 @@ function BillDetailsScreen() {
               variant="ghost"
               iconName="notifications-off-outline"
               onPress={async ()=>{
-                await cancelBillReminders(bill.id, spaceId)
+                await cancelBillReminders(bill.id, effectiveSpaceId)
                 Alert.alert(tr('Reminders'), tr('Canceled for this bill.'))
               }}
             />
@@ -2684,17 +2687,17 @@ function BillDetailsScreen() {
             <AppButton
               label={tr('Snooze 1 day')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 1, spaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 1 day.')) }}
+              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 1, effectiveSpaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 1 day.')) }}
             />
             <AppButton
               label={tr('Snooze 3 days')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 3, spaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 3 days.')) }}
+              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 3, effectiveSpaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 3 days.')) }}
             />
             <AppButton
               label={tr('Snooze 7 days')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: spaceId } as any, 7, spaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 7 days.')) }}
+              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 7, effectiveSpaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 7 days.')) }}
             />
           </View>
         </Surface>
@@ -6411,6 +6414,7 @@ function BillsListScreen() {
   const navigation = useNavigation<any>()
   const route = useRoute<any>()
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const spacesCtx = useSpacesContext()
   const { snapshot: entitlements } = useEntitlements()
   const { lang } = useLangContext()
   const insets = useSafeAreaInsets()
@@ -6419,7 +6423,7 @@ function BillsListScreen() {
 
   const effectiveSpaceId = spaceId || space?.id || 'default'
 
-  const [bills, setBills] = useState<Bill[]>([])
+  const [bills, setBills] = useState<(Bill & { __spaceId?: string })[]>([])
   const [loadingBills, setLoadingBills] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [billsError, setBillsError] = useState<string | null>(null)
@@ -6459,6 +6463,47 @@ function BillsListScreen() {
   const defaultExportScope: ExportPayerScope = spaceId === 'personal2' ? 'payer2' : 'payer1'
   const canUsePayer2 = Number(entitlements?.payerLimit || 1) >= 2
 
+  type BillsProfileScope = 'payer1' | 'payer2' | 'both'
+  const defaultBillsScope: BillsProfileScope = spaceId === 'personal2' ? 'payer2' : 'payer1'
+  const [profileScope, setProfileScope] = useState<BillsProfileScope>(defaultBillsScope)
+
+  const payerSpaces = useMemo(() => {
+    return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
+  }, [spacesCtx.spaces])
+
+  const payerNameForId = useCallback((id: string): string => {
+    const sp = payerSpaces.find((s) => s.id === id) || null
+    const name = (sp?.name || '').trim()
+    return name || tr(payerLabelFromSpaceId(id))
+  }, [payerSpaces, tr])
+
+  const canSelectPayer2 = useMemo(() => {
+    return canUsePayer2 && payerSpaces.some((s) => s.id === 'personal2')
+  }, [canUsePayer2, payerSpaces])
+
+  const selectedPayerIds = useMemo((): string[] => {
+    const ids = payerSpaces.map((s) => s.id)
+    if (!ids.length) return [spaceId || 'personal']
+
+    const p1 = ids.includes('personal') ? 'personal' : ids[0]
+    const p2 = ids.includes('personal2') ? 'personal2' : null
+
+    if (profileScope === 'both') {
+      const out = [p1]
+      if (p2 && canSelectPayer2) out.push(p2)
+      return out
+    }
+    if (profileScope === 'payer2') {
+      if (p2 && canSelectPayer2) return [p2]
+      return [p1]
+    }
+    return [p1]
+  }, [canSelectPayer2, payerSpaces, profileScope, spaceId])
+
+  useEffect(() => {
+    if (!canSelectPayer2 && profileScope !== 'payer1') setProfileScope('payer1')
+  }, [canSelectPayer2, profileScope])
+
   const [iosPickerVisible, setIosPickerVisible] = useState(false)
   const [iosPickerField, setIosPickerField] = useState<'from' | 'to' | null>(null)
   const [iosPickerValue, setIosPickerValue] = useState(new Date())
@@ -6471,7 +6516,8 @@ function BillsListScreen() {
   const [installmentDueDay, setInstallmentDueDay] = useState(String(new Date().getDate()))
   const [installmentCreditor, setInstallmentCreditor] = useState('')
   const [installmentIban, setInstallmentIban] = useState('')
-  const [installmentReference, setInstallmentReference] = useState('')
+  const [installmentReferenceModel, setInstallmentReferenceModel] = useState('')
+  const [installmentReferenceNumber, setInstallmentReferenceNumber] = useState('')
   const [installmentPurpose, setInstallmentPurpose] = useState('')
   const [installmentMonths, setInstallmentMonths] = useState('')
   const [installmentEndMonth, setInstallmentEndMonth] = useState('')
@@ -6616,24 +6662,43 @@ function BillsListScreen() {
     try {
       setBillsError(null)
       if (supabase) {
-        const { data, error } = await listBills(supabase, spaceId)
+        const ids = (selectedPayerIds || []).filter(Boolean)
+        const { data, error } = await listBills(supabase, ids.length > 1 ? ids : (ids[0] || spaceId), entitlements)
         if (error) throw error
-        let next = (data || []) as Bill[]
+
+        let raw = ((data as any) || []) as any[]
+        let annotated: (Bill & { __spaceId?: string })[] = raw.map((b) => {
+          const local = localPayerIdFromDbSpaceId(entitlements, (b as any)?.space_id) || ids[0] || spaceId
+          return { ...(b as any), __spaceId: local }
+        })
+
         if (entitlements.plan === 'pro') {
-          next = await ensureInstallmentBills({ spaceId, supabase, existingBills: next, horizonMonths: 2 })
+          const merged: (Bill & { __spaceId?: string })[] = []
+          for (const sid of ids) {
+            const group = annotated.filter((b) => (b as any).__spaceId === sid) as any as Bill[]
+            const ensured = await ensureInstallmentBills({ spaceId: sid, supabase, existingBills: group, horizonMonths: 2 })
+            for (const b of ensured || []) merged.push({ ...(b as any), __spaceId: sid })
+          }
+          annotated = merged
         } else {
-          next = next.filter((b) => !isInstallmentBill(b))
+          annotated = annotated.filter((b) => !isInstallmentBill(b as any))
         }
-        setBills(next)
+
+        setBills(annotated)
       } else {
-        const locals = await loadLocalBills(spaceId)
-        let next = ((locals as any) || []) as Bill[]
-        if (entitlements.plan === 'pro') {
-          next = await ensureInstallmentBills({ spaceId, supabase: null, existingBills: next, horizonMonths: 2 })
-        } else {
-          next = next.filter((b) => !isInstallmentBill(b))
+        const ids = (selectedPayerIds || []).filter(Boolean)
+        const annotated: (Bill & { __spaceId?: string })[] = []
+        for (const sid of ids) {
+          const locals = await loadLocalBills(sid)
+          let group = (((locals as any) || []) as any[]) as Bill[]
+          if (entitlements.plan === 'pro') {
+            group = await ensureInstallmentBills({ spaceId: sid, supabase: null, existingBills: group, horizonMonths: 2 })
+          } else {
+            group = group.filter((b) => !isInstallmentBill(b))
+          }
+          for (const b of group || []) annotated.push({ ...(b as any), __spaceId: sid })
         }
-        setBills(next)
+        setBills(annotated)
       }
     } catch (e: any) {
       setBillsError(tr('Bills could not be loaded. Pull to refresh.'))
@@ -6641,7 +6706,7 @@ function BillsListScreen() {
       hasLoadedRef.current = true
       silent ? setRefreshing(false) : setLoadingBills(false)
     }
-  }, [spaceLoading, space, supabase, spaceId, entitlements.plan])
+  }, [spaceLoading, space, supabase, spaceId, entitlements, selectedPayerIds])
 
   useEffect(() => {
     if (!hasLoadedRef.current) return
@@ -6651,7 +6716,12 @@ function BillsListScreen() {
   const loadWarrantyLinks = useCallback(async () => {
     if (spaceLoading || !space) return
     try {
-      const warranties = supabase ? (await listWarranties(supabase, spaceId)).data : ((await loadLocalWarranties(spaceId)) as any)
+      const ids = (selectedPayerIds || []).filter(Boolean)
+      const warranties = supabase
+        ? (await listWarranties(supabase, ids.length > 1 ? ids : (ids[0] || spaceId), entitlements)).data
+        : ((await Promise.all(ids.map((sid) => loadLocalWarranties(sid))))
+          .flat() as any)
+
       const next: Record<string, true> = {}
       for (const w of warranties || []) {
         const billId = (w as any)?.bill_id
@@ -6663,7 +6733,7 @@ function BillsListScreen() {
       setWarrantyBillIds({})
       setWarranties([])
     }
-  }, [spaceLoading, space, supabase, spaceId])
+  }, [spaceLoading, space, supabase, spaceId, entitlements, selectedPayerIds])
 
   useFocusEffect(
     useCallback(() => {
@@ -6681,7 +6751,8 @@ function BillsListScreen() {
     setInstallmentDueDay(String(new Date().getDate()))
     setInstallmentCreditor('')
     setInstallmentIban('')
-    setInstallmentReference('')
+    setInstallmentReferenceModel('')
+    setInstallmentReferenceNumber('')
     setInstallmentPurpose('')
     setInstallmentMonths('')
     setInstallmentEndMonth('')
@@ -6725,7 +6796,9 @@ function BillsListScreen() {
 
     const creditor = installmentCreditor.trim()
     const iban = installmentIban.trim()
-    const reference = installmentReference.trim()
+    const modelRaw = installmentReferenceModel.trim()
+    const numberRaw = installmentReferenceNumber.trim()
+    const reference = modelRaw ? buildReferenceFromModel(modelRaw, numberRaw) : normalizeReference(numberRaw)
     const purpose = installmentPurpose.trim()
     if (!creditor || !iban || !reference || !purpose) {
       Alert.alert(tr('Missing payment details'), tr('Please fill creditor, IBAN, reference, and purpose.'))
@@ -6795,7 +6868,8 @@ function BillsListScreen() {
     installmentDueDay,
     installmentIban,
     installmentPurpose,
-    installmentReference,
+    installmentReferenceModel,
+    installmentReferenceNumber,
     installmentSaving,
     installmentStartMonth,
     installmentTitle,
@@ -6840,9 +6914,10 @@ function BillsListScreen() {
       const entries = await Promise.all(
         bills.map(async (bill) => {
           try {
+            const sid = String((bill as any)?.__spaceId || spaceId || '')
             const list = supabase
-              ? await listRemoteAttachments(supabase, 'bills', bill.id, spaceId)
-              : await listLocalAttachments(spaceId, 'bills', bill.id)
+              ? await listRemoteAttachments(supabase, 'bills', bill.id, sid)
+              : await listLocalAttachments(sid, 'bills', bill.id)
             return [bill.id, list.length] as const
           } catch {
             return [bill.id, 0] as const
@@ -7471,13 +7546,16 @@ function BillsListScreen() {
     return `Overdue by ${Math.abs(diffDays)} day${diffDays === -1 ? '' : 's'}`
   }, [today])
 
-  const renderBillItem = useCallback(({ item }: { item: Bill }) => {
+  const renderBillItem = useCallback(({ item }: { item: Bill & { __spaceId?: string } }) => {
     const dueDate = parseDateValue(item.due_date)
     const trackedDate = getBillDate(item, dateMode)
     const isOverdue = dueDate ? item.status === 'unpaid' && dueDate.getTime() < today.getTime() : false
     const statusLabel = item.status === 'archived' ? 'Archived' : isOverdue ? 'Overdue' : item.status === 'paid' ? 'Paid' : 'Unpaid'
     const statusTone: 'danger' | 'success' | 'info' | 'warning' = item.status === 'archived' ? 'info' : isOverdue ? 'warning' : item.status === 'paid' ? 'success' : 'info'
     const attachments = attachmentCounts[item.id] || 0
+
+    const billSpaceId = String((item as any)?.__spaceId || spaceId || '')
+    const billSpaceName = payerNameForId(billSpaceId) || (space?.name || tr('Default space'))
 
     return (
       <Surface
@@ -7491,7 +7569,7 @@ function BillsListScreen() {
         ]}
       >
         <Pressable
-          onPress={() => navigation.navigate('Bill Details', { bill: item })}
+          onPress={() => navigation.navigate('Bill Details', { bill: item, spaceIdOverride: billSpaceId })}
           style={({ pressed }) => [styles.billCardPressable, pressed && styles.billCardPressed]}
           hitSlop={8}
         >
@@ -7533,7 +7611,7 @@ function BillsListScreen() {
           <View style={styles.billMetaRow}>
             <View style={styles.billMetaGroup}>
               <Ionicons name="person-circle-outline" size={16} color="#6B7280" />
-              <Text style={styles.billMetaSecondary}>{space?.name || tr('Default space')}</Text>
+              <Text style={styles.billMetaSecondary}>{billSpaceName}</Text>
             </View>
           </View>
 
@@ -7548,7 +7626,7 @@ function BillsListScreen() {
         </Pressable>
       </Surface>
     )
-  }, [attachmentCounts, dateMode, formatAmount, formatDisplayDate, getBillDate, highlightId, navigation, parseDateValue, relativeDueText, space, today, warrantyBillIds])
+  }, [attachmentCounts, dateMode, formatAmount, formatDisplayDate, getBillDate, highlightId, navigation, parseDateValue, payerNameForId, relativeDueText, space?.name, spaceId, today, tr, warrantyBillIds])
 
   if (spaceLoading || !space) {
     return (
@@ -7611,6 +7689,24 @@ function BillsListScreen() {
 
               {filtersExpanded && (
                 <View style={styles.filtersBody}>
+                  <View style={{ marginBottom: themeSpacing.sm }}>
+                    <Text style={styles.filterLabel}>{tr('Profile scope')}</Text>
+                    <SegmentedControl
+                      value={profileScope}
+                      onChange={(v) => setProfileScope(v as BillsProfileScope)}
+                      options={canSelectPayer2
+                        ? [
+                          { value: 'payer1', label: payerNameForId('personal') },
+                          { value: 'payer2', label: payerNameForId('personal2') },
+                          { value: 'both', label: `${payerNameForId('personal')} + ${payerNameForId('personal2')}` },
+                        ]
+                        : [
+                          { value: 'payer1', label: payerNameForId('personal') },
+                        ]}
+                      style={{ marginTop: themeSpacing.xs }}
+                    />
+                  </View>
+
                   <SegmentedControl
                     value={dateMode}
                     onChange={(value) => setDateMode(value as typeof dateMode)}
@@ -7899,7 +7995,32 @@ function BillsListScreen() {
               <Text style={styles.formSectionTitle}>{tr('Payment details')}</Text>
               <AppInput placeholder={tr('Creditor')} value={installmentCreditor} onChangeText={setInstallmentCreditor} />
               <AppInput placeholder={tr('IBAN')} value={installmentIban} onChangeText={setInstallmentIban} />
-              <AppInput placeholder={tr('Reference')} value={installmentReference} onChangeText={setInstallmentReference} />
+              <View style={{ gap: 6 }}>
+                <Text style={styles.fieldLabel}>{tr('Reference')}</Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <View style={{ width: 90 }}>
+                    <AppInput
+                      placeholder={tr('SI 12')}
+                      value={installmentReferenceModel}
+                      onChangeText={setInstallmentReferenceModel}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="default"
+                      maxLength={5}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <AppInput
+                      placeholder={tr('Reference number')}
+                      value={installmentReferenceNumber}
+                      onChangeText={setInstallmentReferenceNumber}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="default"
+                    />
+                  </View>
+                </View>
+              </View>
               <AppInput placeholder={tr('Purpose')} value={installmentPurpose} onChangeText={setInstallmentPurpose} multiline />
 
               <AppButton
@@ -9009,6 +9130,77 @@ function WarrantiesScreen() {
     ])
   }
 
+  async function ocrPendingAttachment(att: { uri: string; name: string; type?: string }) {
+    const base = getFunctionsBase()
+    if (!base) {
+      Alert.alert(tr('OCR unavailable'), tr('Missing EXPO_PUBLIC_FUNCTIONS_BASE'))
+      return
+    }
+
+    try {
+      const fileResp = await fetch(att.uri)
+      const blob = await fileResp.blob()
+      const supa = getSupabase()
+      let authHeader: Record<string, string> = {}
+      if (supa) {
+        try {
+          const { data } = await supa.auth.getSession()
+          const token = data?.session?.access_token
+          if (token) authHeader = { Authorization: `Bearer ${token}` }
+        } catch {}
+      }
+
+      const contentType = blob.type || att.type || 'application/octet-stream'
+      const resp = await fetch(`${base}/.netlify/functions/ocr`, {
+        method: 'POST',
+        headers: { 'Content-Type': contentType, ...authHeader },
+        body: blob,
+      })
+      const data = await resp.json()
+      if (!resp.ok || !data?.ok) throw new Error(data?.error || `${tr('OCR failed')} (${resp.status})`)
+
+      const f = data.fields || {}
+      const rawText = typeof data?.rawText === 'string' ? data.rawText : ''
+      const extracted = extractWarrantyFieldsFromOcr(rawText)
+
+      const supplierCandidate = extracted.supplier || f.supplier
+      const itemCandidate = extracted.itemName
+      const purchaseCandidate = extracted.purchaseDate || f.due_date
+      const expiresCandidate = extracted.expiresAt
+      const durationCandidate = extracted.durationMonths
+
+      if (!supplier.trim() && supplierCandidate) setSupplier(String(supplierCandidate))
+      if (!itemName.trim() && itemCandidate) setItemName(String(itemCandidate))
+      if (!itemName.trim() && !itemCandidate && supplierCandidate) setItemName(String(supplierCandidate))
+      if (!purchaseDate.trim() && purchaseCandidate) setPurchaseDate(String(purchaseCandidate))
+
+      if (!expiresAt.trim() && expiresCandidate) {
+        setExpiresAt(String(expiresCandidate))
+        if (durationMonths.trim()) setDurationMonths('')
+      }
+      if (!durationMonths.trim() && durationCandidate && !expiresCandidate) {
+        setDurationMonths(String(durationCandidate))
+        if (expiresAt.trim()) setExpiresAt('')
+      }
+
+      if (!selectedBillId) {
+        Alert.alert(tr('OCR extracted'), tr('Select a linked bill, then press “Save warranty”.'))
+        return
+      }
+
+      const existingLinked = (items || []).find((w: any) => w.bill_id === selectedBillId) || null
+      if (existingLinked) {
+        Alert.alert(tr('Already linked'), tr('This bill already has a warranty. Opening the existing warranty.'))
+        navigation.navigate('Warranty Details', { warrantyId: (existingLinked as any).id })
+        return
+      }
+
+      Alert.alert(tr('OCR extracted'), contentType.includes('pdf') ? tr('Fields prefilling from PDF. Review and press “Save warranty”.') : tr('Fields prefilling from photo. Review and press “Save warranty”.'))
+    } catch (e: any) {
+      Alert.alert(tr('OCR error'), e?.message || tr('OCR failed'))
+    }
+  }
+
   async function ocrPhoto() {
     if (!entitlements.canUseOCR) {
       showUpgradeAlert('ocr')
@@ -9343,8 +9535,13 @@ function WarrantiesScreen() {
           if (res.canceled) return
           const asset = res.assets?.[0]
           if (!asset?.uri) return
-          setPendingAttachment({ uri: asset.uri, name: asset.fileName || 'photo.jpg', type: asset.type || 'image/jpeg' })
-          Alert.alert(tr('Attachment selected'), tr('Image will be attached on save.'))
+          const att = { uri: asset.uri, name: asset.fileName || 'photo.jpg', type: asset.type || 'image/jpeg' }
+          setPendingAttachment(att)
+          if (!entitlements.canUseOCR) {
+            Alert.alert(tr('Attachment selected'), tr('Image will be attached on save.'))
+            return
+          }
+          await ocrPendingAttachment(att)
         }}
             />
             <AppButton
@@ -9356,8 +9553,13 @@ function WarrantiesScreen() {
           if (res.canceled) return
           const file = res.assets?.[0]
           if (!file?.uri) return
-          setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
-          Alert.alert(tr('Attachment selected'), tr('PDF will be attached on save.'))
+          const att = { uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' }
+          setPendingAttachment(att)
+          if (!entitlements.canUseOCR) {
+            Alert.alert(tr('Attachment selected'), tr('PDF will be attached on save.'))
+            return
+          }
+          await ocrPendingAttachment(att)
         }}
             />
           </View>
@@ -10050,6 +10252,37 @@ function ReportsScreen() {
     return { points, max }
   }, [dateMode, filtered, groupBy, isPro])
 
+  const showBasicInsights = useCallback(() => {
+    if (!filtered.length) {
+      Alert.alert(tr('Reports'), tr('No bills in this range.'))
+      return
+    }
+
+    const supplierTotals: Record<string, number> = {}
+    let maxBill: Bill | null = null
+
+    for (const b of filtered) {
+      const supplier = String((b as any)?.supplier || '').trim() || tr('Unknown')
+      supplierTotals[supplier] = (supplierTotals[supplier] || 0) + (b.currency === 'EUR' ? b.amount : 0)
+      if (!maxBill || (b.currency === 'EUR' ? b.amount : 0) > ((maxBill.currency === 'EUR' ? maxBill.amount : 0) || 0)) {
+        maxBill = b
+      }
+    }
+
+    const topSuppliers = Object.entries(supplierTotals)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, amt]) => `${name}: EUR ${amt.toFixed(2)}`)
+
+    const lines = [
+      `${tr('Bills in range')}: ${filtered.length}`,
+      topSuppliers.length ? `${tr('Supplier')}:\n${topSuppliers.join('\n')}` : '',
+      maxBill ? `${tr('Total amount (EUR)')}: EUR ${(filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? b.amount : 0), 0)).toFixed(2)}` : '',
+    ].filter(Boolean)
+
+    Alert.alert(tr('Reports'), lines.join('\n\n'))
+  }, [filtered, tr])
+
   const reportPayload = useMemo(() => {
     const isAdvanced = isPro
     return {
@@ -10369,6 +10602,51 @@ function ReportsScreen() {
           </View>
         </Surface>
 
+        <Pressable onPress={showBasicInsights} hitSlop={8}>
+          <Surface elevated>
+            <SectionHeader title={tr('Totals in range')} />
+            <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.xs }}>
+              <Text style={styles.reportStatLabel}>
+                {tr('Bills in range')}: <Text style={styles.reportStatValue}>{totals.totalBillsInRange}</Text>
+              </Text>
+              <Text style={styles.reportStatLabel}>
+                {tr('Total amount (EUR)')}: <Text style={styles.reportStatValue}>EUR {totals.totalAmountEur.toFixed(2)}</Text>
+              </Text>
+              <Text style={styles.reportStatLabel}>
+                {tr('Unpaid total (EUR)')}: <Text style={styles.reportStatValue}>EUR {totals.unpaidTotalEur.toFixed(2)}</Text>
+              </Text>
+            </View>
+          </Surface>
+        </Pressable>
+
+        <Pressable
+          onPress={() => {
+            if (!isPro) {
+              showUpgradeAlert('reports')
+            }
+          }}
+          hitSlop={8}
+        >
+          <Surface elevated>
+            <SectionHeader title={groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')} />
+            <View style={{ paddingVertical: themeSpacing.sm }}>
+              {series.points.length === 0 ? (
+                <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
+              ) : (
+                series.points.map((p) => (
+                  <View key={p.key} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                    <Text style={{ width: 80 }}>{p.key}</Text>
+                    <View style={{ flex: 1, height: 12, borderRadius: 6, overflow: 'hidden', backgroundColor: '#E5E7EB' }}>
+                      <View style={{ height: '100%', width: `${Math.max(0, Math.min(100, p.pct))}%`, backgroundColor: themeColors.primary }} />
+                    </View>
+                    <Text style={{ marginLeft: 8 }}>EUR {p.value.toFixed(2)}</Text>
+                  </View>
+                ))
+              )}
+            </View>
+          </Surface>
+        </Pressable>
+
         <Surface elevated>
           <SectionHeader title={tr('Report exports')} />
           <Text style={styles.mutedText}>{tr('Export this report as PDF, ZIP, or JSON.')}</Text>
@@ -10396,40 +10674,6 @@ function ReportsScreen() {
               />
             </View>
           ) : null}
-        </Surface>
-
-        <Surface elevated>
-          <SectionHeader title={tr('Totals in range')} />
-          <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.xs }}>
-            <Text style={styles.reportStatLabel}>
-              {tr('Bills in range')}: <Text style={styles.reportStatValue}>{totals.totalBillsInRange}</Text>
-            </Text>
-            <Text style={styles.reportStatLabel}>
-              {tr('Total amount (EUR)')}: <Text style={styles.reportStatValue}>EUR {totals.totalAmountEur.toFixed(2)}</Text>
-            </Text>
-            <Text style={styles.reportStatLabel}>
-              {tr('Unpaid total (EUR)')}: <Text style={styles.reportStatValue}>EUR {totals.unpaidTotalEur.toFixed(2)}</Text>
-            </Text>
-          </View>
-        </Surface>
-
-        <Surface elevated>
-          <SectionHeader title={groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')} />
-          <View style={{ paddingVertical: themeSpacing.sm }}>
-            {series.points.length === 0 ? (
-              <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
-            ) : (
-              series.points.map((p) => (
-                <View key={p.key} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                  <Text style={{ width: 80 }}>{p.key}</Text>
-                  <View style={{ flex: 1, height: 12, borderRadius: 6, overflow: 'hidden', backgroundColor: '#E5E7EB' }}>
-                    <View style={{ height: '100%', width: `${Math.max(0, Math.min(100, p.pct))}%`, backgroundColor: themeColors.primary }} />
-                  </View>
-                  <Text style={{ marginLeft: 8 }}>EUR {p.value.toFixed(2)}</Text>
-                </View>
-              ))
-            )}
-          </View>
         </Surface>
       </View>
 
@@ -12265,6 +12509,7 @@ function SettingsScreen() {
                     key={o.code}
                     label={o.label + (lang === o.code ? ' ✓' : '')}
                     variant={lang === o.code ? 'primary' : 'secondary'}
+                    labelStyle={{ fontWeight: lang === o.code ? '900' : '700' }}
                     onPress={() => {
                       changeLang(o.code)
                       setLanguageModalVisible(false)
