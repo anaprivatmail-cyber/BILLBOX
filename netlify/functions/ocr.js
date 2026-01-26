@@ -20,6 +20,14 @@ function isAiOcrEnabled() {
   return !!OPENAI_API_KEY
 }
 
+function isGoogleVisionEnabled() {
+  // Google Vision is enabled by default.
+  // Can be explicitly disabled via DISABLE_GOOGLE_VISION=true (or 1).
+  const flag = String(process.env.DISABLE_GOOGLE_VISION || '').trim().toLowerCase()
+  if (flag === 'true' || flag === '1') return false
+  return true
+}
+
 function looksLikeMisassignedName(input) {
   const s = String(input || '').trim()
   if (!s) return true
@@ -3067,6 +3075,7 @@ export async function handler(event) {
 
     let allowAi = true
     let aiVisionOnly = Boolean(allowAi && isAiOcrEnabled())
+    const googleVisionEnabled = isGoogleVisionEnabled()
     let languageHint = null
     let usageCounted = false
     let textPayload = null
@@ -3403,15 +3412,18 @@ export async function handler(event) {
               const meta = { ...buildExtractionMeta(text, fields), classification, scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
               return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
             }
-            aiError = aiError || 'ai_missing_fields'
-            aiDetail = aiDetail || `missing:${missing.missing.join(',')}`
-            aiErrorOnPdfText = aiError
-            aiDetailOnPdfText = aiDetail
-            console.warn('[OCR] AI PDF text missing key fields; falling back to Vision OCR.', { requestId, missing: missing.missing })
-            forceVisionOcr = true
+            // AI is the primary extractor (chat-like behavior): return partial fields instead of
+            // swapping engines.
+            const classification = buildClassification({ rawText: text, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType })
+            const meta = {
+              ...buildExtractionMeta(text, fields),
+              classification,
+              scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null },
+              ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError || 'ai_missing_fields', detail: aiDetail, missing: missing.missing },
+            }
+            return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text_partial' })
           } else {
-            console.error('[OCR] AI PDF text failed; falling back to Vision OCR.', { error: aiError, detail: aiDetail })
-            forceVisionOcr = true
+            console.error('[OCR] AI PDF text failed; falling back to rule-based.', { error: aiError, detail: aiDetail })
           }
         }
 
@@ -3436,7 +3448,16 @@ export async function handler(event) {
         }
       }
 
-      // Scanned PDF (or forced fallback): use Vision PDF OCR to get text, then AI-only parse (no rules).
+      // Scanned PDF: use Vision PDF OCR to get text, then AI-only parse.
+      // If Google Vision is disabled, we cannot OCR scanned PDFs here.
+      if (!googleVisionEnabled) {
+        return jsonResponse(422, {
+          ok: false,
+          error: 'scanned_pdf_not_supported_without_google',
+          message: 'Scanned PDFs require OCR. Upload an image/photo instead, or enable Google Vision OCR on the server.',
+        })
+      }
+
       const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
       if (!rawCreds || String(rawCreds).trim() === '') {
         return jsonResponse(500, { ok: false, step: 'env', error: 'missing_google_credentials_json' })
@@ -3522,9 +3543,14 @@ export async function handler(event) {
             const meta = { ...buildExtractionMeta(ocrText, fields), classification, scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
             return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
           }
-          console.warn('[OCR] AI PDF vision missing key fields; falling back to rule-based.', { requestId, missing: missing.missing })
-          aiError = aiError || 'ai_missing_fields'
-          aiDetail = aiDetail || `missing:${missing.missing.join(',')}`
+          const classification = buildClassification({ rawText: ocrText, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType })
+          const meta = {
+            ...buildExtractionMeta(ocrText, fields),
+            classification,
+            scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null },
+            ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError || 'ai_missing_fields', detail: aiDetail, missing: missing.missing },
+          }
+          return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision_partial' })
         } else {
           console.error('[OCR] AI PDF vision failed; falling back to rule-based.', { error: aiError, detail: aiDetail })
         }
@@ -3595,12 +3621,21 @@ export async function handler(event) {
           const meta = { ...buildExtractionMeta('', fields), classification, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
           return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
         }
-        aiError = aiError || 'ai_missing_fields'
-        aiDetail = aiDetail || `missing:${missing.missing.join(',')}`
-        console.warn('[OCR] AI vision missing key fields; falling back to Google OCR.', { requestId, missing: missing.missing })
+        const classification = buildClassification({ rawText: '', fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType: effectiveContentType })
+        const meta = {
+          ...buildExtractionMeta('', fields),
+          classification,
+          ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError || 'ai_missing_fields', detail: aiDetail, missing: missing.missing },
+        }
+        return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision_partial' })
       } else {
-        console.error('[OCR] AI vision failed; falling back to Google OCR.', { error: aiError, detail: aiDetail })
+        console.error('[OCR] AI vision failed.', { error: aiError, detail: aiDetail })
+        return jsonResponse(500, { ok: false, error: 'ai_vision_failed', detail: aiDetail || aiError || 'unknown' })
       }
+    }
+
+    if (!googleVisionEnabled) {
+      return jsonResponse(500, { ok: false, step: 'env', error: 'google_vision_disabled', message: 'Google Vision OCR disabled.' })
     }
 
     const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
