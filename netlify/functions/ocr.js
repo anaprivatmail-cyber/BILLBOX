@@ -474,6 +474,172 @@ function buildExtractionMeta(rawText, sanitizedFields) {
   return { any, doubt, candidates, not_found }
 }
 
+const CLASSIFICATION_CATEGORIES = [
+  'utilities',
+  'telecom',
+  'grocery',
+  'clothing',
+  'fuel',
+  'subscription',
+  'service',
+  'warranty_product',
+  'other',
+]
+
+const CLASSIFICATION_CATEGORY_RULES = [
+  { key: 'utilities', pattern: /(elektri\S*|power|electricity|plin|gas|voda\b|water|komunal\S*|waste|ogrevanj\S*|heating)/i },
+  { key: 'telecom', pattern: /(telekom|telefon|mobile|mobitel|internet|broadband|fiber|fibre|tv|cable)/i },
+  { key: 'grocery', pattern: /(\u017eivil|trgovin|market|supermarket|grocer|grocery|lidl|spar|hofer|aldi|mercator|muller|dm|shop)/i },
+  { key: 'clothing', pattern: /(obla\u010dil|oblek|obutev|butik|fashion|apparel|clothing|shoes|footwear|boutique)/i },
+  { key: 'fuel', pattern: /(gorivo|petrol|diesel|bencin|fuel|pumpa|gas\s*station|shell|omv|ina)/i },
+  { key: 'subscription', pattern: /(naro\u010dnin|subscription|membership|plan|monthly|mese\u010dno)/i },
+  { key: 'service', pattern: /(storitev|service|vzdr\u017eevanje|maintenance|servis|repair|popravilo)/i },
+  { key: 'warranty_product', pattern: /(garanc|warranty|izdelek|product|artikel|item|device|aparat)/i },
+]
+
+function coerceProb(x) {
+  const n = typeof x === 'number' ? x : Number(x)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(1, n))
+}
+
+function sanitizeClassification(aiCls) {
+  const src = aiCls && typeof aiCls === 'object' ? aiCls : null
+  if (!src) return null
+  const isInvoice = typeof src.is_invoice === 'boolean' ? src.is_invoice : (typeof src.isInvoice === 'boolean' ? src.isInvoice : null)
+  const invoiceConfidence = coerceProb(src.invoice_confidence ?? src.invoiceConfidence)
+  const paidUnpaidRaw = String(src.paid_unpaid ?? src.paidUnpaid ?? '').toLowerCase().trim()
+  const paidUnpaid = paidUnpaidRaw === 'paid' || paidUnpaidRaw === 'unpaid' || paidUnpaidRaw === 'unknown'
+    ? paidUnpaidRaw
+    : null
+  const paidConfidence = coerceProb(src.paid_confidence ?? src.paidConfidence)
+  const categoryRaw = String(src.category ?? '').trim()
+  const category = CLASSIFICATION_CATEGORIES.includes(categoryRaw) ? categoryRaw : null
+  const categoryConfidence = coerceProb(src.category_confidence ?? src.categoryConfidence)
+  const reason = src.reason != null ? String(src.reason).replace(/\s+/g, ' ').trim().slice(0, 180) : null
+
+  if (isInvoice == null && invoiceConfidence == null && paidUnpaid == null && category == null) return null
+  return {
+    source: 'ai',
+    isInvoice,
+    invoiceConfidence,
+    paidUnpaid,
+    paidConfidence,
+    category,
+    categoryConfidence,
+    reason,
+  }
+}
+
+function heuristicClassification({ rawText, fields, filename, contentType }) {
+  const text = String(rawText || '')
+  const t = text.toLowerCase()
+  const name = String(filename || '').toLowerCase()
+  const mime = String(contentType || '').toLowerCase()
+
+  const hasAmount = typeof fields?.amount === 'number' && Number.isFinite(fields.amount) && fields.amount > 0
+  const hasCurrency = Boolean(String(fields?.currency || '').trim())
+  const hasDue = Boolean(String(fields?.due_date || '').trim())
+  const hasIban = Boolean(String(fields?.iban || '').trim())
+  const hasRef = Boolean(String(fields?.reference || '').trim())
+  const hasPaymentDetails = Boolean(String(fields?.payment_details || '').trim())
+  const hasInvoiceNo = Boolean(String(fields?.invoice_number || '').trim())
+
+  let score = 0
+  const invRe = /(\bra\u010dun\b|invoice|faktura|rechnung|fattura|dav\u010dni\s*ra\u010dun|bill\b)/i
+  const amtRe = /(\bznesek\b|total|amount|balance\s*due|sum|skupaj|za\s*pla\S*)/i
+  const vatRe = /(\bddv\b|vat|pdv|tax\b)/i
+  const dueRe = /(rok\s*pla\S*|due\s*date|pay\s*by|payment\s*due|zapad)/i
+  const bankRe = /(iban|trr|bank\s*account|reference|sklic|model|sepa)/i
+  const unsubRe = /(unsubscribe|newsletter|marketing|promo|campaign)/i
+
+  if (invRe.test(t) || invRe.test(name)) score += 2
+  if (amtRe.test(t)) score += 1
+  if (vatRe.test(t)) score += 1
+  if (dueRe.test(t)) score += 1
+  if (bankRe.test(t)) score += 1
+  if (/\b(upnqr|bcd)\b/i.test(text)) score += 2
+  if (unsubRe.test(t)) score -= 3
+  if (!/\d/.test(t)) score -= 1
+  if (mime.includes('text/csv') || mime.includes('application/csv')) score += 1
+
+  if (hasAmount && hasCurrency) score += 3
+  if (hasDue) score += 1
+  if (hasInvoiceNo) score += 1
+  if (hasIban || hasRef) score += 2
+  if (hasPaymentDetails && !(hasIban || hasRef)) score += 1
+
+  const invoiceConfidence = Math.max(0, Math.min(1, (score + 2) / 10))
+  const isInvoice = invoiceConfidence >= 0.55
+
+  let paidScore = 0
+  let unpaidScore = 0
+  const paidRe = /(pla\u010dan|pla\u010dano|poravnano|paid\b|payment\s*received|zaprto|settled|receipt|fiscal|gotovina|cash\b|kartic|card\s*payment|pos\b)/i
+  const unpaidRe = /(za\s*pla\S*|to\s*pay|pay\s*now|payment\s*due|rok\s*pla\S*|due\s*date|zapad)/i
+  if (paidRe.test(text)) paidScore += 3
+  if (unpaidRe.test(text)) unpaidScore += 2
+  if (hasIban && hasRef) unpaidScore += 2
+  if (hasDue) unpaidScore += 1
+  if (!hasIban && !hasRef && paidRe.test(text)) paidScore += 1
+  if (!hasDue && paidRe.test(text)) paidScore += 1
+
+  let paidUnpaid = 'unknown'
+  let paidConfidence = 0.4
+  if (paidScore - unpaidScore >= 2) {
+    paidUnpaid = 'paid'
+    paidConfidence = Math.max(0.6, Math.min(0.95, 0.55 + (paidScore - unpaidScore) * 0.12))
+  } else if (unpaidScore - paidScore >= 2) {
+    paidUnpaid = 'unpaid'
+    paidConfidence = Math.max(0.6, Math.min(0.95, 0.55 + (unpaidScore - paidScore) * 0.12))
+  }
+
+  const supplier = String(fields?.supplier || fields?.creditor_name || '')
+  const purpose = String(fields?.purpose || '')
+  const itemName = String(fields?.item_name || '')
+  const hay = `${supplier} ${purpose} ${itemName} ${text}`
+  let category = null
+  for (const rule of CLASSIFICATION_CATEGORY_RULES) {
+    if (rule.pattern.test(hay)) { category = rule.key; break }
+  }
+  if (!category) category = 'other'
+  const categoryConfidence = category === 'other' ? 0.5 : 0.75
+
+  const reasonParts = []
+  if (invRe.test(t) || invRe.test(name)) reasonParts.push('invoice keywords')
+  if (hasAmount && hasCurrency) reasonParts.push('amount/currency')
+  if (hasIban || hasRef || hasPaymentDetails) reasonParts.push('payment info')
+  if (hasDue) reasonParts.push('due date')
+  const reason = reasonParts.length ? `Signals: ${reasonParts.join(', ')}` : null
+
+  return {
+    source: 'heuristic',
+    isInvoice,
+    invoiceConfidence,
+    paidUnpaid,
+    paidConfidence,
+    category,
+    categoryConfidence,
+    reason,
+  }
+}
+
+function buildClassification({ rawText, fields, aiClassification, filename, contentType }) {
+  const ai = sanitizeClassification(aiClassification)
+  const heuristic = heuristicClassification({ rawText, fields, filename, contentType })
+  if (!ai) return heuristic
+
+  return {
+    source: 'ai',
+    isInvoice: ai.isInvoice != null ? ai.isInvoice : heuristic.isInvoice,
+    invoiceConfidence: ai.invoiceConfidence != null ? ai.invoiceConfidence : heuristic.invoiceConfidence,
+    paidUnpaid: ai.paidUnpaid || heuristic.paidUnpaid,
+    paidConfidence: ai.paidConfidence != null ? ai.paidConfidence : heuristic.paidConfidence,
+    category: ai.category || heuristic.category,
+    categoryConfidence: ai.categoryConfidence != null ? ai.categoryConfidence : heuristic.categoryConfidence,
+    reason: ai.reason || heuristic.reason,
+  }
+}
+
 const EUR_IBAN_COUNTRIES = new Set([
   'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU',
   'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK',
@@ -1496,13 +1662,16 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
   const dataUrl = base64Image.startsWith('data:') ? base64Image : `data:${contentType || 'image/jpeg'};base64,${base64Image}`
 
   const system =
-    'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY with this schema: ' +
-    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null}. ' +
+    'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY. ' +
+    'Schema: ' +
+    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null, ' +
+    '"classification": {"is_invoice": boolean|null, "invoice_confidence": number|null, "paid_unpaid": "paid"|"unpaid"|"unknown"|null, "paid_confidence": number|null, "category": "utilities"|"telecom"|"grocery"|"clothing"|"fuel"|"subscription"|"service"|"warranty_product"|"other"|null, "category_confidence": number|null, "reason": string|null } }. ' +
     'Rules: ' +
     '- Extract the issuer/supplier company name only (no labels, no addresses, no emails, no URLs). ' +
     '- invoice_number must be the invoice/document number. ' +
     '- due_date must be in YYYY-MM-DD. ' +
     '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
+    '- classification is an inference; confidence values must be between 0 and 1 when provided. ' +
     '- If a value is unclear, return null. Prefer best-effort extraction over strict verbatim matching.'
 
   const user = [
@@ -1537,7 +1706,19 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
 
-    return { fields: parsed }
+    const clsRaw = parsed.classification && typeof parsed.classification === 'object' ? parsed.classification : null
+    const classification = clsRaw
+      ? {
+          is_invoice: typeof clsRaw.is_invoice === 'boolean' ? clsRaw.is_invoice : null,
+          invoice_confidence: coerceProb(clsRaw.invoice_confidence),
+          paid_unpaid: clsRaw.paid_unpaid,
+          paid_confidence: coerceProb(clsRaw.paid_confidence),
+          category: typeof clsRaw.category === 'string' ? clsRaw.category : null,
+          category_confidence: coerceProb(clsRaw.category_confidence),
+          reason: clsRaw.reason != null ? String(clsRaw.reason).replace(/\s+/g, ' ').trim().slice(0, 180) : null,
+        }
+      : null
+    return { fields: parsed, classification }
   } catch {
     return { error: 'ai_exception' }
   }
@@ -1549,13 +1730,16 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint, requestId) {
   if (!input) return { error: 'empty_text' }
 
   const system =
-    'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY with this schema: ' +
-    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null}. ' +
+    'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY. ' +
+    'Schema: ' +
+    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null, ' +
+    '"classification": {"is_invoice": boolean|null, "invoice_confidence": number|null, "paid_unpaid": "paid"|"unpaid"|"unknown"|null, "paid_confidence": number|null, "category": "utilities"|"telecom"|"grocery"|"clothing"|"fuel"|"subscription"|"service"|"warranty_product"|"other"|null, "category_confidence": number|null, "reason": string|null } }. ' +
     'Rules: ' +
     '- Use best-effort extraction from the text (may normalize spacing/case). ' +
     '- issuer/supplier must be a clean company name only (no labels, no addresses, no emails, no URLs). ' +
     '- due_date must be in YYYY-MM-DD if present. ' +
     '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
+    '- classification is an inference; confidence values must be between 0 and 1 when provided. ' +
     '- If uncertain, return null.'
 
   const user =
@@ -1588,7 +1772,19 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint, requestId) {
     const content = data?.choices?.[0]?.message?.content
     const parsed = safeParseJson(content)
     if (!parsed || typeof parsed !== 'object') return { error: 'ai_invalid_response' }
-    return { fields: parsed }
+    const clsRaw = parsed.classification && typeof parsed.classification === 'object' ? parsed.classification : null
+    const classification = clsRaw
+      ? {
+          is_invoice: typeof clsRaw.is_invoice === 'boolean' ? clsRaw.is_invoice : null,
+          invoice_confidence: coerceProb(clsRaw.invoice_confidence),
+          paid_unpaid: clsRaw.paid_unpaid,
+          paid_confidence: coerceProb(clsRaw.paid_confidence),
+          category: typeof clsRaw.category === 'string' ? clsRaw.category : null,
+          category_confidence: coerceProb(clsRaw.category_confidence),
+          reason: clsRaw.reason != null ? String(clsRaw.reason).replace(/\s+/g, ' ').trim().slice(0, 180) : null,
+        }
+      : null
+    return { fields: parsed, classification }
   } catch {
     return { error: 'ai_exception' }
   }
@@ -2395,15 +2591,20 @@ async function extractFieldsWithAI(rawText, candidates, languageHint, requestId)
   }
 
   const system =
-    'You are a document understanding assistant. Return JSON ONLY with this schema: ' +
-    '{"issuer_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null}. ' +
-    'Rules: ' +
+    'You are a document understanding assistant. Return JSON ONLY. ' +
+    'Schema: ' +
+    '{"issuer_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null, ' +
+    '"classification": {"is_invoice": boolean|null, "invoice_confidence": number|null, "paid_unpaid": "paid"|"unpaid"|"unknown"|null, "paid_confidence": number|null, "category": "utilities"|"telecom"|"grocery"|"clothing"|"fuel"|"subscription"|"service"|"warranty_product"|"other"|null, "category_confidence": number|null, "reason": string|null } }. ' +
+    'Rules for extracted fields: ' +
     '- Values MUST exist verbatim in OCR text. If not found confidently, return null. ' +
     '- Candidates below are hints; you may select any exact substring from the OCR text. ' +
     '- issuer_name must be a clean company name only (no labels, emails, URLs). ' +
     '- purpose should be a short description of goods/services if present; otherwise null. ' +
     '- item_name is the purchase subject (product/service name) if present; otherwise null. ' +
-    '- Never fabricate values.'
+    '- Never fabricate values. ' +
+    'Rules for classification: ' +
+    '- classification is an inference; it does not have to be a verbatim substring. ' +
+    '- Confidence values must be between 0 and 1 when provided.'
 
   const user =
     'Language hint: ' + String(languageHint || 'unknown') + '\n' +
@@ -2504,7 +2705,20 @@ async function extractFieldsWithAI(rawText, candidates, languageHint, requestId)
       else out.iban = iban
     }
 
-    return { fields: out }
+    const clsRaw = parsed.classification && typeof parsed.classification === 'object' ? parsed.classification : null
+    const classification = clsRaw
+      ? {
+          is_invoice: typeof clsRaw.is_invoice === 'boolean' ? clsRaw.is_invoice : null,
+          invoice_confidence: coerceProb(clsRaw.invoice_confidence),
+          paid_unpaid: clsRaw.paid_unpaid,
+          paid_confidence: coerceProb(clsRaw.paid_confidence),
+          category: typeof clsRaw.category === 'string' ? clsRaw.category : null,
+          category_confidence: coerceProb(clsRaw.category_confidence),
+          reason: clsRaw.reason != null ? String(clsRaw.reason).replace(/\s+/g, ' ').trim().slice(0, 180) : null,
+        }
+      : null
+
+    return { fields: out, classification }
   } catch {
     return { error: 'ai_exception' }
   }
@@ -2871,7 +3085,8 @@ export async function handler(event) {
           return jsonResponse(500, { ok: false, error: 'ai_text_failed', detail: aiDetail || aiError || 'unknown' })
         }
         const fields = sanitizeFieldsAiOnly(aiResult.fields)
-        const meta = { ...buildExtractionMeta(text, fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+        const classification = buildClassification({ rawText: text, fields, aiClassification: aiResult?.classification, filename: null, contentType })
+        const meta = { ...buildExtractionMeta(text, fields), classification, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
         return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_text' })
       }
 
@@ -2883,7 +3098,8 @@ export async function handler(event) {
       const fields = mergeFields(fields0, aiFields, text)
       const aiModel = aiFields ? resolveModel() : null
       const aiTier = aiFields ? 'document' : null
-      const meta = { ...buildExtractionMeta(text, fields), ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
+      const classification = buildClassification({ rawText: text, fields, aiClassification: aiResult?.classification, filename: null, contentType })
+      const meta = { ...buildExtractionMeta(text, fields), classification, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError } }
       return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'text' })
     }
 
@@ -2893,6 +3109,7 @@ export async function handler(event) {
     // preferQr: when true, we attempt to decode EPC/UPN payload from barcodes/QRs inside images/PDF text.
     // Mobile upload flow wants document OCR, so it will send preferQr=false.
     let preferQr = true
+    let inputFilename = null
     if (isPdf) {
       pdfBuffer = bodyToBuffer(event)
       if (!pdfBuffer || pdfBuffer.length < 16) {
@@ -2910,6 +3127,7 @@ export async function handler(event) {
         aiVisionOnly = Boolean(allowAi && isAiOcrEnabled())
         if (typeof body.language === 'string') languageHint = String(body.language || '').trim()
         if (typeof body.contentType === 'string') imageContentType = String(body.contentType || '').trim()
+        if (typeof body.filename === 'string') inputFilename = String(body.filename || '').trim().slice(0, 160)
         const textValue = typeof body.text === 'string'
           ? body.text
           : (typeof body.csvText === 'string' ? body.csvText : '')
@@ -3063,8 +3281,10 @@ export async function handler(event) {
           const missing0 = getMissingKeyFields(fields)
           const missingCore = (missing0?.missing || []).filter((k) => k !== 'due_date')
           if (missingCore.length === 0) {
+            const classification = buildClassification({ rawText: text, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType: textPayloadContentType || contentType })
             const meta = {
               ...buildExtractionMeta(text, fields),
+              classification,
               ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError, detail: aiDetail },
               input: { contentType: textPayloadContentType || 'text/plain' },
             }
@@ -3085,8 +3305,10 @@ export async function handler(event) {
       const fields = mergeFields(fields0, aiFields, text)
       const aiModel = aiFields ? resolveModel() : null
       const aiTier = aiFields ? 'document' : null
+      const classification = buildClassification({ rawText: text, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType: textPayloadContentType || contentType })
       const meta = {
         ...buildExtractionMeta(text, fields),
+        classification,
         ai: { enabled: isAiOcrEnabled(), attempted: Boolean(allowAi), error: aiError },
         input: { contentType: textPayloadContentType || 'text/plain' },
       }
@@ -3170,7 +3392,8 @@ export async function handler(event) {
             const fields = sanitizeFieldsAiOnly(aiResult.fields)
             const missing = getMissingKeyFields(fields)
             if (!missing.hasMissing) {
-              const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+              const classification = buildClassification({ rawText: text, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType })
+              const meta = { ...buildExtractionMeta(text, fields), classification, scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
               return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_text' })
             }
             aiError = aiError || 'ai_missing_fields'
@@ -3198,7 +3421,8 @@ export async function handler(event) {
             console.log('[OCR] AI extracted fields:', keys)
           }
           const fields = mergeFields(fields0, aiFields, text)
-          const meta = { ...buildExtractionMeta(text, fields), scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
+          const classification = buildClassification({ rawText: text, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType })
+          const meta = { ...buildExtractionMeta(text, fields), classification, scanned: { mode: 'pdf_text', pdf_pages: pdfPages || null, scanned_pages: pdfPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
           const aiModel = aiFields ? resolveModel() : null
           const aiTier = aiFields ? 'document' : null
           return jsonResponse(200, { ok: true, rawText: text, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_text' })
@@ -3287,7 +3511,8 @@ export async function handler(event) {
           const fields = sanitizeFieldsAiOnly(aiResult.fields)
           const missing = getMissingKeyFields(fields)
           if (!missing.hasMissing) {
-            const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+            const classification = buildClassification({ rawText: ocrText, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType })
+            const meta = { ...buildExtractionMeta(ocrText, fields), classification, scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
             return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'text', mode: 'ai_pdf_vision' })
           }
           console.warn('[OCR] AI PDF vision missing key fields; falling back to rule-based.', { requestId, missing: missing.missing })
@@ -3310,7 +3535,8 @@ export async function handler(event) {
         console.log('[OCR] AI extracted fields:', keys)
       }
       const fields = mergeFields(fields0, aiFields, ocrText)
-      const meta = { ...buildExtractionMeta(ocrText, fields), scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
+      const classification = buildClassification({ rawText: ocrText, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType })
+      const meta = { ...buildExtractionMeta(ocrText, fields), classification, scanned: { mode: 'pdf_vision', pdf_pages: parsedPdf?.numpages || null, scanned_pages: visionInfo?.scannedPages || null }, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
       const aiModel = aiFields ? resolveModel() : null
       const aiTier = aiFields ? 'document' : null
       return jsonResponse(200, { ok: true, rawText: ocrText, fields, meta, ai: !!aiFields, aiModel, aiTier, mode: 'pdf_vision' })
@@ -3358,7 +3584,8 @@ export async function handler(event) {
         const fields = sanitizeFieldsAiOnly(aiFields)
         const missing = getMissingKeyFields(fields)
         if (!missing.hasMissing) {
-          const meta = { ...buildExtractionMeta('', fields), ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
+          const classification = buildClassification({ rawText: '', fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType: effectiveContentType })
+          const meta = { ...buildExtractionMeta('', fields), classification, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
           return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
         }
         aiError = aiError || 'ai_missing_fields'
@@ -3571,7 +3798,8 @@ export async function handler(event) {
       console.log('[OCR] AI extracted fields:', keys)
     }
     const fields = mergeFields(fields0, aiFields, full)
-    const meta = { ...buildExtractionMeta(full, fields), ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
+    const classification = buildClassification({ rawText: full, fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType: imageContentType || contentType })
+    const meta = { ...buildExtractionMeta(full, fields), classification, ai: { enabled: isAiOcrEnabled(), attempted: Boolean(aiAttempted || allowAiFallback), error: aiAttempted ? aiError : aiErrorFallback, detail: aiAttempted ? aiDetail : null } }
 
     const aiModel = aiFields ? resolveModel() : null
     const aiTier = aiFields ? 'document' : null

@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, AppState, FlatList, RefreshControl, StyleSheet, Text as RNText, Button, View, Platform, Linking, Image, Switch, ActivityIndicator, Pressable, KeyboardAvoidingView, TextInput, ScrollView, TouchableOpacity, Modal, Animated, PanResponder } from 'react-native'
+import { Alert, AppState, FlatList, RefreshControl, StyleSheet, Text as RNText, Button, View, Platform, Linking, Image, Switch, ActivityIndicator, Pressable, KeyboardAvoidingView, TextInput, ScrollView, TouchableOpacity, Modal, Animated, PanResponder, Keyboard } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
@@ -353,29 +353,37 @@ function AiAssistant({ context }: { context: any }) {
           headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({ message: text, context: context || {} }),
         })
-        const json = await resp.json().catch(() => null)
-        if (!resp.ok || !json) {
-          setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI request failed.') }]))
-          return
-        }
+        const json = await resp.json().catch(() => null as any)
 
-        if (resp.status === 403) {
-          if (json?.error === 'trial_expired') {
-            setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'Free trial expired. Choose a plan to continue.') }]))
-            return
-          }
-          if (json?.error === 'ai_quota_exceeded' || json?.error === 'ai_not_allowed') {
-            setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI assistance is currently limited. It will be available in the next period or with an upgrade.') }]))
-            return
-          }
-        }
+        // Handle common auth/plan cases even when resp.ok is false.
         if (resp.status === 401) {
           setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI is not available right now.') }]))
           return
         }
+        if (resp.status === 403) {
+          const code = String(json?.error || '').trim()
+          if (code === 'trial_expired') {
+            setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'Free trial expired. Choose a plan to continue.') }]))
+            return
+          }
+          if (code === 'ai_quota_exceeded' || code === 'ai_not_allowed') {
+            setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI assistance is currently limited. It will be available in the next period or with an upgrade.') }]))
+            return
+          }
+          setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: t(lang, 'AI request failed.') }]))
+          return
+        }
 
-        const assistantText = String(json.message || '').trim() || t(lang, 'Here are a few helpful next steps.')
-        const actions = Array.isArray(json.suggestedActions) ? json.suggestedActions : []
+        if (!resp.ok) {
+          const serverMsg = typeof json?.message === 'string' && json.message.trim() ? json.message.trim() : null
+          const serverErr = typeof json?.error === 'string' && json.error.trim() ? json.error.trim() : null
+          const textOut = serverMsg || (serverErr ? `${t(lang, 'AI request failed.')} (${serverErr})` : t(lang, 'AI request failed.'))
+          setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: textOut }]))
+          return
+        }
+
+        const assistantText = String(json?.message || '').trim() || t(lang, 'Here are a few helpful next steps.')
+        const actions = Array.isArray(json?.suggestedActions) ? json.suggestedActions : []
 
         setMessages((prev) => prev.concat([{ id: `a_${Date.now()}`, role: 'assistant', text: assistantText }]))
         setAiActions(dedupeActions(actions as any).slice(0, 3))
@@ -1014,8 +1022,9 @@ function getSupabase(): SupabaseClient | null {
 }
 
 function getFunctionsBase(): string | null {
-  const base = process.env.EXPO_PUBLIC_FUNCTIONS_BASE
-  return base && typeof base === 'string' && base.trim() ? base.trim().replace(/\/$/, '') : null
+  const raw = (process.env.EXPO_PUBLIC_FUNCTIONS_BASE as string | undefined) || (PUBLIC_SITE_URL as any)
+  const base = typeof raw === 'string' ? raw.trim() : ''
+  return base ? base.replace(/\/$/, '') : null
 }
 
 type Interval = 'monthly' | 'yearly'
@@ -3225,6 +3234,7 @@ function ScanBillScreen() {
   const [useDataActive, setUseDataActive] = useState(false)
 
   const [ocrBusy, setOcrBusy] = useState(false)
+  const [ocrBusyAction, setOcrBusyAction] = useState<null | 'photo' | 'pdf'>(null)
   const [ocrError, setOcrError] = useState<string | null>(null)
 
   const [debugStatus, setDebugStatus] = useState<'IDLE' | 'RUNNING' | 'DONE' | 'ERROR'>('IDLE')
@@ -3269,7 +3279,6 @@ function ScanBillScreen() {
     reference: false,
     purpose: false,
     paymentDetails: false,
-    category: false,
   })
 
   // Per-field source precedence (lower is stronger):
@@ -3280,7 +3289,6 @@ function ScanBillScreen() {
   const [referenceHint, setReferenceHint] = useState<string | null>(null)
   const [ibanOptions, setIbanOptions] = useState<string[]>([])
   const [ibanPickerVisible, setIbanPickerVisible] = useState(false)
-  const [categoryPickerVisible, setCategoryPickerVisible] = useState(false)
   const [categoryOverrides, setCategoryOverrides] = useState<Record<string, string>>({})
 
   const [lastQR, setLastQR] = useState('')
@@ -4319,7 +4327,7 @@ function ScanBillScreen() {
     const supplierKey = normalizeSupplierKey(nameCandidate || rawSupplier || rawCreditor || '')
     const overrideCategory = supplierKey ? categoryOverrides[supplierKey] : ''
     const inferredCategory = overrideCategory || detectCategoryFromText(nameCandidate || rawSupplier || rawCreditor || '', String(rawPurpose || ''), String(rawItem || ''))
-    if (inferredCategory && canSetField('category', inferredCategory, editedRef.current.category, category)) {
+    if (inferredCategory && canSetField('category', inferredCategory, false, category)) {
       setCategory(inferredCategory)
       markFieldSource('category')
     }
@@ -4536,12 +4544,6 @@ function ScanBillScreen() {
     }
   }
 
-  function handleCategoryPick(next: string) {
-    editedRef.current.category = true
-    setCategory(next)
-    setCategoryPickerVisible(false)
-  }
-
   const handleSupplierInput = (v: string) => {
     editedRef.current.supplier = true
     setSupplier(v)
@@ -4659,11 +4661,24 @@ function ScanBillScreen() {
     if (payload && payload.fields) {
       const f = payload.fields as ExtractedFields
       const raw = String((f as any)?.rawText || '')
+      const classification = (f as any)?._classification || null
+      const clsConf = typeof (classification as any)?.confidence === 'number' ? (classification as any).confidence : null
       const sourceHint = String((f as any)?._source || (f as any)?.mode || '')
       const isQr = /qr/i.test(sourceHint)
       const source: 'QR' | 'OCR' = isQr ? 'QR' : 'OCR'
+
       const inferredArchiveOnly = inferArchiveOnlyFromText(raw, f)
       setArchiveOnly(inferredArchiveOnly)
+
+      const cat = (classification as any)?.category
+      if (typeof cat === 'string' && cat) setCategory(cat)
+
+      const isInvoice = (classification as any)?.isInvoice
+      if (isInvoice === false && (clsConf == null || clsConf >= 0.7)) {
+        Alert.alert(tr('Inbox'), tr('This looks like a non-bill document. Please verify before saving.'))
+      } else if (clsConf != null && clsConf < 0.55) {
+        Alert.alert(tr('Scan'), tr('AI is not fully confident. Please verify the details.'))
+      }
       const supplierName = pickNameCandidate(f.creditor_name, f.supplier)
       if (supplierName) setSupplier(supplierName)
       const cred = pickNameCandidate(f.creditor_name, supplierName)
@@ -4691,6 +4706,7 @@ function ScanBillScreen() {
       return
     }
     try {
+      setOcrBusyAction('photo')
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 })
       if (res.canceled) return
       const asset = res.assets?.[0]
@@ -4727,6 +4743,9 @@ function ScanBillScreen() {
       const msg = isDebugBuild() ? (e?.message || String(e)) : tr('Could not read the selected file.')
       Alert.alert(tr('Import failed'), msg)
     }
+    finally {
+      setOcrBusyAction(null)
+    }
   }
 
   async function pickPdfForOCR() {
@@ -4735,6 +4754,7 @@ function ScanBillScreen() {
       return
     }
     try {
+      setOcrBusyAction('pdf')
       const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true })
       if (res.canceled) return
       const file = res.assets?.[0]
@@ -4760,6 +4780,8 @@ function ScanBillScreen() {
       })
       const msg = isDebugBuild() ? (e?.message || String(e)) : tr('Could not read the selected file.')
       Alert.alert(tr('Import failed'), msg)
+    } finally {
+      setOcrBusyAction(null)
     }
   }
 
@@ -5303,10 +5325,6 @@ function ScanBillScreen() {
       }
       let savedId: string | null = null
 
-      if (editedRef.current.category && category && supplierTrimmed) {
-        const supplierKey = normalizeSupplierKey(supplierTrimmed)
-        if (supplierKey) await persistCategoryOverride(supplierKey, category)
-      }
       if (s) {
         const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
         const details = paymentDetails.trim()
@@ -5436,8 +5454,8 @@ function ScanBillScreen() {
             <Text style={styles.mutedText}>{tr('Scan a QR code or import a bill image/PDF to start a draft.')}</Text>
             <View style={styles.actionRow}>
               <AppButton label={tr('Enable camera')} iconName="camera-outline" onPress={requestPermission} style={styles.addBillActionButton} />
-              <AppButton label={ocrBusy ? tr('Extracting…') : tr('Import photo')} variant="secondary" iconName="image-outline" onPress={pickImage} loading={ocrBusy} style={styles.addBillActionButton} />
-              <AppButton label={ocrBusy ? tr('Extracting…') : tr('Import PDF')} variant="secondary" iconName="document-text-outline" onPress={pickPdfForOCR} loading={ocrBusy} style={styles.addBillActionButton} />
+              <AppButton label={(ocrBusy && ocrBusyAction === 'photo') ? tr('Extracting…') : tr('Import photo')} variant="secondary" iconName="image-outline" onPress={pickImage} loading={ocrBusy && ocrBusyAction === 'photo'} style={styles.addBillActionButton} />
+              <AppButton label={(ocrBusy && ocrBusyAction === 'pdf') ? tr('Extracting…') : tr('Import PDF')} variant="secondary" iconName="document-text-outline" onPress={pickPdfForOCR} loading={ocrBusy && ocrBusyAction === 'pdf'} style={styles.addBillActionButton} />
             </View>
           </Surface>
         ) : (
@@ -5470,19 +5488,19 @@ function ScanBillScreen() {
                     onPress={() => setTorch((prev) => (prev === 'on' ? 'off' : 'on'))}
                   />
                   <AppButton
-                    label={ocrBusy ? tr('Extracting…') : tr('Import photo')}
+                    label={(ocrBusy && ocrBusyAction === 'photo') ? tr('Extracting…') : tr('Import photo')}
                     variant="outline"
                     iconName="image-outline"
                     onPress={pickImage}
-                    loading={ocrBusy}
+                    loading={ocrBusy && ocrBusyAction === 'photo'}
                     style={styles.addBillActionButton}
                   />
                   <AppButton
-                    label={ocrBusy ? tr('Extracting…') : tr('Import PDF')}
+                    label={(ocrBusy && ocrBusyAction === 'pdf') ? tr('Extracting…') : tr('Import PDF')}
                     variant="outline"
                     iconName="document-text-outline"
                     onPress={pickPdfForOCR}
-                    loading={ocrBusy}
+                    loading={ocrBusy && ocrBusyAction === 'pdf'}
                     style={styles.addBillActionButton}
                   />
                 </View>
@@ -5504,19 +5522,19 @@ function ScanBillScreen() {
                     style={styles.addBillActionButton}
                   />
                   <AppButton
-                    label={ocrBusy ? tr('Extracting…') : tr('Import photo')}
+                    label={(ocrBusy && ocrBusyAction === 'photo') ? tr('Extracting…') : tr('Import photo')}
                     variant="outline"
                     iconName="image-outline"
                     onPress={pickImage}
-                    loading={ocrBusy}
+                    loading={ocrBusy && ocrBusyAction === 'photo'}
                     style={styles.addBillActionButton}
                   />
                   <AppButton
-                    label={ocrBusy ? tr('Extracting…') : tr('Import PDF')}
+                    label={(ocrBusy && ocrBusyAction === 'pdf') ? tr('Extracting…') : tr('Import PDF')}
                     variant="outline"
                     iconName="document-text-outline"
                     onPress={pickPdfForOCR}
-                    loading={ocrBusy}
+                    loading={ocrBusy && ocrBusyAction === 'pdf'}
                     style={styles.addBillActionButton}
                   />
                 </View>
@@ -5529,43 +5547,7 @@ function ScanBillScreen() {
           <InlineInfo iconName="alert-circle-outline" tone="danger" message={ocrError} />
         )}
 
-        <Surface elevated>
-          <SectionHeader title={tr('Advanced')} actionLabel={tr('Clear')} onActionPress={clearExtraction} />
-          <Disclosure title={tr('Paste QR text (advanced)')}>
-            <Text style={styles.mutedText}>{tr('Paste QR text to extract payment fields.')}</Text>
-            <AppInput
-              placeholder={tr('Paste QR text')}
-              value={manual}
-              onChangeText={setManual}
-              multiline
-            />
-            <View style={styles.actionRow}>
-              <AppButton label={tr('Extract fields')} variant="outline" iconName="sparkles-outline" onPress={handleManualExtract} />
-              <Badge label={format ? `${tr('Detected:')} ${format}` : tr('Awaiting data')} tone={format ? 'info' : 'neutral'} />
-            </View>
-          </Disclosure>
 
-          <Disclosure title={tr('Last captured text')}>
-            {rawText?.trim() ? (
-              <>
-                <Text style={styles.mutedText}>{tr('This is the exact payload we received from QR/OCR. You can select and copy it, or load it into the manual extractor above.')}</Text>
-                <Surface style={{ padding: 10, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.03)' }}>
-                  <Text selectable style={{ fontSize: 12, lineHeight: 16 }}>{rawText}</Text>
-                </Surface>
-                <View style={styles.actionRow}>
-                  <AppButton
-                    label={tr('Load into manual input')}
-                    variant="secondary"
-                    iconName="arrow-up-outline"
-                    onPress={() => setManual(rawText)}
-                  />
-                </View>
-              </>
-            ) : (
-              <Text style={styles.mutedText}>{tr('No captured text yet. Scan a QR or import a file first.')}</Text>
-            )}
-          </Disclosure>
-        </Surface>
 
         <Surface elevated>
           <SectionHeader title="Installments" />
@@ -5609,12 +5591,9 @@ function ScanBillScreen() {
               <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={handlePurchaseItemInput} />
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>{tr('Category')}</Text>
-                <AppButton
-                  label={category ? getCategoryLabel(category) : tr('Select category')}
-                  variant="secondary"
-                  iconName="list-outline"
-                  onPress={() => setCategoryPickerVisible(true)}
-                />
+                <Text style={styles.mutedText}>
+                  {category ? getCategoryLabel(category) : tr('Determining category…')}
+                </Text>
               </View>
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>
@@ -5916,31 +5895,6 @@ function ScanBillScreen() {
       </Modal>
 
       <Modal
-        visible={categoryPickerVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setCategoryPickerVisible(false)}
-      >
-        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
-          <Surface elevated style={{ width: '100%', maxWidth: 520, alignSelf: 'center' }}>
-            <Text style={styles.screenHeaderTitle}>{tr('Category')}</Text>
-            <Text style={[styles.bodyText, { marginTop: themeSpacing.xs }]}>{tr('Select category')}</Text>
-            <View style={{ marginTop: themeSpacing.md, gap: themeSpacing.xs }}>
-              {CATEGORY_OPTIONS.map((option) => (
-                <AppButton
-                  key={option.key}
-                  label={tr(option.labelKey)}
-                  variant={category === option.key ? 'primary' : 'secondary'}
-                  onPress={() => handleCategoryPick(option.key)}
-                />
-              ))}
-              <AppButton label={tr('Clear')} variant="ghost" onPress={() => handleCategoryPick('')} />
-            </View>
-          </Surface>
-        </View>
-      </Modal>
-
-      <Modal
         visible={missingManualVisible}
         transparent
         animationType="fade"
@@ -6105,12 +6059,27 @@ function InboxScreen() {
 
             // Quiet auto-OCR for newly received email items so "Attach to bill" is immediately useful.
             const sourceUri = (it as any).localPath || it.uri
-            const { fields, summary, rawText, mode } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
-            const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
+            const { fields, summary, rawText, mode, meta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
+            const classification = meta?.classification || null
+            const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
+            const archiveOnlyInferred = inferArchiveOnlyFromText(typeof rawText === 'string' ? rawText : '', fields)
+            const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
             const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
-            const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode } : fields
-            await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: enriched, notes: summary, status: looksLikeBill ? 'pending' : (it.status || 'new') })
-            if (looksLikeBill) await cancelInboxReviewReminder(it.id, effectiveSpaceId)
+            const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
+
+            const isInvoice = classification?.isInvoice
+            const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7)
+            const treatAsInvoice = isInvoice === true || (!treatAsNotInvoice && hasBasicAmount)
+
+            let nextStatus: any = it.status || 'new'
+            if (treatAsNotInvoice) nextStatus = it.status || 'new'
+            else if (treatAsInvoice) nextStatus = (archiveOnlyInferred && hasBasicAmount) ? 'archived' : 'pending'
+
+            const reason = classification?.reason ? String(classification.reason) : ''
+            const nextNotes = treatAsNotInvoice ? (reason ? `${tr('Not an invoice')}: ${reason}` : tr('Not an invoice')) : summary
+
+            await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
+            if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(it.id, effectiveSpaceId)
             else await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
           } catch (e: any) {
             const code = e?.code || null
@@ -6183,23 +6152,34 @@ function InboxScreen() {
       const classifierText = buildInvoiceClassifierText(item, meta, subject)
       const score = scoreInvoiceText(classifierText, item.mimeType || null)
       if (score < 3) {
-        Alert.alert(tr('Inbox'), tr('This does not look like a bill.'))
-        await updateInboxItem(spaceId, item.id, { notes: tr('Not an invoice'), status: item.status || 'new' })
-        await scheduleInboxReviewReminder(item.id, item.name, spaceId)
-        await refresh()
-        return
+        Alert.alert(tr('Inbox'), tr('This does not look like a bill, but we will scan it anyway.'))
       }
     } catch {}
     try {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
-      const { fields, summary, rawText, mode } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
+      const { fields, summary, rawText, mode, meta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
 
-      const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
+      const classification = meta?.classification || null
+      const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
+      const archiveOnlyInferred = inferArchiveOnlyFromText(typeof rawText === 'string' ? rawText : '', fields)
+      const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
       const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
-      const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode } : fields
-      await updateInboxItem(spaceId, item.id, { extractedFields: enriched, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
-      if (looksLikeBill) await cancelInboxReviewReminder(item.id, spaceId)
+      const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
+
+      const isInvoice = classification?.isInvoice
+      const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7)
+      const treatAsInvoice = isInvoice === true || (!treatAsNotInvoice && hasBasicAmount)
+
+      let nextStatus: any = 'new'
+      if (treatAsNotInvoice) nextStatus = item.status || 'new'
+      else if (treatAsInvoice) nextStatus = (archiveOnlyInferred && hasBasicAmount) ? 'archived' : 'pending'
+
+      const reason = classification?.reason ? String(classification.reason) : ''
+      const nextNotes = treatAsNotInvoice ? (reason ? `${tr('Not an invoice')}: ${reason}` : tr('Not an invoice')) : summary
+
+      await updateInboxItem(spaceId, item.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
+      if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(item.id, spaceId)
       else await scheduleInboxReviewReminder(item.id, item.name, spaceId)
       await refresh()
       Alert.alert(tr('Scan complete'), summary)
@@ -6349,6 +6329,7 @@ function BillsListScreen() {
   const { lang } = useLangContext()
   const insets = useSafeAreaInsets()
   const hasLoadedRef = useRef(false)
+  const listRef = useRef<FlatList<any> | null>(null)
 
   const effectiveSpaceId = spaceId || space?.id || 'default'
 
@@ -6904,6 +6885,20 @@ function BillsListScreen() {
   const resultsLabel = filteredBills.length === totalCount
     ? tr('{count} bills', { count: totalCount || 0 })
     : tr('{shown} of {total} bills', { shown: filteredBills.length, total: totalCount || 0 })
+
+  const applyFilters = useCallback(() => {
+    Keyboard.dismiss()
+    if (!filteredBills.length) {
+      Alert.alert(tr('No bills match the current filters.'), tr('Adjust your filters or add a new bill.'))
+      return
+    }
+    setFiltersExpanded(false)
+    requestAnimationFrame(() => {
+      try {
+        listRef.current?.scrollToOffset({ offset: 0, animated: true })
+      } catch {}
+    })
+  }, [filteredBills.length, tr])
 
   const renderEmpty = useCallback(() => {
     if (loadingBills) return null
@@ -7483,6 +7478,7 @@ function BillsListScreen() {
   return (
     <Screen scroll={false}>
       <FlatList
+        ref={(ref) => { listRef.current = ref }}
         style={{ flex: 1 }}
         data={loadingBills && bills.length === 0 ? [] : filteredBills}
         keyExtractor={(item) => item.id}
@@ -7611,6 +7607,12 @@ function BillsListScreen() {
                   </View>
 
                   <View style={styles.filtersFooter}>
+                    <AppButton
+                      label={tr('Find')}
+                      variant="primary"
+                      iconName="search-outline"
+                      onPress={applyFilters}
+                    />
                     <AppButton
                       label={tr('Clear filters')}
                       variant="ghost"
@@ -7954,16 +7956,36 @@ function HomeScreen() {
   const safeNavigate = useCallback((routeName: string, params?: any) => {
     const requestId = createRequestId('nav')
     if (routeName === 'Warranties') {
-      console.info(`[nav] route=Guarantees requestId=${requestId}`)
+      console.info(`[nav] route=Warranties requestId=${requestId}`)
+      // Warranties is defined on the parent Stack (tabs are nested inside it).
+      try {
+        const parent = navigation.getParent?.() || null
+        if (parent?.navigate) {
+          parent.navigate(routeName, params)
+          return
+        }
+      } catch {}
     }
-    const root = navigation.getRootState?.()
-    const routeNames = root?.routeNames || []
-    if (!routeNames.includes(routeName)) {
-      console.warn(`[nav] missing route=${routeName} requestId=${requestId}`)
+    // React Navigation can have multiple nested navigators (tabs inside stack).
+    // Attempt navigation at the current level, then walk up to parents until the route exists.
+    try {
+      let nav: any = navigation
+      for (let i = 0; i < 6 && nav; i++) {
+        const state = nav.getState?.() || nav.getRootState?.() || null
+        const routeNames: string[] = Array.isArray(state?.routeNames) ? state.routeNames : []
+        if (routeNames.includes(routeName)) {
+          nav.navigate(routeName, params)
+          return
+        }
+        nav = nav.getParent?.() || null
+      }
+
+      // Last resort: try anyway (will no-op with a warning if truly missing).
+      navigation.navigate(routeName, params)
+    } catch (e) {
+      console.warn(`[nav] failed route=${routeName} requestId=${requestId}`, e)
       Alert.alert(tr('Error'), tr('Open failed'))
-      return
     }
-    navigation.navigate(routeName, params)
   }, [navigation])
 
   const payerOptions = useMemo(() => {
@@ -8542,7 +8564,7 @@ class WarrantiesErrorBoundary extends React.Component<{ requestId: string; child
 
   componentDidCatch(error: any, info: any) {
     const { requestId } = this.props
-    console.error(`[warranties] route=Guarantees requestId=${requestId}`, error, info)
+    console.error(`[warranties] route=Warranties requestId=${requestId}`, error, info)
   }
 
   render() {
@@ -8563,7 +8585,7 @@ function WarrantiesScreenWithBoundary() {
   const requestId = requestIdRef.current
 
   useEffect(() => {
-    console.info(`[nav] route=Guarantees requestId=${requestId}`)
+    console.info(`[nav] route=Warranties requestId=${requestId}`)
   }, [requestId])
 
   return (
@@ -9781,7 +9803,6 @@ function ReportsScreen() {
   const [exportBusy, setExportBusy] = useState(false)
   const [exportBusyLabel, setExportBusyLabel] = useState<string>('')
   const [exportUpsellVisible, setExportUpsellVisible] = useState(false)
-  const [viewMode, setViewMode] = useState<'chart' | 'table' | 'list'>('chart')
   const [iosPickerVisible, setIosPickerVisible] = useState(false)
   const [iosPickerField, setIosPickerField] = useState<'start' | 'end' | null>(null)
   const [iosPickerValue, setIosPickerValue] = useState(new Date())
@@ -10013,20 +10034,6 @@ function ReportsScreen() {
     return { points, max }
   }, [dateMode, filtered, groupBy, isPro])
 
-  const supplierTotals = useMemo(() => {
-    const grouped: Record<string, number> = {}
-    for (const b of filtered) {
-      const name = String(b.supplier || '').trim() || tr('Unknown')
-      grouped[name] = (grouped[name] || 0) + (b.currency === 'EUR' ? b.amount : 0)
-    }
-    const top = Object.entries(grouped)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 12)
-      .map(([supplier, value]) => ({ supplier, value }))
-    const max = top.reduce((m, x) => Math.max(m, x.value), 0)
-    return { top, max }
-  }, [filtered])
-
   const reportPayload = useMemo(() => {
     const isAdvanced = isPro
     return {
@@ -10046,9 +10053,8 @@ function ReportsScreen() {
       },
       totals,
       series: series.points,
-      top_suppliers: supplierTotals.top,
     }
-  }, [amountMax, amountMin, dateMode, entitlements.plan, groupBy, isPro, range.end, range.start, selectedPayerIds, series.points, status, supplierQuery, supplierTotals.top, totals])
+  }, [amountMax, amountMin, dateMode, entitlements.plan, groupBy, isPro, range.end, range.start, selectedPayerIds, series.points, status, supplierQuery, totals])
 
   const onExportPress = useCallback(() => {
     if (!entitlements.exportsEnabled) {
@@ -10106,9 +10112,7 @@ function ReportsScreen() {
       const zip = new JSZip()
       zip.file('report.json', JSON.stringify(reportPayload, null, 2))
       const seriesRows = [['period', 'amount_eur']].concat(series.points.map((p) => [p.key, p.value.toFixed(2)]))
-      const suppliersRows = [['supplier', 'amount_eur']].concat(supplierTotals.top.map((s) => [s.supplier, s.value.toFixed(2)]))
       zip.file('series.csv', seriesRows.map((r) => r.map(csvEscape).join(',')).join('\n'))
-      zip.file('suppliers.csv', suppliersRows.map((r) => r.map(csvEscape).join(',')).join('\n'))
       const base64 = await zip.generateAsync({ type: 'base64' })
       const file = `${FileSystem.cacheDirectory}billbox-report.zip`
       await FileSystem.writeAsStringAsync(file, base64, { encoding: FileSystem.EncodingType.Base64 })
@@ -10166,15 +10170,6 @@ function ReportsScreen() {
                 <thead><tr><th>${tr('Period')}</th><th>${tr('Amount (EUR)')}</th></tr></thead>
                 <tbody>
                   ${series.points.map((p) => `<tr><td>${p.key}</td><td>EUR ${p.value.toFixed(2)}</td></tr>`).join('')}
-                </tbody>
-              </table>
-            </div>
-            <div class="card">
-              <div class="k" style="margin-bottom:8px;">${tr('Top suppliers')}</div>
-              <table>
-                <thead><tr><th>${tr('Supplier')}</th><th>${tr('Amount (EUR)')}</th></tr></thead>
-                <tbody>
-                  ${supplierTotals.top.map((s) => `<tr><td>${s.supplier}</td><td>EUR ${s.value.toFixed(2)}</td></tr>`).join('')}
                 </tbody>
               </table>
             </div>
@@ -10404,112 +10399,21 @@ function ReportsScreen() {
 
         <Surface elevated>
           <SectionHeader title={groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')} />
-          <View style={{ marginTop: themeSpacing.sm }}>
-            <Text style={styles.filterLabel}>{tr('View')}</Text>
-            <SegmentedControl
-              value={viewMode}
-              onChange={(v) => setViewMode(v as any)}
-              options={[
-                { value: 'chart', label: tr('Chart') },
-                { value: 'table', label: tr('Table') },
-                { value: 'list', label: tr('List') },
-              ]}
-            />
-          </View>
           <View style={{ paddingVertical: themeSpacing.sm }}>
             {series.points.length === 0 ? (
               <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
             ) : (
-              viewMode === 'chart' ? (
-                series.points.map((p) => (
-                  <View key={p.key} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                    <Text style={{ width: 80 }}>{p.key}</Text>
-                    <View style={{ flex: 1, height: 12, borderRadius: 6, overflow: 'hidden', backgroundColor: '#E5E7EB' }}>
-                      <View style={{ height: '100%', width: `${Math.max(0, Math.min(100, p.pct))}%`, backgroundColor: themeColors.primary }} />
-                    </View>
-                    <Text style={{ marginLeft: 8 }}>EUR {p.value.toFixed(2)}</Text>
+              series.points.map((p) => (
+                <View key={p.key} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                  <Text style={{ width: 80 }}>{p.key}</Text>
+                  <View style={{ flex: 1, height: 12, borderRadius: 6, overflow: 'hidden', backgroundColor: '#E5E7EB' }}>
+                    <View style={{ height: '100%', width: `${Math.max(0, Math.min(100, p.pct))}%`, backgroundColor: themeColors.primary }} />
                   </View>
-                ))
-              ) : viewMode === 'table' ? (
-                <View style={{ gap: 6 }}>
-                  <View style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderColor: '#E5E7EB' }}>
-                    <Text style={[styles.mutedText, { width: 90 }]}>{tr('Period')}</Text>
-                    <Text style={[styles.mutedText, { flex: 1, textAlign: 'right' }]}>{tr('Amount (EUR)')}</Text>
-                  </View>
-                  {series.points.map((p) => (
-                    <View key={p.key} style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderColor: '#F1F5F9' }}>
-                      <Text style={{ width: 90 }}>{p.key}</Text>
-                      <Text style={{ flex: 1, textAlign: 'right' }}>EUR {p.value.toFixed(2)}</Text>
-                    </View>
-                  ))}
+                  <Text style={{ marginLeft: 8 }}>EUR {p.value.toFixed(2)}</Text>
                 </View>
-              ) : (
-                <View style={{ gap: themeSpacing.xs }}>
-                  {(filtered || []).slice(0, 30).map((b) => {
-                    const effectiveDateMode = isPro ? dateMode : 'due'
-                    const d = getBillDateForMode(b, effectiveDateMode)
-                    const dateLabel =
-                      effectiveDateMode === 'invoice'
-                        ? tr('Invoice')
-                        : effectiveDateMode === 'created'
-                          ? tr('Created')
-                          : tr('Due')
-                    const statusLabel =
-                      b.status === 'unpaid'
-                        ? tr('Unpaid')
-                        : b.status === 'paid'
-                          ? tr('Paid')
-                          : b.status === 'archived'
-                            ? tr('Archived')
-                            : String(b.status || '')
-                    return (
-                      <Surface key={b.id} elevated style={styles.billRowCard}>
-                        <Text style={styles.cardTitle} numberOfLines={1}>{String(b.supplier || tr('Unknown'))}</Text>
-                        <Text style={styles.mutedText}>
-                          {b.currency} {Number(b.amount || 0).toFixed(2)} • {dateLabel}: {d || '—'} • {statusLabel}
-                        </Text>
-                      </Surface>
-                    )
-                  })}
-                  {(filtered || []).length > 30 ? (
-                    <Text style={styles.mutedText}>{tr('Bills in range')}: {filtered.length}</Text>
-                  ) : null}
-                </View>
-              )
+              ))
             )}
           </View>
-        </Surface>
-
-        <Surface elevated>
-          <SectionHeader title={tr('Top suppliers')} />
-          {isPro ? (
-            <View style={{ paddingVertical: themeSpacing.sm }}>
-              {supplierTotals.top.length === 0 ? (
-                <Text style={styles.mutedText}>{tr('No suppliers for this period.')}</Text>
-              ) : (
-                supplierTotals.top.map((s) => (
-                  <View key={s.supplier} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                    <Text style={{ flex: 1 }} numberOfLines={1}>{s.supplier}</Text>
-                    <View style={{ width: 90, height: 10, borderRadius: 6, overflow: 'hidden', backgroundColor: '#E5E7EB', marginRight: 8 }}>
-                      <View
-                        style={{
-                          height: '100%',
-                          width: `${supplierTotals.max > 0 ? Math.max(0, Math.min(100, (s.value / supplierTotals.max) * 100)) : 0}%`,
-                          backgroundColor: '#22C55E',
-                        }}
-                      />
-                    </View>
-                    <Text>EUR {s.value.toFixed(2)}</Text>
-                  </View>
-                ))
-              )}
-            </View>
-          ) : (
-            <View style={{ paddingVertical: themeSpacing.sm, gap: themeSpacing.sm }}>
-              <InlineInfo tone="info" iconName="sparkles-outline" message={tr('Top suppliers are available on Več.') } />
-              <AppButton label={tr('Upgrade')} variant="secondary" iconName="sparkles-outline" onPress={() => showUpgradeAlert('reports')} />
-            </View>
-          )}
         </Surface>
       </View>
 
@@ -11571,8 +11475,9 @@ function PayScreen() {
                     />
                     <AppButton
                       label={tr('Mark as paid')}
-                      variant="secondary"
+                      variant="primary"
                       iconName="checkmark-circle-outline"
+                      style={{ backgroundColor: '#16A34A', borderColor: '#16A34A' }}
                       onPress={()=>markPaid(item, today)}
                     />
                     <AppButton label={tr('+1d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 1)} />
@@ -11744,6 +11649,8 @@ function PaymentsScreen() {
         'Two locations/households (2 profiles)',
         'Installment obligations (credits/leasing)',
         'Import bills from email',
+        'AI assistant (GPT chat)',
+        'Reminders & notifications',
         '100 OCR / month',
         'Export (CSV / PDF / ZIP / JSON)',
         'Advanced analytics',
@@ -11753,6 +11660,7 @@ function PaymentsScreen() {
       return [
         'Unlimited bills + warranties',
         '1 profile',
+        'Reminders & notifications',
         '50 OCR / month',
         'Basic analytics',
       ]
@@ -11760,6 +11668,7 @@ function PaymentsScreen() {
     return [
       '10 bills / month',
       '1 profile',
+      'Reminders & notifications',
       '3 OCR / month',
       'Basic analytics',
     ]
@@ -11966,7 +11875,7 @@ function ProfileRenameGate() {
 
 function MainTabs() {
   const insets = useSafeAreaInsets()
-  const bottomPadding = Math.max(insets.bottom - 8, 0)
+  const bottomPadding = Math.max(insets.bottom - 18, 0)
   const { lang } = useLangContext()
 
   return (
@@ -11996,7 +11905,7 @@ function MainTabs() {
             backgroundColor: themeColors.surface,
             paddingTop: 0,
             paddingBottom: bottomPadding,
-            height: 44 + bottomPadding,
+            height: 40 + bottomPadding,
           },
           tabBarLabelStyle: {
             fontSize: 10,
@@ -12039,6 +11948,7 @@ function SettingsScreen() {
   const { lang, setLang } = useLangContext()
   const insets = useSafeAreaInsets()
   function changeLang(l: Lang) { setLang(l) }
+  const [languageModalVisible, setLanguageModalVisible] = useState(false)
   const [remindersEnabled, setRemindersEnabledState] = useState<boolean>(true)
   useEffect(() => {
     ;(async () => {
@@ -12308,22 +12218,50 @@ function SettingsScreen() {
 
         <Surface elevated style={{ marginTop: themeSpacing.md }}>
           <SectionHeader title={tr('Language')} />
-          <View style={[styles.languageGrid, { marginTop: themeSpacing.xs }]}>
-            {languageOptions.map((opt) => {
-              const active = lang === opt.code
-              return (
-                <Pressable
-                  key={opt.code}
-                  onPress={() => changeLang(opt.code)}
-                  style={[styles.languageOption, active && styles.languageOptionSelected]}
-                  hitSlop={8}
-                >
-                  <Text style={[styles.languageOptionLabel, active && styles.languageOptionLabelSelected]}>{opt.label}</Text>
-                </Pressable>
-              )
-            })}
-          </View>
+          <Pressable
+            onPress={() => setLanguageModalVisible(true)}
+            style={[
+              styles.dateButton,
+              { marginTop: themeSpacing.xs, justifyContent: 'space-between' },
+            ]}
+            hitSlop={8}
+          >
+            <Text style={styles.dateButtonText}>
+              {(languageOptions.find((o) => o.code === lang)?.label) || String(lang)}
+            </Text>
+            <Ionicons name="chevron-down" size={16} color={themeColors.textMuted} />
+          </Pressable>
         </Surface>
+
+        <Modal
+          visible={languageModalVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setLanguageModalVisible(false)}
+        >
+          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
+            <Surface elevated style={styles.iosPickerSheet}>
+              <SectionHeader title={tr('Language')} />
+              <Text style={styles.bodyText}>{tr('Choose language')}</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+                {languageOptions.map((o) => (
+                  <AppButton
+                    key={o.code}
+                    label={o.label + (lang === o.code ? ' ✓' : '')}
+                    variant={lang === o.code ? 'primary' : 'secondary'}
+                    onPress={() => {
+                      changeLang(o.code)
+                      setLanguageModalVisible(false)
+                    }}
+                  />
+                ))}
+              </View>
+              <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
+                <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setLanguageModalVisible(false)} />
+              </View>
+            </Surface>
+          </View>
+        </Modal>
 
         <Surface elevated>
           <SectionHeader title={tr('Reminders & notifications')} />
@@ -13024,7 +12962,7 @@ const styles = StyleSheet.create({
   filterToggleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap },
   filterToggle: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs },
   toggleLabel: { fontSize: 12, color: '#374151' },
-  filtersFooter: { flexDirection: 'row', justifyContent: 'flex-end' },
+  filtersFooter: { flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap },
   listMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: themeLayout.gap },
   listMetaText: { fontSize: 13, fontWeight: '600', color: '#111827' },
   listMetaSecondary: { fontSize: 12, color: '#6B7280' },
@@ -13119,21 +13057,21 @@ const styles = StyleSheet.create({
   statCardPressable: { width: '48%', height: 112, marginBottom: themeSpacing.md },
   statCardPressed: { opacity: 0.9 },
   homeSummaryCard: { padding: themeSpacing.sm },
-  homeHeroCard: { padding: themeSpacing.md, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' },
+  homeHeroCard: { padding: themeSpacing.md, backgroundColor: themeColors.primarySoft, borderColor: '#BFDBFE' },
   homeHeroHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap },
-  homeHeroTitle: { fontSize: 16, fontWeight: '800', color: '#2E1065' },
-  homeHeroSubtitle: { fontSize: 12, color: 'rgba(46, 16, 101, 0.75)' },
+  homeHeroTitle: { fontSize: 16, fontWeight: '800', color: themeColors.primary },
+  homeHeroSubtitle: { fontSize: 12, color: themeColors.textMuted },
   homeMetricsRow: { marginTop: themeSpacing.md, flexDirection: 'row', gap: themeSpacing.sm },
   homeMetricCard: { flex: 1, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, paddingVertical: themeSpacing.sm, paddingHorizontal: themeSpacing.sm, backgroundColor: '#FFFFFF' },
-  homeMetricCardUnpaid: { backgroundColor: '#F3E8FF', borderColor: '#DDD6FE' },
+  homeMetricCardUnpaid: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
   homeMetricCardOverdue: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
   homeMetricCardNext: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
   homeMetricValue: { fontSize: 16, fontWeight: '800', color: themeColors.text },
   homeMetricLabel: { marginTop: 4, fontSize: 11, color: themeColors.textMuted },
   statCard: { paddingVertical: themeSpacing.xs, paddingHorizontal: themeSpacing.sm, gap: themeSpacing.xs, flex: 1, justifyContent: 'space-between' },
-  statCardPrimary: { borderWidth: 1, borderColor: '#5B21B6' },
+  statCardPrimary: { borderWidth: 1, borderColor: themeColors.primary },
   homePrimaryTile: { borderWidth: 1, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
-  homePrimaryTileScan: { backgroundColor: '#5B21B6', borderColor: '#5B21B6' },
+  homePrimaryTileScan: { backgroundColor: themeColors.primary, borderColor: themeColors.primary },
   homePrimaryTileBills: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
   homePrimaryTilePay: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
   statIconWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },

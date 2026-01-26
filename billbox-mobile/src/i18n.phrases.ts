@@ -40,9 +40,11 @@ export const phraseDict = {
     Mode: 'Mode',
     Extraction: 'Extraction',
     File: 'File',
+    Find: 'Find',
     'QR found': 'QR found',
     'OCR length': 'OCR length',
     'AI called': 'AI called',
+    'AI assistant (GPT chat)': 'AI assistant (GPT chat)',
     Fields: 'Fields',
     Issuer: 'Issuer',
     Invoice: 'Invoice',
@@ -159,6 +161,14 @@ export const phraseDict = {
     'QR found': 'QR najden',
     'OCR length': 'Dolžina OCR',
     'AI called': 'AI uporabljen',
+    'AI is not fully confident. Please verify the details.': 'AI ni povsem prepričan. Prosimo preveri podrobnosti.',
+    'Determining category…': 'Določam kategorijo…',
+    'This does not look like a bill, but we will scan it anyway.': 'To ne izgleda kot račun, vendar ga bomo vseeno skenirali.',
+    'This looks like a non-bill document. Please verify before saving.': 'To izgleda kot dokument, ki ni račun. Pred shranjevanjem prosimo preveri.',
+    'Analytics are available on Moje and Več.': 'Analitika je na voljo v Moje in Več.',
+    'Basic analytics is available on Moje and Več. Upgrade to Več for advanced analytics.':
+      'Osnovna analitika je na voljo v Moje in Več. Za napredno analitiko nadgradi na Več.',
+    Billbox: 'BillBox',
     Fields: 'Polja',
     Issuer: 'Izdajatelj',
     Invoice: 'Račun',
@@ -198,6 +208,16 @@ export const phraseDict = {
     '• Unlimited bills + warranties': '• Neomejeno računov + garancij',
     '• Installment obligations (credits/leasing)': '• Obročno odplačilo (krediti/leasingi)',
     '• Import bills from email': '• Uvoz računov iz e-pošte',
+    'Unlimited bills + warranties': 'Neomejeno računov + garancij',
+    'Installment obligations (credits/leasing)': 'Obročno odplačilo (krediti/leasingi)',
+    'Import bills from email': 'Uvoz računov iz e-pošte',
+    'Export (CSV / PDF / ZIP / JSON)': 'Izvoz (CSV / PDF / ZIP / JSON)',
+    '10 bills / month': '10 računov / mesec',
+    '3 OCR / month': '3 OCR / mesec',
+    '50 OCR / month': '50 OCR / mesec',
+    '100 OCR / month': '100 OCR / mesec',
+    '1 profile': '1 profil',
+    'AI assistant (GPT chat)': 'AI pomočnik (GPT klepet)',
     Add: 'Dodaj',
     OK: 'V redu',
     'Basic analytics': 'Osnovna analitika',
@@ -350,7 +370,6 @@ export const phraseDict = {
     All: 'Vse',
     'Already linked': 'Že povezano',
     Amount: 'Znesek',
-    Archive: 'Arhiviraj',
     'Archive / already paid (no payment)': 'Arhiviraj / že plačano (brez plačila)',
     Archived: 'Arhivirano',
     'Are you sure? This cannot be undone. Attachments will be deleted too.':
@@ -389,6 +408,7 @@ export const phraseDict = {
     'Choose payer': 'Izberi profil',
     'Choose profile': 'Izberi profil',
     Clear: 'Počisti',
+    Find: 'Najdi',
     'Clear form': 'Počisti obrazec',
     'Clear this draft?': 'Počistim ta osnutek?',
     'This will clear all entered fields and remove the staged attachment.':
@@ -576,7 +596,6 @@ export const phraseDict = {
     'Select bills below, then pay or reschedule.': 'Spodaj izberi račune, nato plačaj ali prestavi datum.',
     'Once you have unpaid bills, they will appear here so you can plan payments.':
       'Ko boš imel(a) neplačane račune, se bodo pojavili tukaj, da boš lahko načrtoval(a) plačila.',
-    Due: 'Rok',
     'Due today': 'Zapade danes',
     Upcoming: 'Prihaja',
     '+1d': '+1d',
@@ -687,7 +706,6 @@ export const phraseDict = {
     'Save error': 'Napaka pri shranjevanju',
     'Save failed': 'Shranjevanje ni uspelo',
     'Save warranty': 'Shrani garancijo',
-    Saved: 'Shranjeno',
     Scan: 'Skeniraj',
     'Scan a QR code or import a bill image/PDF to start a draft.':
       'Skeniraj QR kodo ali uvozi sliko/PDF računa za začetek osnutka.',
@@ -954,6 +972,15 @@ export const phraseDict = {
     'QR found': 'QR pronađen',
     'OCR length': 'Duljina OCR-a',
     'AI called': 'AI korišten',
+    'AI is not fully confident. Please verify the details.': 'AI nije potpuno siguran. Molimo provjeri detalje.',
+    'Determining category…': 'Određujem kategoriju…',
+    'This does not look like a bill, but we will scan it anyway.': 'Ovo ne izgleda kao račun, ali ćemo ga ipak skenirati.',
+    'This looks like a non-bill document. Please verify before saving.':
+      'Ovo izgleda kao dokument koji nije račun. Provjeri prije spremanja.',
+    'Analytics are available on Moje and Več.': 'Analitika je dostupna na Moje i Več.',
+    'Basic analytics is available on Moje and Več. Upgrade to Več for advanced analytics.':
+      'Osnovna analitika je dostupna na Moje i Več. Nadogradi na Več za naprednu analitiku.',
+    Billbox: 'BillBox',
     Fields: 'Polja',
     Issuer: 'Izdavatelj',
     Invoice: 'Račun',
@@ -993,6 +1020,17 @@ export const phraseDict = {
     '• Unlimited bills + warranties': '• Neograničeno računa + jamstava',
     '• Installment obligations (credits/leasing)': '• Obročna otplata (krediti/leasing)',
     '• Import bills from email': '• Uvoz računa iz e-pošte',
+
+    'Unlimited bills + warranties': 'Neograničeno računa + jamstava',
+    'Installment obligations (credits/leasing)': 'Obročna otplata (krediti/leasing)',
+    'Import bills from email': 'Uvoz računa iz e-pošte',
+    'Export (CSV / PDF / ZIP / JSON)': 'Izvoz (CSV / PDF / ZIP / JSON)',
+    '10 bills / month': '10 računa / mjesec',
+    '3 OCR / month': '3 OCR / mjesec',
+    '50 OCR / month': '50 OCR / mjesec',
+    '100 OCR / month': '100 OCR / mjesec',
+    '1 profile': '1 profil',
+    'AI assistant (GPT chat)': 'AI asistent (GPT chat)',
 
     Add: 'Dodaj',
     OK: 'U redu',
@@ -1140,7 +1178,6 @@ export const phraseDict = {
     All: 'Sve',
     'Already linked': 'Već povezano',
     Amount: 'Iznos',
-    Archive: 'Arhiviraj',
     'Archive / already paid (no payment)': 'Arhiviraj / već plaćeno (bez plaćanja)',
     Archived: 'Arhivirano',
     'Are you sure? This cannot be undone. Attachments will be deleted too.':
@@ -1179,6 +1216,7 @@ export const phraseDict = {
     'Choose payer': 'Odaberi profil',
     'Choose profile': 'Odaberi profil',
     Clear: 'Očisti',
+    Find: 'Pronađi',
     'Clear form': 'Očisti obrazac',
     'Clear this draft?': 'Očistiti ovu skicu?',
     'This will clear all entered fields and remove the staged attachment.':
@@ -1365,7 +1403,6 @@ export const phraseDict = {
     'Select bills below, then pay or reschedule.': 'Odaberi račune ispod, zatim plati ili promijeni datum.',
     'Once you have unpaid bills, they will appear here so you can plan payments.':
       'Kad budeš imao/la neplaćene račune, pojavit će se ovdje kako bi mogao/la planirati plaćanja.',
-    Due: 'Rok',
     'Due today': 'Dospijeva danas',
     Upcoming: 'Uskoro',
     '+1d': '+1d',
@@ -1476,7 +1513,6 @@ export const phraseDict = {
     'Save error': 'Greška pri spremanju',
     'Save failed': 'Spremanje nije uspjelo',
     'Save warranty': 'Spremi jamstvo',
-    Saved: 'Spremljeno',
     Scan: 'Skeniraj',
     'Scan a QR code or import a bill image/PDF to start a draft.':
       'Skeniraj QR kod ili uvezi sliku/PDF računa za početak skice.',
@@ -1749,6 +1785,15 @@ export const phraseDict = {
     'QR found': 'QR trovato',
     'OCR length': 'Lunghezza OCR',
     'AI called': 'AI usata',
+    'AI is not fully confident. Please verify the details.': "L'AI non è del tutto sicura. Verifica i dettagli.",
+    'Determining category…': 'Sto determinando la categoria…',
+    'This does not look like a bill, but we will scan it anyway.': 'Non sembra una bolletta, ma la scansioneremo comunque.',
+    'This looks like a non-bill document. Please verify before saving.':
+      'Sembra un documento che non è una bolletta. Verifica prima di salvare.',
+    'Analytics are available on Moje and Več.': "L'analisi è disponibile su Moje e Več.",
+    'Basic analytics is available on Moje and Več. Upgrade to Več for advanced analytics.':
+      "L'analisi di base è disponibile su Moje e Več. Passa a Več per l'analisi avanzata.",
+    Billbox: 'BillBox',
     Fields: 'Campi',
     Issuer: 'Emittente',
     Invoice: 'Fattura',
@@ -1789,6 +1834,17 @@ export const phraseDict = {
     '• Unlimited bills + warranties': '• Bollette + garanzie illimitate',
     '• Installment obligations (credits/leasing)': '• Rateizzazione (crediti/leasing)',
     '• Import bills from email': '• Importa bollette da email',
+
+    'Unlimited bills + warranties': 'Bollette + garanzie illimitate',
+    'Installment obligations (credits/leasing)': 'Rateizzazione (crediti/leasing)',
+    'Import bills from email': 'Importa bollette da email',
+    'Export (CSV / PDF / ZIP / JSON)': 'Esportazione (CSV / PDF / ZIP / JSON)',
+    '10 bills / month': '10 bollette / mese',
+    '3 OCR / month': '3 OCR / mese',
+    '50 OCR / month': '50 OCR / mese',
+    '100 OCR / month': '100 OCR / mese',
+    '1 profile': '1 profilo',
+    'AI assistant (GPT chat)': 'Assistente AI (chat GPT)',
 
     Add: 'Aggiungi',
     OK: 'OK',
@@ -1935,7 +1991,6 @@ export const phraseDict = {
     All: 'Tutti',
     'Already linked': 'Già collegato',
     Amount: 'Importo',
-    Archive: 'Archivia',
     'Archive / already paid (no payment)': 'Archivia / già pagato (nessun pagamento)',
     Archived: 'Archiviato',
     'Are you sure? This cannot be undone. Attachments will be deleted too.':
@@ -1974,6 +2029,7 @@ export const phraseDict = {
     'Choose payer': 'Scegli profilo',
     'Choose profile': 'Scegli profilo',
     Clear: 'Pulisci',
+    Find: 'Trova',
     'Clear form': 'Pulisci modulo',
     'Clear this draft?': 'Cancellare questa bozza?',
     'This will clear all entered fields and remove the staged attachment.':
@@ -2162,7 +2218,6 @@ export const phraseDict = {
     'Select bills below, then pay or reschedule.': 'Seleziona le bollette sotto, poi paga o riprogramma la data.',
     'Once you have unpaid bills, they will appear here so you can plan payments.':
       'Quando avrai bollette non pagate, appariranno qui così potrai pianificare i pagamenti.',
-    Due: 'Scadenza',
     'Due today': 'Scade oggi',
     Upcoming: 'In arrivo',
     '+1d': '+1g',
@@ -2274,7 +2329,6 @@ export const phraseDict = {
     'Save error': 'Errore salvataggio',
     'Save failed': 'Salvataggio non riuscito',
     'Save warranty': 'Salva garanzia',
-    Saved: 'Salvato',
     Scan: 'Scansiona',
     'Scan a QR code or import a bill image/PDF to start a draft.':
       'Scansiona un QR o importa un’immagine/PDF della bolletta per iniziare una bozza.',
@@ -2549,6 +2603,16 @@ export const phraseDict = {
     'QR found': 'QR gefunden',
     'OCR length': 'OCR-Länge',
     'AI called': 'KI verwendet',
+    'AI is not fully confident. Please verify the details.': 'Die KI ist nicht ganz sicher. Bitte überprüfe die Details.',
+    'Determining category…': 'Kategorie wird ermittelt…',
+    'This does not look like a bill, but we will scan it anyway.':
+      'Das sieht nicht wie eine Rechnung aus, aber wir scannen sie trotzdem.',
+    'This looks like a non-bill document. Please verify before saving.':
+      'Das sieht nach einem Dokument aus, das keine Rechnung ist. Bitte vor dem Speichern prüfen.',
+    'Analytics are available on Moje and Več.': 'Analysen sind bei Moje und Več verfügbar.',
+    'Basic analytics is available on Moje and Več. Upgrade to Več for advanced analytics.':
+      'Basis-Analysen sind bei Moje und Več verfügbar. Upgrade auf Več für erweiterte Analysen.',
+    Billbox: 'BillBox',
     Fields: 'Felder',
     Issuer: 'Aussteller',
     Invoice: 'Rechnung',
@@ -2588,6 +2652,17 @@ export const phraseDict = {
     '• Unlimited bills + warranties': '• Unbegrenzte Rechnungen + Garantien',
     '• Installment obligations (credits/leasing)': '• Ratenzahlungen (Kredite/Leasing)',
     '• Import bills from email': '• Rechnungen aus E-Mail importieren',
+
+    'Unlimited bills + warranties': 'Unbegrenzte Rechnungen + Garantien',
+    'Installment obligations (credits/leasing)': 'Ratenzahlungen (Kredite/Leasing)',
+    'Import bills from email': 'Rechnungen aus E-Mail importieren',
+    'Export (CSV / PDF / ZIP / JSON)': 'Export (CSV / PDF / ZIP / JSON)',
+    '10 bills / month': '10 Rechnungen / Monat',
+    '3 OCR / month': '3 OCR / Monat',
+    '50 OCR / month': '50 OCR / Monat',
+    '100 OCR / month': '100 OCR / Monat',
+    '1 profile': '1 Profil',
+    'AI assistant (GPT chat)': 'KI-Assistent (GPT-Chat)',
 
     Add: 'Hinzufügen',
     OK: 'OK',
@@ -2750,7 +2825,6 @@ export const phraseDict = {
     All: 'Alle',
     'Already linked': 'Bereits verknüpft',
     Amount: 'Betrag',
-    Archive: 'Archivieren',
     'Archive / already paid (no payment)': 'Archivieren / bereits bezahlt (keine Zahlung)',
     Archived: 'Archiviert',
     'Are you sure? This cannot be undone. Attachments will be deleted too.':
@@ -2799,6 +2873,7 @@ export const phraseDict = {
     'Profil 1 name': 'Name für Profil 1',
     'Profil 2 name': 'Name für Profil 2',
     Clear: 'Löschen',
+    Find: 'Suchen',
     'Clear form': 'Formular leeren',
     'Clear this draft?': 'Diesen Entwurf leeren?',
     'This will clear all entered fields and remove the staged attachment.':
@@ -2982,7 +3057,6 @@ export const phraseDict = {
     'Select bills below, then pay or reschedule.': 'Wähle unten Rechnungen aus, dann bezahlen oder Datum verschieben.',
     'Once you have unpaid bills, they will appear here so you can plan payments.':
       'Sobald du unbezahlte Rechnungen hast, erscheinen sie hier, damit du Zahlungen planen kannst.',
-    Due: 'Fällig',
     'Due today': 'Heute fällig',
     Upcoming: 'Bevorstehend',
     '+1d': '+1T',
@@ -3084,7 +3158,6 @@ export const phraseDict = {
     'Save error': 'Speicherfehler',
     'Save failed': 'Speichern fehlgeschlagen',
     'Save warranty': 'Garantie speichern',
-    Saved: 'Gespeichert',
     Scan: 'Scannen',
     'Scan a QR code or import a bill image/PDF to start a draft.':
       'Scanne einen QR-Code oder importiere ein Rechnungsbild/PDF, um einen Entwurf zu starten.',

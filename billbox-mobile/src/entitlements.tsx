@@ -3,6 +3,7 @@ import { Alert } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 
 import { getCurrentLang, t } from './i18n'
+import { PUBLIC_SITE_URL } from './env'
 
 export type PlanId = 'free' | 'basic' | 'pro'
 
@@ -185,7 +186,7 @@ export function EntitlementsProvider({
   const [snapshot, setSnapshot] = useState<EntitlementsSnapshot>(DEFAULT)
 
   const resolveFunctionsBase = useCallback((): string | null => {
-    const raw = (process.env.EXPO_PUBLIC_FUNCTIONS_BASE as string | undefined) || ''
+    const raw = (process.env.EXPO_PUBLIC_FUNCTIONS_BASE as string | undefined) || PUBLIC_SITE_URL
     const base = typeof raw === 'string' ? raw.trim() : ''
     return base ? base.replace(/\/$/, '') : null
   }, [])
