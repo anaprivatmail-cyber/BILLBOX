@@ -12,6 +12,9 @@
 [build.environment]
   NODE_VERSION = "20"
   NPM_VERSION = "10"
+  # Netlify secrets scanning can false-positive on third-party deps/examples inside installed function node_modules
+  # and local build artifacts. Omit those paths rather than disabling scanning globally.
+  SECRETS_SCAN_OMIT_PATHS = "functions/node_modules/**,.netlify/**"
 
 [[scheduled]]
   path = "/.netlify/functions/cleanup-entitlements"
