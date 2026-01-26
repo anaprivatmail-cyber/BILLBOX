@@ -7,7 +7,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 function resolveModel() {
   const raw = process.env.OPENAI_MODEL
   const model = typeof raw === 'string' ? raw.trim() : ''
-  return model || 'gpt-4.1-mini'
+  // OCR extraction quality is critical; prefer a stronger default model.
+  return model || 'gpt-4.1'
 }
 
 function isAiOcrEnabled() {
@@ -1668,11 +1669,14 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
     '"classification": {"is_invoice": boolean|null, "invoice_confidence": number|null, "paid_unpaid": "paid"|"unpaid"|"unknown"|null, "paid_confidence": number|null, "category": "utilities"|"telecom"|"grocery"|"clothing"|"fuel"|"subscription"|"service"|"warranty_product"|"other"|null, "category_confidence": number|null, "reason": string|null } }. ' +
     'Rules: ' +
     '- Extract the issuer/supplier company name only (no labels, no addresses, no emails, no URLs). ' +
+    '- Never guess or invent values. If you cannot find a value in the document, return null. ' +
+    '- Do not confuse payer/customer names with supplier/creditor names. ' +
     '- invoice_number must be the invoice/document number. ' +
     '- due_date must be in YYYY-MM-DD. ' +
     '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
+    '- Prefer the "amount to pay" / "total" / "za plačilo" amount; avoid VAT-only subtotals. ' +
     '- classification is an inference; confidence values must be between 0 and 1 when provided. ' +
-    '- If a value is unclear, return null. Prefer best-effort extraction over strict verbatim matching.'
+    '- If a value is unclear, return null.'
 
   const user = [
     { type: 'text', text: `Language hint: ${String(languageHint || 'unknown')}` },
@@ -1737,8 +1741,11 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint, requestId) {
     'Rules: ' +
     '- Use best-effort extraction from the text (may normalize spacing/case). ' +
     '- issuer/supplier must be a clean company name only (no labels, no addresses, no emails, no URLs). ' +
+    '- Never guess or invent values. If you cannot find a value in the text, return null. ' +
+    '- Do not confuse payer/customer names with supplier/creditor names. ' +
     '- due_date must be in YYYY-MM-DD if present. ' +
     '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
+    '- Prefer the "amount to pay" / "total" amount; avoid VAT-only subtotals. ' +
     '- classification is an inference; confidence values must be between 0 and 1 when provided. ' +
     '- If uncertain, return null.'
 

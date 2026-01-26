@@ -151,7 +151,8 @@ exports.handler = async (event) => {
 
     // Default quotas if not configured in DB.
     // IMPORTANT: AI must also work on the free/Moje plan, but with a small monthly question limit.
-    const defaultQuota = effectivePlan === 'pro' ? 100 : effectivePlan === 'basic' ? 30 : 10
+    // Več (pro) has a higher limit than Moje (basic).
+    const defaultQuota = effectivePlan === 'pro' ? 200 : effectivePlan === 'basic' ? 50 : 10
     const quota = typeof ent.ai_quota_monthly === 'number' ? ent.ai_quota_monthly : defaultQuota
     if (!quota) {
       return json(403, { error: 'ai_not_allowed', message: 'AI is not available for this plan.' })
