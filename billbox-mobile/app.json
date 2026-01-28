@@ -3,7 +3,7 @@
     "name": "billbox-mobile",
     "slug": "billbox-mobile",
     "scheme": "billbox",
-    "version": "1.0.42",
+    "version": "1.0.43",
     "orientation": "portrait",
     "icon": "./assets/logo/logo-icon.png",
     "userInterfaceStyle": "light",
@@ -125,7 +125,7 @@
       "eas": {
         "projectId": "b201d860-e579-4734-acf9-71594e8d0054"
       },
-      "commitHash": "6a4f293"
+      "commitHash": "d99e9bc"
     }
   }
 }
