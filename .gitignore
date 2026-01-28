@@ -9,6 +9,10 @@ packages/**/.env
 VERZIJA */
 tools/
 
+# Netlify functions have test helpers under netlify/functions/tools
+!netlify/functions/tools/
+!netlify/functions/tools/**
+
 # Android build artifacts (keep out of git)
 *.aab
 android-tools/
