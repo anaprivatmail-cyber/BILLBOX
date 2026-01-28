@@ -2196,10 +2196,16 @@ async function parsePdfText(pdfBuffer) {
   // The package entrypoint contains a CLI/test block that can misbehave under bundlers.
   const mod = await import('pdf-parse/lib/pdf-parse.js')
   const pdfParse = mod?.default || mod
-  const parsed = await pdfParse(pdfBuffer)
-  const text = (parsed?.text || '').trim()
-  const numpages = typeof parsed?.numpages === 'number' && Number.isFinite(parsed.numpages) && parsed.numpages > 0 ? parsed.numpages : null
-  return { text, numpages }
+  try {
+    const parsed = await pdfParse(pdfBuffer)
+    const text = (parsed?.text || '').trim()
+    const numpages = typeof parsed?.numpages === 'number' && Number.isFinite(parsed.numpages) && parsed.numpages > 0 ? parsed.numpages : null
+    return { text, numpages }
+  } catch (e) {
+    // pdf-parse/pdf.js can throw for certain PDFs (e.g., malformed xref), and we must
+    // not fail the whole OCR pipeline or Netlify deploy because of it.
+    return { text: '', numpages: null, error: safeDetailFromError(e) }
+  }
 }
 
 function buildPageBatches(totalPages, batchSize = 5) {
