@@ -1081,6 +1081,21 @@ async function verifyIapOnBackend(productId: string): Promise<boolean> {
 // --- Bills & warranties types ---
 type BillStatus = 'pending' | 'unpaid' | 'paid' | 'archived'
 
+const ARCHIVE_PURPOSE_MARKER = '[BILLBOX_ARCHIVED]'
+
+function remapArchivedBillFromDb<T extends { status?: any; purpose?: any }>(bill: T): T {
+  const status = (bill as any)?.status
+  const purposeRaw = typeof (bill as any)?.purpose === 'string' ? String((bill as any).purpose) : ''
+  if (status === 'paid' && purposeRaw.includes(ARCHIVE_PURPOSE_MARKER)) {
+    const cleaned = purposeRaw
+      .replace(ARCHIVE_PURPOSE_MARKER, '')
+      .replace(/^\s*\n+/, '')
+      .replace(/^\s+/, '')
+    return { ...(bill as any), status: 'archived', purpose: cleaned ? cleaned : null }
+  }
+  return bill
+}
+
 function isBillUnpaid(status: any): boolean {
   return status === 'unpaid' || status === 'pending'
 }
@@ -1248,7 +1263,8 @@ async function listBills(
   else if (unique.length > 1) q = q.in('space_id', unique)
 
   const { data, error } = await q.order('due_date', { ascending: true })
-  return { data: (data as Bill[]) || [], error }
+  const rows = Array.isArray(data) ? (data as any[]).map((b) => remapArchivedBillFromDb(b as any)) : []
+  return { data: (rows as Bill[]) || [], error }
 }
 
 type ExportPayerScope = 'payer1' | 'payer2' | 'both'
@@ -3295,7 +3311,7 @@ function ScanBillScreen() {
   const [paymentDetails, setPaymentDetails] = useState('')
   const [payerName, setPayerName] = useState('')
   const [category, setCategory] = useState('')
-  const [missingBasicFields, setMissingBasicFields] = useState({ supplier: false, invoice: false, amount: false, currency: false })
+  const [missingBasicFields, setMissingBasicFields] = useState({ supplier: false, purchaseItem: false, invoice: false, amount: false, currency: false })
 
   // Track manual edits so new scans can overwrite stale autofill,
   // while still respecting fields the user actively changed.
@@ -4623,7 +4639,11 @@ function ScanBillScreen() {
     setSupplier(v)
     if (missingBasicFields.supplier) setMissingBasicFields((prev) => ({ ...prev, supplier: false }))
   }
-  const handlePurchaseItemInput = (v: string) => { editedRef.current.purchaseItem = true; setPurchaseItem(v) }
+  const handlePurchaseItemInput = (v: string) => {
+    editedRef.current.purchaseItem = true
+    setPurchaseItem(v)
+    if (missingBasicFields.purchaseItem) setMissingBasicFields((prev) => ({ ...prev, purchaseItem: false }))
+  }
   const handleInvoiceNumberInput = (v: string) => {
     editedRef.current.invoiceNumber = true
     setInvoiceNumber(v)
@@ -4700,7 +4720,7 @@ function ScanBillScreen() {
     setPaymentDetails('')
     setPayerName('')
     setCategory('')
-    setMissingBasicFields({ supplier: false, invoice: false, amount: false, currency: false })
+    setMissingBasicFields({ supplier: false, purchaseItem: false, invoice: false, amount: false, currency: false })
     setInboxSourceId(null)
     setLastQR('')
     setCameraVisible(true)
@@ -5266,13 +5286,27 @@ function ScanBillScreen() {
 
     const missing = {
       supplier: !supplierTrimmed,
+      purchaseItem: !purchaseItem.trim(),
       invoice: !invoiceTrimmed,
       amount: !Number.isFinite(amt) || amt <= 0,
       currency: !currencyTrimmed || currencyTrimmed === 'UNKNOWN',
     }
 
+    if (missing.purchaseItem) {
+      setMissingBasicFields((prev) => ({ ...prev, purchaseItem: true }))
+      Alert.alert(tr('Missing data'), tr('Please fill all required fields.'))
+      return false
+    }
+
     if (!isArchiveOnly) {
-      if (missing.supplier || missing.amount || missing.currency) {
+      if (missing.supplier || missing.purchaseItem || missing.amount || missing.currency) {
+        setMissingBasicFields({
+          supplier: missing.supplier,
+          purchaseItem: missing.purchaseItem,
+          invoice: false,
+          amount: missing.amount,
+          currency: missing.currency,
+        })
         Alert.alert(tr('Missing data'), tr('Please fill all required fields.'))
         return false
       }
@@ -5302,33 +5336,28 @@ function ScanBillScreen() {
         Alert.alert(tr('Creditor required'), tr('Enter the creditor/payee name (often the same as the supplier).'))
         return false
       }
-      // Payment instructions:
-      // - SEPA: IBAN + reference
-      // - Non-IBAN: paymentDetails (routing / SWIFT / account) when IBAN/reference are not applicable
-      if (iban.trim()) {
-        const ibanNorm = normalizeIban(iban)
-        if (!isValidIbanChecksum(ibanNorm)) {
-          Alert.alert(tr('Invalid IBAN'), tr('IBAN checksum failed. Please double-check it.'))
-          return false
-        }
-        if (!referenceNumberTrimmed) {
-          Alert.alert(tr('Reference required'), tr('Enter the payment reference.'))
-          return false
-        }
-        const refNorm = normalizeReference(referenceFull)
-        if (looksLikeIban(refNorm) && isValidIbanChecksum(refNorm)) {
-          Alert.alert(tr('Invalid reference'), tr('Reference looks like an IBAN. Please move it to the IBAN field.'))
-          return false
-        }
-        if (refNorm === ibanNorm) {
-          Alert.alert(tr('Invalid reference'), tr('Reference must not be the same as IBAN.'))
-          return false
-        }
-      } else {
-        if (!paymentDetailsTrimmed) {
-          Alert.alert(tr('Payment details required'), tr('Enter IBAN + reference, or provide payment details (routing / SWIFT / account).'))
-          return false
-        }
+      // Payment instructions (to pay): IBAN + reference are mandatory.
+      if (!iban.trim()) {
+        Alert.alert(tr('IBAN required'), tr('Enter the IBAN for the payment.'))
+        return false
+      }
+      const ibanNorm = normalizeIban(iban)
+      if (!isValidIbanChecksum(ibanNorm)) {
+        Alert.alert(tr('Invalid IBAN'), tr('IBAN checksum failed. Please double-check it.'))
+        return false
+      }
+      if (!referenceNumberTrimmed) {
+        Alert.alert(tr('Reference required'), tr('Enter the payment reference.'))
+        return false
+      }
+      const refNorm = normalizeReference(referenceFull)
+      if (looksLikeIban(refNorm) && isValidIbanChecksum(refNorm)) {
+        Alert.alert(tr('Invalid reference'), tr('Reference looks like an IBAN. Please move it to the IBAN field.'))
+        return false
+      }
+      if (refNorm === ibanNorm) {
+        Alert.alert(tr('Invalid reference'), tr('Reference must not be the same as IBAN.'))
+        return false
       }
       if (!effectivePurpose && !paymentDetailsTrimmed) {
         Alert.alert(tr('Purpose required'), tr('Enter the payment purpose/description.'))
@@ -5411,12 +5440,18 @@ function ScanBillScreen() {
         const saveSupplier = supplierTrimmed || creditorName.trim() || (pendingAttachment?.name ? String(pendingAttachment.name).replace(/\.[^.]+$/, '') : '') || 'Archived bill'
         const saveCurrency = currencyTrimmed || 'EUR'
         const saveAmount = isArchiveOnly ? (Number.isFinite(amt) && amt > 0 ? amt : 0) : amt
+        const desiredStatus: BillStatus = isArchiveOnly ? 'archived' : 'pending'
+        const makeArchiveMarkerPurpose = (p: string) => {
+          const base = String(p || '').trim()
+          return base ? `${ARCHIVE_PURPOSE_MARKER}\n${base}` : ARCHIVE_PURPOSE_MARKER
+        }
+
         const { data, error } = await createBill(s, {
           supplier: saveSupplier,
           amount: saveAmount,
           currency: saveCurrency,
           due_date: effectiveDueDate,
-          status: isArchiveOnly ? 'archived' : 'pending',
+          status: desiredStatus,
           creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
           reference: referenceFull || null,
@@ -5429,14 +5464,39 @@ function ScanBillScreen() {
         if (error) {
           const rawMsg = String(error.message || '')
           const looksLikeStatusConstraint = /bills\s+status\s+check|check\s+constraint.*status|violates\s+check\s+constraint/i.test(rawMsg)
-          const msg = looksLikeStatusConstraint
-            ? tr('Save failed: unsupported bill status. Please update the app.')
-            : rawMsg
-          Alert.alert(tr('Save failed'), msg)
-          setSaving(false)
-          return false
+          // Backward-compatible archive save: if DB does not support status='archived', store as paid with an internal marker.
+          if (isArchiveOnly && looksLikeStatusConstraint) {
+            const retry = await createBill(s, {
+              supplier: saveSupplier,
+              amount: saveAmount,
+              currency: saveCurrency,
+              due_date: effectiveDueDate,
+              status: 'paid',
+              creditor_name: (creditorName.trim() || saveSupplier) || null,
+              iban: iban.trim() || null,
+              reference: referenceFull || null,
+              reference_model: referenceModelTrimmed || null,
+              category: category || null,
+              purpose: makeArchiveMarkerPurpose(combinedPurpose || ''),
+              invoice_number: invoiceTrimmed || null,
+              space_id: dbSpaceId,
+            })
+            if (retry.error) {
+              Alert.alert(tr('Save failed'), tr('Save failed: unsupported bill status. Please update the app.'))
+              setSaving(false)
+              return false
+            }
+            savedId = retry.data?.id || null
+          } else {
+            const msg = looksLikeStatusConstraint
+              ? tr('Save failed: unsupported bill status. Please update the app.')
+              : rawMsg
+            Alert.alert(tr('Save failed'), msg)
+            setSaving(false)
+            return false
+          }
         }
-        savedId = data?.id || null
+        if (!savedId) savedId = data?.id || null
       } else {
         const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
         const details = paymentDetails.trim()
@@ -5669,7 +5729,19 @@ function ScanBillScreen() {
                 <AppInput placeholder={tr('Supplier')} value={supplier} onChangeText={handleSupplierInput} style={missingBasicFields.supplier ? styles.inputError : undefined} />
                 {missingBasicFields.supplier ? <Text style={styles.fieldErrorText}>{tr('Required field')}</Text> : null}
               </View>
-              <AppInput placeholder={tr('Purchase item (optional)')} value={purchaseItem} onChangeText={handlePurchaseItemInput} />
+              <View style={{ gap: 6 }}>
+                <Text style={styles.fieldLabel}>
+                  {tr('Purchase item')}
+                  <Text style={styles.requiredStar}> *</Text>
+                </Text>
+                <AppInput
+                  placeholder={tr('Purchase item')}
+                  value={purchaseItem}
+                  onChangeText={handlePurchaseItemInput}
+                  style={missingBasicFields.purchaseItem ? styles.inputError : undefined}
+                />
+                {missingBasicFields.purchaseItem ? <Text style={styles.fieldErrorText}>{tr('Required field')}</Text> : null}
+              </View>
               <View style={{ gap: 6 }}>
                 <Text style={styles.fieldLabel}>{tr('Category')}</Text>
                 <TouchableOpacity
@@ -5814,6 +5886,7 @@ function ScanBillScreen() {
                   <View style={{ gap: 6 }}>
                     <Text style={styles.fieldLabel}>
                       {tr('IBAN')}
+                      <Text style={styles.requiredStar}> *</Text>
                     </Text>
                     <AppInput
                       placeholder={tr('IBAN')}
@@ -5830,6 +5903,7 @@ function ScanBillScreen() {
                   <View style={{ gap: 6 }}>
                     <Text style={styles.fieldLabel}>
                       {tr('Reference')}
+                      <Text style={styles.requiredStar}> *</Text>
                     </Text>
                     <View style={{ flexDirection: 'row', gap: 8 }}>
                       <View style={{ width: 90 }}>
@@ -6810,8 +6884,9 @@ function BillsListScreen() {
 
         let raw = ((data as any) || []) as any[]
         let annotated: (Bill & { __spaceId?: string })[] = raw.map((b) => {
+          const normalized = remapArchivedBillFromDb(b as any)
           const local = localPayerIdFromDbSpaceId(entitlements, (b as any)?.space_id) || ids[0] || spaceId
-          return { ...(b as any), __spaceId: local }
+          return { ...(normalized as any), __spaceId: local }
         })
 
         if (entitlements.plan === 'pro') {
@@ -12330,7 +12405,10 @@ function ProfileRenameGate() {
 
 function MainTabs() {
   const insets = useSafeAreaInsets()
-  const bottomPadding = Math.max(insets.bottom, 0)
+  const bottomInset = Math.max(insets.bottom, 0)
+  // Keep the bar visually tight while still respecting safe-area.
+  // A small minimum bottom padding prevents icon clipping on Android.
+  const bottomPadding = bottomInset > 0 ? Math.max(bottomInset - 4, 0) : 6
   const { lang } = useLangContext()
 
   return (
@@ -12358,9 +12436,9 @@ function MainTabs() {
             borderTopColor: 'transparent',
             borderTopWidth: 0,
             backgroundColor: themeColors.surface,
-            paddingTop: 0,
+            paddingTop: 6,
             paddingBottom: bottomPadding,
-            height: 56 + bottomPadding,
+            height: 50 + bottomPadding,
           },
           tabBarLabelStyle: {
             fontSize: 10,
@@ -12389,7 +12467,7 @@ function MainTabs() {
                   showPill
                     ? {
                       paddingHorizontal: 10,
-                      paddingVertical: 4,
+                      paddingVertical: 2,
                       borderRadius: 14,
                       backgroundColor: focused ? themeColors.primarySoft : 'transparent',
                     }
@@ -13548,7 +13626,7 @@ const styles = StyleSheet.create({
   homeSummaryCard: { padding: themeSpacing.sm },
   homeHeroCard: { padding: themeSpacing.md, backgroundColor: themeColors.primarySoft, borderColor: '#BFDBFE' },
   homeHeroHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap },
-  homeHeroTitle: { fontSize: 16, fontWeight: '800', color: themeColors.primary },
+  homeHeroTitle: { fontSize: 22, fontWeight: '800', color: themeColors.primary },
   homeHeroSubtitle: { fontSize: 12, color: themeColors.textMuted },
   homeMetricsRow: { marginTop: themeSpacing.md, flexDirection: 'row', gap: themeSpacing.sm },
   homeMetricCard: { flex: 1, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, paddingVertical: themeSpacing.sm, paddingHorizontal: themeSpacing.sm, backgroundColor: '#FFFFFF' },

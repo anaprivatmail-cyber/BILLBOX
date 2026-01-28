@@ -839,7 +839,13 @@ function pickBestIbanFromText(rawText) {
   // accidentally glue the IBAN to the next line label (e.g. "...67892SKLIC").
   const upper = String(rawText || '').toUpperCase()
   const found = upper.match(/\b[A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,34}\b/g) || []
-  const unique = [...new Set(found.map(normalizeIban).filter(isValidIbanChecksum))]
+  const normalizeValidateOrRepair = (candidate) => {
+    const norm = normalizeIban(candidate)
+    if (!norm) return null
+    if (isValidIbanChecksum(norm)) return norm
+    return tryRepairIbanChecksum(norm)
+  }
+  const unique = [...new Set(found.map(normalizeValidateOrRepair).filter(Boolean))]
   if (unique.length === 0) return { iban: null, reason: 'none' }
   if (unique.length === 1) return { iban: unique[0], reason: 'single' }
 
@@ -1456,7 +1462,7 @@ function sanitizeFields(rawText, fields) {
     // QR mapping is deterministic: validate what QR provided; do not attempt OCR heuristics.
     if (out.iban) {
       const iban = normalizeIban(out.iban)
-      out.iban = isValidIbanChecksum(iban) ? iban : null
+      out.iban = isValidIbanChecksum(iban) ? iban : (tryRepairIbanChecksum(iban) || null)
     } else {
       out.iban = null
     }
@@ -1465,10 +1471,11 @@ function sanitizeFields(rawText, fields) {
     const best = pickBestIbanFromText(rawText)
     if (out.iban) {
       const iban = normalizeIban(out.iban)
-      if (!isValidIbanChecksum(iban)) out.iban = null
-      else if (best.iban && iban === best.iban) out.iban = iban
-      else if (textContainsLabeledIban(rawText, iban) && best.reason !== 'ambiguous_multi') out.iban = iban
-      else out.iban = best.iban || null
+      const candidate = isValidIbanChecksum(iban) ? iban : (tryRepairIbanChecksum(iban) || null)
+      if (!candidate) out.iban = null
+      else if (best.iban && candidate === best.iban) out.iban = candidate
+      else if (textContainsLabeledIban(rawText, candidate) && best.reason !== 'ambiguous_multi') out.iban = candidate
+      else out.iban = best.iban || candidate
     } else {
       out.iban = best.iban || null
     }
@@ -1794,7 +1801,7 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
     '- amount must be numeric (if unsure, you may return a string like "1,234.56"; it will be sanitized). ' +
     '- currency must be a 3-letter code (EUR/USD/GBP/CHF/...). Currency may appear as symbols (€, $, £). ' +
     '- Prefer the "amount to pay" / "total" / "za plačilo" amount; avoid VAT-only subtotals. ' +
-    '- Bank details: prefer IBAN for EU/UK/HR/IT/AT/DE; BIC/SWIFT may be present. For US/UK you may see routing/sort code + account number; return those fields when present, otherwise put extra banking details into payment_details. ' +
+    '- Bank details: extract the PAYEE/creditor pay-to account (not the payer). Prefer IBAN for EU/UK/HR/IT/AT/DE; BIC/SWIFT may be present. Normalize IBAN by removing spaces. If OCR confuses O/0 or I/L/1, only correct when checksum validates; otherwise return null. For US/UK you may see routing/sort code + account number; return those fields when present, otherwise put extra banking details into payment_details. ' +
     '- classification is an inference; confidence values must be between 0 and 1 when provided. ' +
     '- If a value is unclear, return null.'
 
@@ -1866,6 +1873,7 @@ async function extractFieldsFromTextWithAIOnly(text, languageHint, requestId) {
     '- due_date must be in YYYY-MM-DD if present. ' +
     '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
     '- Prefer the "amount to pay" / "total" amount; avoid VAT-only subtotals. ' +
+    '- Bank details: extract the payee/creditor pay-to account (IBAN/TRR) and the payment reference (sklic). Normalize IBAN by removing spaces; do not guess missing values. ' +
     '- classification is an inference; confidence values must be between 0 and 1 when provided. ' +
     '- If uncertain, return null.'
 

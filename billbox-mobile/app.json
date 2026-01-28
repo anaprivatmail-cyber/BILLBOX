@@ -3,7 +3,7 @@
     "name": "billbox-mobile",
     "slug": "billbox-mobile",
     "scheme": "billbox",
-    "version": "1.0.43",
+    "version": "1.0.44",
     "orientation": "portrait",
     "icon": "./assets/logo/logo-icon.png",
     "userInterfaceStyle": "light",
@@ -32,7 +32,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 150,
+      "versionCode": 151,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
@@ -125,7 +125,7 @@
       "eas": {
         "projectId": "b201d860-e579-4734-acf9-71594e8d0054"
       },
-      "commitHash": "d99e9bc"
+      "commitHash": "fbcdbc1"
     }
   }
 }
