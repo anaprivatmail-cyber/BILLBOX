@@ -1,7 +1,7 @@
 [build]
   base = "site"
   publish = "."
-  command = "rm -rf functions && cp -R ../netlify/functions ./functions && npm --prefix functions install --omit=dev"
+  command = "rm -rf functions && cp -R ../netlify/functions ./functions && npm --prefix functions install --omit=dev && npm --prefix functions run test:ocr"
   functions = "functions"
 
 [functions]

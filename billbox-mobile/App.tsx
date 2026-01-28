@@ -1079,7 +1079,19 @@ async function verifyIapOnBackend(productId: string): Promise<boolean> {
 }
 
 // --- Bills & warranties types ---
-type BillStatus = 'unpaid' | 'paid' | 'archived'
+type BillStatus = 'pending' | 'unpaid' | 'paid' | 'archived'
+
+function isBillUnpaid(status: any): boolean {
+  return status === 'unpaid' || status === 'pending'
+}
+
+function billStatusForDb(status: any): 'pending' | 'paid' | 'archived' {
+  // DB uses 'pending' (not 'unpaid') for unpaid bills.
+  // Keep accepting legacy 'unpaid' locally and map it when writing to Supabase.
+  if (status === 'paid') return 'paid'
+  if (status === 'archived') return 'archived'
+  return 'pending'
+}
 
 type Bill = {
   id: string
@@ -1268,7 +1280,7 @@ async function resolveDbExportScopePayload(
 async function createBill(supabase: SupabaseClient, input: CreateBillInput): Promise<{ data: Bill | null; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
   const dbSpaceId = await resolveDbSpaceId(supabase, input.space_id || null)
-  const payload: any = { ...input, user_id: userId, status: input.status || 'unpaid', space_id: dbSpaceId }
+  const payload: any = { ...input, user_id: userId, status: billStatusForDb(input.status || 'unpaid'), space_id: dbSpaceId }
   const { data, error } = await supabase.from('bills').insert(payload).select().single()
   return { data: (data as Bill) || null, error }
 }
@@ -1286,7 +1298,7 @@ async function setBillStatus(supabase: SupabaseClient, id: string, status: BillS
   const userId = await getCurrentUserId(supabase)
   let q = supabase
     .from('bills')
-    .update({ status })
+    .update({ status: billStatusForDb(status) })
     .eq('user_id', userId)
     .eq('id', id)
   const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
@@ -3791,10 +3803,16 @@ function ScanBillScreen() {
     const hasDue = Boolean(fields?.due_date)
     const hasIban = Boolean(fields?.iban)
     const hasRef = Boolean(fields?.reference)
-    if (hasDue || (hasIban && hasRef)) return false
+    // If there's a due date, treat as unpaid (to pay).
+    if (hasDue) return false
 
-    const paidRe = /(pla\u010dan|pla\u010dano|poravnano|paid|payment\s*received|zaprto|settled|cash\b|gotovina|kartic|card\s*payment|visa|mastercard|pos\b|receipt|fiscal)/i
+    // If the document indicates it is already paid/settled, treat as archive-only.
+    // Include common phrases across SL/HR/IT/DE + English.
+    const paidRe = /(plačan|plačano|poravnano|zaprto|\bplačilo\b|\bplačana\b|plaćeno|uplaćeno|podmireno|\bplaćanje\b|pagato|pagata|pagati|saldato|saldati|ricevuta|scontrino|\bpagamento\b|bezahlt|beglichen|quittung|barzahlung|\bzahlung\s*erhalten\b|paid|payment\s*received|settled|\breceipt\b|fiscal)/i
     if (paidRe.test(text)) return true
+
+    // IBAN+reference strongly suggests it's a bill to pay (unless marked paid above).
+    if (hasIban && hasRef) return false
 
     return false
   }
@@ -4127,9 +4145,10 @@ function ScanBillScreen() {
 
     const isQr = incomingRank === 0
 
-    // FINAL GLOBAL FLOW: ARCHIVE-FIRST, PAYMENT-OPTIONAL
-    // AI-only should still map all fields to the draft.
-    const allowPaymentFields = !archiveOnly || isAiOnly
+    // FINAL GLOBAL FLOW: always map extracted fields into the draft.
+    // Archive-only affects validation/required-ness, but should NOT prevent
+    // prefilling payment fields from OCR/PDF (user may choose to pay later).
+    const allowPaymentFields = true
 
     // Issuer (Dobavitelj/Prejemnik): invoice issuer. For non-QR sources, prefer header-block evidence.
     const creditorFromText = extractCreditorNameFromText(rawText)
@@ -4486,6 +4505,23 @@ function ScanBillScreen() {
       if (detailsClean && canSetField('payment_details', detailsClean, editedRef.current.paymentDetails, paymentDetails)) {
         setPaymentDetails(detailsClean)
         markFieldSource('payment_details')
+
+        // If the OCR put the pay-to account into a free-form field, still try to fill
+        // the structured fields (IBAN/reference) so "Save bill for payment" works.
+        if (!editedRef.current.iban && !iban.trim()) {
+          const extractedIban = extractFirstValidIban(detailsClean)
+          if (extractedIban && canSetField('iban', extractedIban, editedRef.current.iban, iban)) {
+            setIban(extractedIban)
+            markFieldSource('iban')
+          }
+        }
+        if (!editedRef.current.reference && !reference.trim()) {
+          const extractedRef = extractReferenceCandidate(detailsClean)
+          if (extractedRef && canSetField('reference', extractedRef, editedRef.current.reference, reference)) {
+            applyReferenceInput(extractedRef)
+            markFieldSource('reference')
+          }
+        }
       }
     }
 
@@ -4706,7 +4742,9 @@ function ScanBillScreen() {
       const source: 'QR' | 'OCR' = isQr ? 'QR' : 'OCR'
 
       const inferredArchiveOnly = inferArchiveOnlyFromText(raw, f)
-      setArchiveOnly(inferredArchiveOnly)
+      const inboxStatus = (payload as any)?.inboxStatus
+      const archiveOnlyFromInbox = inboxStatus === 'archived' ? true : (inboxStatus === 'pending' ? false : null)
+      setArchiveOnly(archiveOnlyFromInbox == null ? inferredArchiveOnly : archiveOnlyFromInbox)
 
       const cat = (classification as any)?.category
       if (typeof cat === 'string' && cat) setCategory(cat)
@@ -5378,7 +5416,7 @@ function ScanBillScreen() {
           amount: saveAmount,
           currency: saveCurrency,
           due_date: effectiveDueDate,
-          status: isArchiveOnly ? 'archived' : 'unpaid',
+          status: isArchiveOnly ? 'archived' : 'pending',
           creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
           reference: referenceFull || null,
@@ -5389,7 +5427,12 @@ function ScanBillScreen() {
           space_id: dbSpaceId,
         })
         if (error) {
-          Alert.alert(tr('Save failed'), error.message)
+          const rawMsg = String(error.message || '')
+          const looksLikeStatusConstraint = /bills\s+status\s+check|check\s+constraint.*status|violates\s+check\s+constraint/i.test(rawMsg)
+          const msg = looksLikeStatusConstraint
+            ? tr('Save failed: unsupported bill status. Please update the app.')
+            : rawMsg
+          Alert.alert(tr('Save failed'), msg)
           setSaving(false)
           return false
         }
@@ -5409,7 +5452,7 @@ function ScanBillScreen() {
           amount: saveAmount,
           currency: saveCurrency,
           due_date: effectiveDueDate,
-          status: isArchiveOnly ? 'archived' : 'unpaid',
+          status: isArchiveOnly ? 'archived' : 'pending',
           creditor_name: (creditorName.trim() || saveSupplier) || null,
           iban: iban.trim() || null,
           reference: referenceFull || null,
@@ -6038,6 +6081,25 @@ function InboxScreen() {
       .trim()
   }
 
+  const guessExtensionFromMime = (mimeType?: string | null): string => {
+    const m = String(mimeType || '').toLowerCase()
+    if (!m) return ''
+    if (m.includes('pdf')) return '.pdf'
+    if (m.includes('png')) return '.png'
+    if (m.includes('jpeg') || m.includes('jpg')) return '.jpg'
+    if (m.includes('heic')) return '.heic'
+    if (m.includes('tiff') || m.includes('tif')) return '.tif'
+    return ''
+  }
+
+  const ensureFilenameHasExtension = (name: string, mimeType?: string | null): string => {
+    const n = String(name || '').trim() || 'document'
+    // If it already ends with ".ext" (2-6 chars), keep it.
+    if (/\.[a-z0-9]{2,6}$/i.test(n)) return n
+    const ext = guessExtensionFromMime(mimeType)
+    return ext ? `${n}${ext}` : n
+  }
+
   const buildInvoiceClassifierText = (item: InboxItem, meta: any, subject?: string | null) => {
     const parts: string[] = []
     if (subject) parts.push(String(subject))
@@ -6049,31 +6111,59 @@ function InboxScreen() {
     return parts.join('\n').trim()
   }
 
-  const scoreInvoiceText = (text: string, mimeType?: string | null) => {
+  const scoreCommercialDocText = (text: string, mimeType?: string | null) => {
     const t = String(text || '').toLowerCase()
     if (!t) return 0
     let score = 0
-    if (/(\bra\u010dun\b|invoice|faktura|rechnung|fattura)/i.test(t)) score += 2
-    if (/(\bznesek\b|total|amount|balance\s*due|sum|skupaj)/i.test(t)) score += 1
-    if (/(\bddv\b|vat|pdv)/i.test(t)) score += 1
-    if (/(rok\s*pla\S*|due\s*date|pay\s*by|payment\s*due)/i.test(t)) score += 1
-    if (/(iban|trr|bank\s*account)/i.test(t)) score += 1
-    if (/(sklic|reference|ref\.?|model)/i.test(t)) score += 1
+
+    // Document-type keywords (invoice/proforma/offer/quote) across common languages.
+    if (/(\bra\u010dun\b|\bracun\b|invoice|faktura|rechnung|fattura|factura|facture|nota\s*fiscale)/i.test(t)) score += 3
+    if (/(predra\u010dun|predracun|proforma|pro\s*forma|proforma\s*rechnung|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b|\bestimate\b|devis|preventivo|\bofferta\b|\bpředra\u010dun\b|\bpr\u00e9facture\b)/i.test(t)) score += 3
+
+    // Common invoice/payment signals.
+    if (/(\bznesek\b|total|amount|balance\s*due|sum|skupaj|ukupno|totale|gesamt|\bimporte\b)/i.test(t)) score += 1
+    if (/(\bddv\b|vat|pdv|\biva\b|mwst)/i.test(t)) score += 1
+    if (/(rok\s*pla\S*|due\s*date|pay\s*by|payment\s*due|f\u00e4llig|scadenza|\bech\u00e9ance\b)/i.test(t)) score += 1
+    if (/(iban|trr|bank\s*account|\bbic\b|swift)/i.test(t)) score += 1
+    if (/(sklic|reference|ref\.?|model|poziv\s*na\s*broj|\bvariabilni\b)/i.test(t)) score += 1
     if (/(\bEUR\b|\bUSD\b|\bGBP\b|€|\$|£)/i.test(t)) score += 1
-    if (/(invoice\s*(no|number)|\b\u0161t\.?\s*ra\u010duna\b|ra\u010dun\s*\u0161t)/i.test(t)) score += 1
+    if (/(invoice\s*(no|number)|\b\u0161t\.?\s*ra\u010duna\b|ra\u010dun\s*\u0161t|\brechnungs?nr\b|\bfattura\s*n\b|\bfacture\s*n\b|\bfactura\s*n\b)/i.test(t)) score += 1
     if (/(UPNQR|\bBCD\b)/i.test(t)) score += 2
 
+    // Negative signals.
     if (/(unsubscribe|newsletter|marketing|promo|campaign)/i.test(t)) score -= 2
     if (!/\d/.test(t)) score -= 1
 
     const mime = String(mimeType || '').toLowerCase()
+    if (mime.includes('application/pdf')) score += 1
     if (mime.includes('text/csv') || mime.includes('application/csv')) score += 1
-
     return score
+  }
+
+  const scoreWarrantyText = (text: string) => {
+    const t = String(text || '').toLowerCase()
+    if (!t) return 0
+    let score = 0
+    if (/(garancij|garancija|garancijski\s*list|jamstvo|warranty|guarantee|garanzia|garantie|gew\u00e4hrleistung)/i.test(t)) score += 4
+    if (/(serial|serijska\s*\u0161t|serijski\s*broj|\bs\/n\b|model|artikel|product|izdelek)/i.test(t)) score += 1
+    if (/(valid\s*until|expires|expiry|velja\s*do|datum\s*poteka|scadenza|g\u00fcltig\s*bis)/i.test(t)) score += 1
+    if (/(months|mesecev|meseci|mes\.|monat|mesi?ec)/i.test(t)) score += 1
+    return score
+  }
+
+  const classifyInboxDoc = (text: string, mimeType?: string | null) => {
+    const billScore = scoreCommercialDocText(text, mimeType)
+    const warrantyScore = scoreWarrantyText(text)
+    const kind: 'bill' | 'warranty' | 'other' = warrantyScore >= 4 && warrantyScore >= billScore + 1
+      ? 'warranty'
+      : (billScore >= 3 ? 'bill' : 'other')
+    return { kind, billScore, warrantyScore }
   }
 
   const syncServerInbox = useCallback(async () => {
     if (!supabase) return
+    // Email inbox is a Več-only feature; do not sync on other plans.
+    if (entitlements.plan !== 'pro') return
     try {
       const { data, error } = await supabase
         .from('inbox_items')
@@ -6110,13 +6200,14 @@ function InboxScreen() {
         const { data: signed, error: signedErr } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60)
         if (signedErr || !signed?.signedUrl) continue
 
-        const name = String(row.attachment_name || row.subject || 'email-attachment')
         const mimeType = row.mime_type ? String(row.mime_type) : undefined
+        const name = ensureFilenameHasExtension(String(row.attachment_name || row.subject || 'email-attachment'), mimeType)
         const createdAt = String(row.received_at || row.created_at || new Date().toISOString())
 
         const meta = row?.meta && typeof row.meta === 'object' ? { ...row.meta } : {}
         if (row?.subject) meta.subject = row.subject
         if (row?.sender) meta.sender = row.sender
+        meta.source = 'email'
         const added = await addToInbox({
           spaceId: effectiveSpaceId,
           id,
@@ -6138,16 +6229,33 @@ function InboxScreen() {
             const meta = (it as any).meta || {}
             const subject = meta?.subject ? String(meta.subject) : ''
             const classifierText = buildInvoiceClassifierText(it, meta, subject)
-            const score = scoreInvoiceText(classifierText, it.mimeType || null)
-            const isCandidate = score >= 3
-            if (!isCandidate) {
-              await updateInboxItem(effectiveSpaceId, it.id, { notes: tr('Not an invoice'), status: it.status || 'new' })
+            const cls = classifyInboxDoc(classifierText, it.mimeType || null)
+
+            // Only spend OCR/AI on bills/proformas/offers or warranties.
+            if (cls.kind === 'other') {
+              await updateInboxItem(effectiveSpaceId, it.id, { notes: tr('Not a bill or warranty'), status: it.status || 'new' })
               await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
               continue
             }
 
-            // Quiet auto-OCR for newly received email items so "Attach to bill" is immediately useful.
             const sourceUri = (it as any).localPath || it.uri
+
+            if (cls.kind === 'warranty') {
+              const { rawText } = await performOCR(sourceUri, { preferQr: false, allowAi: false, languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
+              const w = extractWarrantyFieldsFromOcr(typeof rawText === 'string' ? rawText : '')
+              const parts: string[] = []
+              if (w.itemName) parts.push(`${tr('Item')}: ${w.itemName}`)
+              if (w.supplier) parts.push(`${tr('Supplier')}: ${w.supplier}`)
+              if (w.purchaseDate) parts.push(`${tr('Purchase date')}: ${w.purchaseDate}`)
+              if (w.expiresAt) parts.push(`${tr('Valid until')}: ${w.expiresAt}`)
+              if (w.durationMonths) parts.push(`${tr('Duration')}: ${w.durationMonths} ${tr('months')}`)
+              const nextNotes = parts.join('\n') || tr('Warranty document')
+              await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: { _kind: 'warranty', ...w, rawText }, notes: nextNotes, status: it.status || 'new' })
+              await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
+              continue
+            }
+
+            // Bills/proformas/offers: run OCR + AI so the bill form is properly prefilled.
             const { fields, summary, rawText, mode, meta: ocrMeta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
             const classification = ocrMeta?.classification || null
             const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
@@ -6187,7 +6295,7 @@ function InboxScreen() {
     } catch {
       // ignore server inbox sync failures; local inbox still works
     }
-  }, [supabase, effectiveSpaceId, entitlements?.canUseOCR])
+  }, [supabase, effectiveSpaceId, entitlements?.canUseOCR, entitlements.plan])
 
   const refresh = useCallback(async () => {
     if (spaceLoading || !space) return
@@ -6219,7 +6327,13 @@ function InboxScreen() {
       if (res.canceled) return
       const file = res.assets?.[0]
       if (!file?.uri) return
-      const item = await addToInbox({ spaceId, uri: file.uri, name: file.name || 'document', mimeType: file.mimeType || undefined })
+      const item = await addToInbox({
+        spaceId,
+        uri: file.uri,
+        name: file.name || 'document',
+        mimeType: file.mimeType || undefined,
+        meta: { source: 'device' },
+      })
       await scheduleInboxReviewReminder(item.id, item.name, spaceId)
       await refresh()
       Alert.alert(tr('Inbox'), tr('Added to Inbox.'))
@@ -6235,43 +6349,62 @@ function InboxScreen() {
       showUpgradeAlert('ocr')
       return
     }
+    let kind: 'bill' | 'warranty' | 'other' = 'bill'
     try {
       const meta = (item as any).meta || {}
       const subject = meta?.subject ? String(meta.subject) : ''
       const classifierText = buildInvoiceClassifierText(item, meta, subject)
-      const score = scoreInvoiceText(classifierText, item.mimeType || null)
-      if (score < 3) {
-        Alert.alert(tr('Inbox'), tr('This does not look like a bill, but we will scan it anyway.'))
-      }
+      kind = classifyInboxDoc(classifierText, item.mimeType || null).kind
     } catch {}
+
+    if (kind === 'other') {
+      Alert.alert(tr('Inbox'), tr('Not a bill or warranty'))
+      return
+    }
     try {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
-      const { fields, summary, rawText, mode, meta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
+      if (kind === 'warranty') {
+        const { rawText } = await performOCR(sourceUri, { preferQr: false, allowAi: false, languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
+        const w = extractWarrantyFieldsFromOcr(typeof rawText === 'string' ? rawText : '')
+        const parts: string[] = []
+        if (w.itemName) parts.push(`${tr('Item')}: ${w.itemName}`)
+        if (w.supplier) parts.push(`${tr('Supplier')}: ${w.supplier}`)
+        if (w.purchaseDate) parts.push(`${tr('Purchase date')}: ${w.purchaseDate}`)
+        if (w.expiresAt) parts.push(`${tr('Valid until')}: ${w.expiresAt}`)
+        if (w.durationMonths) parts.push(`${tr('Duration')}: ${w.durationMonths} ${tr('months')}`)
+        const nextNotes = parts.join('\n') || tr('Warranty document')
+        await updateInboxItem(spaceId, item.id, { extractedFields: { _kind: 'warranty', ...w, rawText }, notes: nextNotes, status: item.status || 'new' })
+        await scheduleInboxReviewReminder(item.id, item.name, spaceId)
+        await refresh()
+        Alert.alert(tr('Scan complete'), nextNotes)
+      } else {
+        const { fields, summary, rawText, mode, meta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
 
-      const classification = meta?.classification || null
-      const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
-      const archiveOnlyInferred = inferArchiveOnlyFromText(typeof rawText === 'string' ? rawText : '', fields)
-      const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
-      const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
-      const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
+        const classification = meta?.classification || null
+        const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
+        const archiveOnlyInferred = inferArchiveOnlyFromText(typeof rawText === 'string' ? rawText : '', fields)
+        const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
+        const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
+        const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
 
-      const isInvoice = classification?.isInvoice
-      const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7)
-      const treatAsInvoice = isInvoice === true || (!treatAsNotInvoice && hasBasicAmount)
+        const isInvoice = classification?.isInvoice
+        const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7)
+        const treatAsInvoice = isInvoice === true || (!treatAsNotInvoice && hasBasicAmount)
 
-      let nextStatus: any = 'new'
-      if (treatAsNotInvoice) nextStatus = item.status || 'new'
-      else if (treatAsInvoice) nextStatus = (archiveOnlyInferred && hasBasicAmount) ? 'archived' : 'pending'
+        let nextStatus: any = 'new'
+        if (treatAsNotInvoice) nextStatus = item.status || 'new'
+        else if (treatAsInvoice) nextStatus = (archiveOnlyInferred && hasBasicAmount) ? 'archived' : 'pending'
 
-      const reason = classification?.reason ? String(classification.reason) : ''
-      const nextNotes = treatAsNotInvoice ? (reason ? `${tr('Not an invoice')}: ${reason}` : tr('Not an invoice')) : summary
+        const reason = classification?.reason ? String(classification.reason) : ''
+        const nextNotes = treatAsNotInvoice ? (reason ? `${tr('Not an invoice')}: ${reason}` : tr('Not an invoice')) : summary
 
-      await updateInboxItem(spaceId, item.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
-      if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(item.id, spaceId)
-      else await scheduleInboxReviewReminder(item.id, item.name, spaceId)
-      await refresh()
-      Alert.alert(tr('Scan complete'), summary)
+        await updateInboxItem(spaceId, item.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
+        if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(item.id, spaceId)
+        else await scheduleInboxReviewReminder(item.id, item.name, spaceId)
+        await refresh()
+        Alert.alert(tr('Scan complete'), summary)
+      }
     } catch (e: any) {
       const msg = e?.message || tr('Could not read this document.')
       const code = e?.code || null
@@ -6311,6 +6444,11 @@ function InboxScreen() {
   }
 
   async function attachToBill(item: InboxItem) {
+    if ((item as any)?.extractedFields?._kind === 'warranty') {
+      Alert.alert(tr('Inbox'), tr('This looks like a warranty. Open Warranties.'))
+      try { navigation.navigate('Warranties') } catch {}
+      return
+    }
     if (!item.extractedFields) {
       Alert.alert(tr('Scan first'), tr('Scan the document to prefill the bill.'))
       return
@@ -6321,6 +6459,7 @@ function InboxScreen() {
         fields: item.extractedFields,
         attachmentPath: item.localPath,
         mimeType: item.mimeType,
+        inboxStatus: item.status,
       },
     })
   }
@@ -6382,6 +6521,9 @@ function InboxScreen() {
                 {(item.status === 'pending' || item.status === 'archived') ? (
                   <Text style={styles.mutedText}>{item.status === 'pending' ? tr('Pending') : tr('Archived')}</Text>
                 ) : null}
+                <Text style={styles.mutedText}>
+                  {((item as any)?.meta?.source === 'email') ? tr('From email') : tr('From device')}
+                </Text>
                 {item.extractedFields && (
                   <View style={{ marginTop: 6 }}>
                     <Text style={{ fontWeight: '600' }}>{tr('Extracted')}</Text>
@@ -7015,12 +7157,12 @@ function BillsListScreen() {
       if (maxVal !== null && !Number.isNaN(maxVal) && bill.amount > maxVal) return false
 
       if (statusFilter === 'paid' && bill.status !== 'paid') return false
-      if (statusFilter === 'unpaid' && bill.status !== 'unpaid') return false
+      if (statusFilter === 'unpaid' && !isBillUnpaid(bill.status)) return false
       if (statusFilter === 'archived' && bill.status !== 'archived') return false
-      if (unpaidOnly && bill.status !== 'unpaid') return false
+      if (unpaidOnly && !isBillUnpaid(bill.status)) return false
 
       const dueDate = parseDateValue(bill.due_date)
-      const isOverdue = dueDate ? bill.status === 'unpaid' && dueDate.getTime() < today.getTime() : false
+      const isOverdue = dueDate ? isBillUnpaid(bill.status) && dueDate.getTime() < today.getTime() : false
       if (overdueOnly && !isOverdue) return false
 
       if (hasAttachmentsOnly && (attachmentCounts[bill.id] || 0) === 0) return false
@@ -7549,7 +7691,7 @@ function BillsListScreen() {
   const renderBillItem = useCallback(({ item }: { item: Bill & { __spaceId?: string } }) => {
     const dueDate = parseDateValue(item.due_date)
     const trackedDate = getBillDate(item, dateMode)
-    const isOverdue = dueDate ? item.status === 'unpaid' && dueDate.getTime() < today.getTime() : false
+    const isOverdue = dueDate ? isBillUnpaid(item.status) && dueDate.getTime() < today.getTime() : false
     const statusLabel = item.status === 'archived' ? 'Archived' : isOverdue ? 'Overdue' : item.status === 'paid' ? 'Paid' : 'Unpaid'
     const statusTone: 'danger' | 'success' | 'info' | 'warning' = item.status === 'archived' ? 'info' : isOverdue ? 'warning' : item.status === 'paid' ? 'success' : 'info'
     const attachments = attachmentCounts[item.id] || 0
@@ -7563,7 +7705,7 @@ function BillsListScreen() {
         style={[
           styles.billCard,
           item.status === 'paid' && styles.billCardPaid,
-          item.status === 'unpaid' && !isOverdue && styles.billCardUnpaid,
+          isBillUnpaid(item.status) && !isOverdue && styles.billCardUnpaid,
           isOverdue && styles.billCardOverdue,
           highlightId === item.id && styles.billHighlighted,
         ]}
@@ -8190,7 +8332,7 @@ function HomeScreen() {
   const payerOptions = useMemo(() => {
     const base = spacesCtx.spaces
       .filter((s) => isPayerSpaceId(s.id))
-      .map((s) => ({ value: s.id, label: payerLabelFromSpaceId(s.id) }))
+      .map((s) => ({ value: s.id, label: (String(s.name || '').trim() || payerLabelFromSpaceId(s.id)) }))
     if (base.length >= 2) return base
     const second = entitlements.plan === 'pro'
       ? { value: '__create_payer2__', label: 'Profil 2' }
@@ -8285,7 +8427,7 @@ function HomeScreen() {
           let nextDue: string | null = null
 
           for (const bill of bills) {
-            if (bill.status !== 'unpaid') continue
+            if (!isBillUnpaid(bill.status)) continue
             totalUnpaid += bill.amount || 0
             if (!bill.due_date) continue
             const due = bill.due_date
@@ -8454,11 +8596,6 @@ function HomeScreen() {
           <View style={styles.homeHeroHeaderRow}>
             <View style={{ flexShrink: 1 }}>
               <Text style={styles.homeHeroTitle}>Billbox</Text>
-              {activeSummary ? (
-                <Text style={styles.homeHeroSubtitle} numberOfLines={1}>
-                  {`${payerLabelFromSpaceId(activeSummary.spaceId)} • ${activeSummary.spaceName}`}
-                </Text>
-              ) : null}
             </View>
             <TouchableOpacity
               onPress={() => setHomeSummarySettingsVisible(true)}
@@ -10028,6 +10165,20 @@ function ReportsScreen() {
   const { snapshot: entitlements } = useEntitlements()
 
   const isPro = entitlements.plan === 'pro'
+
+  const [reportsView, setReportsView] = useState<'table' | 'chart'>(() => (isPro ? 'chart' : 'table'))
+  useEffect(() => {
+    if (!isPro && reportsView === 'chart') setReportsView('table')
+  }, [isPro, reportsView])
+
+  const onSelectReportsView = useCallback((next: 'table' | 'chart') => {
+    if (next === 'chart' && !isPro) {
+      Alert.alert(tr('Reports'), tr('Chart is available on Več.'))
+      showUpgradeAlert('reports')
+      return
+    }
+    setReportsView(next)
+  }, [isPro])
   const analyticsBlocked =
     entitlements.plan === 'free' ||
     entitlements.status === 'trial_expired' ||
@@ -10195,7 +10346,13 @@ function ReportsScreen() {
       if (!d) return false
       if (d < range.start || d > range.end) return false
 
-      if (status !== 'all' && b.status !== status) return false
+      if (status !== 'all') {
+        if (status === 'unpaid') {
+          if (!isBillUnpaid(b.status)) return false
+        } else {
+          if (b.status !== status) return false
+        }
+      }
 
       if (supplierTerm && !String(b.supplier || '').toLowerCase().includes(supplierTerm)) return false
 
@@ -10216,7 +10373,13 @@ function ReportsScreen() {
       const d = getBillDateForMode(b, modeForDate)
       if (!d) continue
       if (d < range.start || d > range.end) continue
-      if (status !== 'all' && b.status !== status) continue
+      if (status !== 'all') {
+        if (status === 'unpaid') {
+          if (!isBillUnpaid(b.status)) continue
+        } else {
+          if (b.status !== status) continue
+        }
+      }
       const name = String(b.supplier || '').trim()
       if (!name) continue
       supplierTotalsInRange[name] = (supplierTotalsInRange[name] || 0) + (b.currency === 'EUR' ? b.amount : 0)
@@ -10231,7 +10394,7 @@ function ReportsScreen() {
     const totalBillsInRange = filtered.length
     const totalAmountEur = filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? b.amount : 0), 0)
     const unpaidTotalEur = filtered.reduce((sum, b) => {
-      if (b.status !== 'unpaid') return sum
+      if (!isBillUnpaid(b.status)) return sum
       return sum + (b.currency === 'EUR' ? b.amount : 0)
     }, 0)
     return { totalBillsInRange, totalAmountEur, unpaidTotalEur }
@@ -10619,16 +10782,23 @@ function ReportsScreen() {
           </Surface>
         </Pressable>
 
-        <Pressable
-          onPress={() => {
-            if (!isPro) {
-              showUpgradeAlert('reports')
-            }
-          }}
-          hitSlop={8}
-        >
-          <Surface elevated>
-            <SectionHeader title={groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')} />
+        <Surface elevated>
+          <SectionHeader title={groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')} />
+          <View style={styles.reportViewToggleRow}>
+            <AppButton
+              label={tr('Table')}
+              variant={reportsView === 'table' ? 'secondary' : 'ghost'}
+              onPress={() => onSelectReportsView('table')}
+            />
+            <AppButton
+              label={tr('Chart')}
+              variant={reportsView === 'chart' ? 'secondary' : 'ghost'}
+              iconName={!isPro ? 'lock-closed-outline' : undefined}
+              onPress={() => onSelectReportsView('chart')}
+            />
+          </View>
+
+          {reportsView === 'chart' ? (
             <View style={{ paddingVertical: themeSpacing.sm }}>
               {series.points.length === 0 ? (
                 <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
@@ -10644,8 +10814,27 @@ function ReportsScreen() {
                 ))
               )}
             </View>
-          </Surface>
-        </Pressable>
+          ) : (
+            <View style={{ paddingVertical: themeSpacing.sm }}>
+              {series.points.length === 0 ? (
+                <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
+              ) : (
+                <View style={{ gap: 8 }}>
+                  <View style={styles.reportTableHeaderRow}>
+                    <Text style={[styles.mutedText, { flex: 1 }]}>{tr('Period')}</Text>
+                    <Text style={[styles.mutedText, { width: 120, textAlign: 'right' }]}>{tr('Amount (EUR)')}</Text>
+                  </View>
+                  {series.points.map((p) => (
+                    <View key={p.key} style={styles.reportTableRow}>
+                      <Text style={{ flex: 1 }}>{p.key}</Text>
+                      <Text style={{ width: 120, textAlign: 'right' }}>EUR {p.value.toFixed(2)}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          )}
+        </Surface>
 
         <Surface elevated>
           <SectionHeader title={tr('Report exports')} />
@@ -10895,7 +11084,13 @@ function ExportsScreen() {
         if (!d) return false
         if (d < range.start || d > range.end) return false
 
-        if (status !== 'all' && b.status !== status) return false
+        if (status !== 'all') {
+          if (status === 'unpaid') {
+            if (!isBillUnpaid(b.status)) return false
+          } else {
+            if (b.status !== status) return false
+          }
+        }
 
         if (supplierTerm && !String(b.supplier || '').toLowerCase().includes(supplierTerm)) return false
 
@@ -12135,7 +12330,7 @@ function ProfileRenameGate() {
 
 function MainTabs() {
   const insets = useSafeAreaInsets()
-  const bottomPadding = Math.max(insets.bottom, 12)
+  const bottomPadding = Math.max(insets.bottom, 0)
   const { lang } = useLangContext()
 
   return (
@@ -12176,7 +12371,7 @@ function MainTabs() {
           tabBarIconStyle: {
             marginTop: 0,
           },
-          tabBarIcon: ({ color }) => {
+          tabBarIcon: ({ color, focused }) => {
             const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
               Home: 'home-outline',
               Scan: 'add-circle-outline',
@@ -12187,7 +12382,23 @@ function MainTabs() {
 
             const iconName = icons[route.name] ?? 'ellipse-outline'
             const iconSize = route.name === 'Scan' ? 28 : 26
-            return <Ionicons name={iconName} size={iconSize} color={color} />
+            const showPill = route.name !== 'Scan'
+            return (
+              <View
+                style={
+                  showPill
+                    ? {
+                      paddingHorizontal: 10,
+                      paddingVertical: 4,
+                      borderRadius: 14,
+                      backgroundColor: focused ? themeColors.primarySoft : 'transparent',
+                    }
+                    : undefined
+                }
+              >
+                <Ionicons name={iconName} size={iconSize} color={color} />
+              </View>
+            )
           },
         })}
       >
@@ -12476,7 +12687,7 @@ function SettingsScreen() {
           )}
         </Surface>
 
-        <Surface elevated style={{ marginTop: themeSpacing.md }}>
+        <Surface elevated>
           <SectionHeader title={tr('Language')} />
           <Pressable
             onPress={() => setLanguageModalVisible(true)}
@@ -12486,7 +12697,7 @@ function SettingsScreen() {
             ]}
             hitSlop={8}
           >
-            <Text style={styles.dateButtonText}>
+            <Text style={[styles.dateButtonText, { fontWeight: '800' }]}>
               {(languageOptions.find((o) => o.code === lang)?.label) || String(lang)}
             </Text>
             <Ionicons name="chevron-down" size={16} color={themeColors.textMuted} />
@@ -12722,7 +12933,7 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
           try {
             const sourceUri = (item as any).localPath || item.uri
             const { fields, summary } = await performOCR(sourceUri, { preferQr: false })
-            const looksLikeBill = !!(fields && (fields.iban || fields.reference) && typeof fields.amount === 'number')
+            const looksLikeBill = !!(fields && typeof fields.amount === 'number' && (fields.iban || fields.reference || fields.creditor_name || fields.supplier || (fields as any).invoice_number))
             await updateInboxItem(targetSpaceId, item.id, { extractedFields: fields, notes: summary, status: looksLikeBill ? 'pending' : 'new' })
             if (looksLikeBill) await cancelInboxReviewReminder(item.id, targetSpaceId)
           } catch {
@@ -13091,16 +13302,16 @@ const styles = StyleSheet.create({
     },
     // Active styles only change color (no layout/behavior changes).
     payUrgencyTabActiveToday: {
-      backgroundColor: '#FCA5A5',
-      borderColor: '#EF4444',
+      backgroundColor: '#EF4444',
+      borderColor: '#B91C1C',
     },
     payUrgencyTabActiveWeek: {
-      backgroundColor: '#FECACA',
+      backgroundColor: '#FCA5A5',
       borderColor: '#F87171',
     },
     payUrgencyTabActiveMonth: {
-      backgroundColor: '#BBF7D0',
-      borderColor: '#34D399',
+      backgroundColor: '#FEE2E2',
+      borderColor: '#FECACA',
     },
     payUrgencyTabPressed: {
       opacity: 0.92,
@@ -13112,18 +13323,16 @@ const styles = StyleSheet.create({
     },
     payUrgencyToday: {
       // Most important: make Today stand out (stronger red tone).
-      backgroundColor: '#FECACA',
-      borderColor: '#F87171',
+      backgroundColor: '#F87171',
+      borderColor: '#EF4444',
     },
     payUrgencyWeek: {
-      // Match Home "Overdue" tile tone.
-      backgroundColor: '#FEF2F2',
-      borderColor: '#FECACA',
+      backgroundColor: '#FECACA',
+      borderColor: '#FCA5A5',
     },
     payUrgencyMonth: {
-      // Match Home "Next due date" tile tone.
-      backgroundColor: '#ECFDF5',
-      borderColor: '#BBF7D0',
+      backgroundColor: '#FEF2F2',
+      borderColor: '#FEE2E2',
     },
     payUrgencySummaryRow: {
       flexDirection: 'row',
@@ -13277,6 +13486,9 @@ const styles = StyleSheet.create({
   payDueOverdue: { fontWeight: '700', color: '#92400E' },
   reportStatLabel: { fontSize: 13, color: '#4B5563' },
   reportStatValue: { fontSize: 15, fontWeight: '700', color: themeColors.text },
+  reportViewToggleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
+  reportTableHeaderRow: { flexDirection: 'row', alignItems: 'center', paddingBottom: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: themeColors.border },
+  reportTableRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: themeColors.border },
 
   // Add bill
   helperText: { fontSize: 12, color: '#6B7280', marginTop: themeSpacing.xs },
@@ -13345,7 +13557,16 @@ const styles = StyleSheet.create({
   homeMetricCardNext: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
   homeMetricValue: { fontSize: 16, fontWeight: '800', color: themeColors.text },
   homeMetricLabel: { marginTop: 4, fontSize: 11, color: themeColors.textMuted },
-  statCard: { paddingVertical: themeSpacing.xs, paddingHorizontal: themeSpacing.sm, gap: themeSpacing.xs, flex: 1, justifyContent: 'space-between' },
+  statCard: {
+    paddingVertical: themeSpacing.xs,
+    paddingHorizontal: themeSpacing.sm,
+    gap: themeSpacing.xs,
+    flex: 1,
+    justifyContent: 'space-between',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: themeColors.border,
+  },
   statCardPrimary: { borderWidth: 1, borderColor: themeColors.primary },
   homePrimaryTile: { borderWidth: 1, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
   homePrimaryTileScan: { backgroundColor: themeColors.primary, borderColor: themeColors.primary },

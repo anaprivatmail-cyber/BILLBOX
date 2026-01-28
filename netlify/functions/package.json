@@ -6,6 +6,9 @@
     "node": "20.x",
     "npm": "10.x"
   },
+  "scripts": {
+    "test:ocr": "node tools/ocr-selftest.js && node tools/ocr-fixturetest.js && node tools/ocr-pdftest.js"
+  },
   "dependencies": {
     "@zxing/library": "0.21.3",
     "@supabase/supabase-js": "2.89.0",

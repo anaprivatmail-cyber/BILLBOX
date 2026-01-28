@@ -71,6 +71,55 @@ function safeParseJson(s) {
   }
 }
 
+function mapCurrencyLoose(rawCurrency, rawAmountText) {
+  const c = String(rawCurrency || '').trim()
+  const a = String(rawAmountText || '').trim()
+  const probe = `${c} ${a}`
+  if (/\bEUR\b/i.test(probe) || /€/.test(probe)) return 'EUR'
+  if (/\bUSD\b/i.test(probe) || /\bUS\$\b/i.test(probe) || /\$/.test(c) || /^\$/.test(a)) return 'USD'
+  if (/\bGBP\b/i.test(probe) || /£/.test(probe)) return 'GBP'
+  if (/\bCHF\b/i.test(probe)) return 'CHF'
+  if (/\bCAD\b/i.test(probe) || /\bCA\$\b/i.test(probe)) return 'CAD'
+  if (/\bAUD\b/i.test(probe) || /\bAU\$\b/i.test(probe)) return 'AUD'
+  return null
+}
+
+function tryRepairIbanChecksum(iban) {
+  const s = String(iban || '').replace(/\s+/g, '').toUpperCase()
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(s)) return null
+  if (isValidIbanChecksum(s)) return s
+
+  // Common OCR confusions: prefer digits when a digit-like letter appears.
+  // Try a cheap deterministic fix first.
+  const simple = s.replace(/O/g, '0').replace(/[IL]/g, '1')
+  if (simple !== s && isValidIbanChecksum(simple)) return simple
+
+  const chars = s.split('')
+  const ambiguous = []
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i]
+    // Only consider replacing letter-like OCR artifacts with digits.
+    const opts = ch === 'O' ? ['O', '0']
+      : ch === 'I' ? ['I', '1']
+      : ch === 'L' ? ['L', '1']
+      : null
+    if (opts && opts.length > 1) ambiguous.push({ i, opts })
+  }
+  if (!ambiguous.length || ambiguous.length > 6) return null
+
+  const max = 1 << ambiguous.length
+  for (let mask = 0; mask < max; mask += 1) {
+    const attempt = [...chars]
+    for (let j = 0; j < ambiguous.length; j += 1) {
+      const { i, opts } = ambiguous[j]
+      attempt[i] = ((mask >> j) & 1) ? opts[1] : opts[0]
+    }
+    const candidate = attempt.join('')
+    if (isValidIbanChecksum(candidate)) return candidate
+  }
+  return null
+}
+
 function makeRequestId() {
   try {
     return crypto.randomUUID()
@@ -1608,8 +1657,14 @@ function sanitizeFieldsAiOnly(fields) {
   }
 
   // Amount / currency
+  if (typeof out.amount === 'string') {
+    const parsed = parseMoneyAmountLoose(out.amount)
+    if (typeof parsed === 'number') out.amount = parsed
+  }
   if (typeof out.amount !== 'number' || !Number.isFinite(out.amount) || out.amount <= 0 || out.amount > 1000000) out.amount = null
-  if (out.currency) {
+  const mappedCurrency = mapCurrencyLoose(out.currency, fields?.amount)
+  if (mappedCurrency) out.currency = mappedCurrency
+  else if (out.currency) {
     const cur = upper(out.currency)
     out.currency = /^[A-Z]{3}$/.test(cur) ? cur : null
   } else {
@@ -1624,12 +1679,35 @@ function sanitizeFieldsAiOnly(fields) {
     out.due_date = null
   }
 
+  // Invoice date / value date (optional)
+  if (out.invoice_date) {
+    const d = clean(out.invoice_date)
+    out.invoice_date = /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : (parseDateToken(d, false) || null)
+  } else {
+    out.invoice_date = null
+  }
+  if (out.value_date) {
+    const d = clean(out.value_date)
+    out.value_date = /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : (parseDateToken(d, false) || null)
+  } else {
+    out.value_date = null
+  }
+
   // IBAN
   if (out.iban) {
-    const iban = normalizeIban(out.iban)
-    out.iban = isValidIbanChecksum(iban) ? iban : null
+    const iban0 = normalizeIban(out.iban)
+    const repaired = tryRepairIbanChecksum(iban0)
+    out.iban = repaired || (isValidIbanChecksum(iban0) ? iban0 : null)
   } else {
     out.iban = null
+  }
+
+  // BIC / SWIFT (optional)
+  if (out.bic) {
+    const b = upper(out.bic).replace(/\s+/g, '')
+    out.bic = /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(b) ? b : null
+  } else {
+    out.bic = null
   }
 
   // Reference
@@ -1653,6 +1731,23 @@ function sanitizeFieldsAiOnly(fields) {
   out.purpose = clean(out.purpose) || null
   out.item_name = clean(out.item_name) || null
   if (!out.purpose && out.item_name) out.purpose = out.item_name
+
+  // Optional bank fields (keep as trimmed strings)
+  out.account_number = clean(out.account_number) || null
+  out.routing_number = clean(out.routing_number) || null
+  out.sort_code = clean(out.sort_code) || null
+
+  // If AI extracted non-IBAN banking details but didn't populate payment_details,
+  // synthesize a compact human-readable fallback for clients that only have a single
+  // free-form payment details field.
+  if (!out.payment_details) {
+    const parts = []
+    if (out.bic) parts.push(`BIC: ${out.bic}`)
+    if (out.account_number) parts.push(`Account: ${out.account_number}`)
+    if (out.routing_number) parts.push(`Routing: ${out.routing_number}`)
+    if (out.sort_code) parts.push(`Sort code: ${out.sort_code}`)
+    if (parts.length) out.payment_details = parts.join(' • ')
+  }
 
   // Payment details: keep only if short and non-empty
   if (out.payment_details && typeof out.payment_details === 'string') {
@@ -1687,7 +1782,7 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
   const system =
     'You are a document understanding assistant for invoices and payment slips. Return JSON ONLY. ' +
     'Schema: ' +
-    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|null, "currency": string|null, "due_date": string|null, "iban": string|null, "reference": string|null, "purpose": string|null, "item_name": string|null, ' +
+    '{"supplier": string|null, "creditor_name": string|null, "payer_name": string|null, "invoice_number": string|null, "amount": number|string|null, "currency": string|null, "due_date": string|null, "invoice_date": string|null, "value_date": string|null, "iban": string|null, "reference": string|null, "bic": string|null, "account_number": string|null, "routing_number": string|null, "sort_code": string|null, "purpose": string|null, "item_name": string|null, "payment_details": string|null, ' +
     '"classification": {"is_invoice": boolean|null, "invoice_confidence": number|null, "paid_unpaid": "paid"|"unpaid"|"unknown"|null, "paid_confidence": number|null, "category": "utilities"|"telecom"|"grocery"|"clothing"|"fuel"|"subscription"|"service"|"warranty_product"|"other"|null, "category_confidence": number|null, "reason": string|null } }. ' +
     'Rules: ' +
     '- Extract the issuer/supplier company name only (no labels, no addresses, no emails, no URLs). ' +
@@ -1695,8 +1790,11 @@ async function extractFieldsFromImageWithAI({ base64Image, contentType, language
     '- Do not confuse payer/customer names with supplier/creditor names. ' +
     '- invoice_number must be the invoice/document number. ' +
     '- due_date must be in YYYY-MM-DD. ' +
-    '- amount must be numeric and currency 3-letter code (e.g., EUR). ' +
+    '- invoice_date and value_date must be in YYYY-MM-DD when present. ' +
+    '- amount must be numeric (if unsure, you may return a string like "1,234.56"; it will be sanitized). ' +
+    '- currency must be a 3-letter code (EUR/USD/GBP/CHF/...). Currency may appear as symbols (€, $, £). ' +
     '- Prefer the "amount to pay" / "total" / "za plačilo" amount; avoid VAT-only subtotals. ' +
+    '- Bank details: prefer IBAN for EU/UK/HR/IT/AT/DE; BIC/SWIFT may be present. For US/UK you may see routing/sort code + account number; return those fields when present, otherwise put extra banking details into payment_details. ' +
     '- classification is an inference; confidence values must be between 0 and 1 when provided. ' +
     '- If a value is unclear, return null.'
 
@@ -1932,6 +2030,49 @@ async function renderPdfPagesToPngBuffers(pdfBuffer, { maxPages, density }) {
   return out
 }
 
+// Test-only helper: runs the scanned-PDF raster + AI-vision merge loop with an injected AI function.
+// Never used by the runtime handler; exported via __test for offline validation.
+async function __test_extractScannedPdfAiVision({ pdfBuffer, languageHint, requestId, maxPages = 3, density = 220, aiVisionFn }) {
+  const pages = await renderPdfPagesToPngBuffers(pdfBuffer, { maxPages, density })
+  if (!pages.length) return { ok: false, error: 'pdf_rasterize_failed', pagesRendered: 0, fields: null }
+
+  let merged = {}
+  let anyAi = false
+  let lastError = null
+  let lastDetail = null
+  let classification = null
+
+  for (const p of pages) {
+    const base64 = p.buffer.toString('base64')
+    const aiResult = await aiVisionFn({ base64Image: base64, contentType: 'image/png', languageHint, requestId, page: p.page })
+    const aiError = aiResult && aiResult.error ? aiResult.error : null
+    const aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
+    if (aiResult?.fields) {
+      anyAi = true
+      const fields = sanitizeFieldsAiOnly(aiResult.fields)
+      merged = mergeFieldsPreferFirst(merged, fields)
+      if (!classification && aiResult?.classification) classification = aiResult.classification
+      const missingNow = getMissingKeyFields(merged)
+      if (!missingNow.hasMissing) break
+    } else {
+      lastError = aiError
+      lastDetail = aiDetail
+    }
+  }
+
+  if (!anyAi) {
+    return { ok: false, error: 'ai_scanned_pdf_failed', detail: lastDetail || lastError || null, pagesRendered: pages.length, fields: null }
+  }
+
+  return {
+    ok: true,
+    pagesRendered: pages.length,
+    fields: merged,
+    classification,
+    missing: getMissingKeyFields(merged),
+  }
+}
+
 function mergeFieldsPreferFirst(base, incoming) {
   const out = base && typeof base === 'object' ? { ...base } : {}
   const src = incoming && typeof incoming === 'object' ? incoming : {}
@@ -1953,7 +2094,7 @@ async function visionAnnotateImage({ accessToken, base64Image, timeoutMs = 15000
         ],
         imageContext: {
           // Helps OCR when the bill is Slovenian/English/German/Italian.
-          languageHints: ['sl', 'en', 'de', 'it'],
+          languageHints: ['sl', 'hr', 'en', 'de', 'it'],
         },
       },
     ],
@@ -2076,7 +2217,7 @@ async function visionAnnotatePdf({ accessToken, pdfBuffer, pages, timeoutMs = 20
         inputConfig: { content: base64Pdf, mimeType: 'application/pdf' },
         features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
         pages: requestedPages,
-        imageContext: { languageHints: ['sl', 'en', 'de', 'it'] },
+        imageContext: { languageHints: ['sl', 'hr', 'en', 'de', 'it'] },
       },
     ],
   }
@@ -3625,7 +3766,7 @@ export async function handler(event) {
           }
 
           const missing = getMissingKeyFields(merged)
-          const scanned = { mode: 'pdf_raster_ai', pdf_pages: parsedPdf?.numpages || null, scanned_pages: pages.length }
+          const scanned = { mode: 'pdf_raster_ai', pdf_pages: pdfPages || null, scanned_pages: pages.length }
           const meta = {
             ...buildExtractionMeta('', merged),
             classification: buildClassification({ rawText: '', fields: merged, aiClassification: classification, filename: inputFilename, contentType }),
@@ -3823,29 +3964,65 @@ export async function handler(event) {
       } catch {}
 
       aiAttempted = true
-      const aiResult = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint, requestId })
-      aiError = aiResult && aiResult.error ? aiResult.error : null
-      aiDetail = aiResult && aiResult.detail ? aiResult.detail : null
-      const aiFields = aiResult && aiResult.fields ? aiResult.fields : null
-      if (aiFields) {
-        const fields = sanitizeFieldsAiOnly(aiFields)
-        const missing = getMissingKeyFields(fields)
-        if (!missing.hasMissing) {
-          const classification = buildClassification({ rawText: '', fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType: effectiveContentType })
-          const meta = { ...buildExtractionMeta('', fields), classification, ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: aiDetail } }
-          return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
-        }
-        const classification = buildClassification({ rawText: '', fields, aiClassification: aiResult?.classification, filename: inputFilename, contentType: effectiveContentType })
-        const meta = {
-          ...buildExtractionMeta('', fields),
-          classification,
-          ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError || 'ai_missing_fields', detail: aiDetail, missing: missing.missing },
-        }
-        return jsonResponse(200, { ok: true, rawText: '', fields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision_partial' })
-      } else {
+      const aiResult0 = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint, requestId })
+      aiError = aiResult0 && aiResult0.error ? aiResult0.error : null
+      aiDetail = aiResult0 && aiResult0.detail ? aiResult0.detail : null
+
+      const aiFields0 = aiResult0 && aiResult0.fields ? aiResult0.fields : null
+      if (!aiFields0) {
         console.error('[OCR] AI vision failed.', { error: aiError, detail: aiDetail })
         return jsonResponse(500, { ok: false, error: 'ai_vision_failed', detail: aiDetail || aiError || 'unknown' })
       }
+
+      let bestFields = sanitizeFieldsAiOnly(aiFields0)
+      let bestMissing = getMissingKeyFields(bestFields)
+      let bestClassification = aiResult0?.classification || null
+      let usedEnhancement = false
+
+      // If key fields are missing, retry once with an enhanced image (when sharp is available).
+      // This improves robustness on blurry/low-contrast photos without switching OCR engines.
+      if (bestMissing.hasMissing) {
+        const enhanced = await enhanceImageBase64IfPossible(base64Image)
+        if (enhanced) {
+          const aiResult1 = await extractFieldsFromImageWithAI({ base64Image: enhanced, contentType: effectiveContentType, languageHint, requestId })
+          const aiFields1 = aiResult1 && aiResult1.fields ? aiResult1.fields : null
+          if (aiFields1) {
+            const fields1 = sanitizeFieldsAiOnly(aiFields1)
+            const missing1 = getMissingKeyFields(fields1)
+            // Prefer the attempt that yields fewer missing key fields.
+            if (!missing1.hasMissing || missing1.missing.length < bestMissing.missing.length) {
+              bestFields = fields1
+              bestMissing = missing1
+              bestClassification = aiResult1?.classification || bestClassification
+              usedEnhancement = true
+            }
+          }
+        }
+      }
+
+      if (!bestMissing.hasMissing) {
+        const classification = buildClassification({ rawText: '', fields: bestFields, aiClassification: bestClassification, filename: inputFilename, contentType: effectiveContentType })
+        const meta = {
+          ...buildExtractionMeta('', bestFields),
+          classification,
+          ai: { enabled: isAiOcrEnabled(), attempted: true, error: aiError, detail: usedEnhancement ? 'enhanced_retry_used' : aiDetail },
+        }
+        return jsonResponse(200, { ok: true, rawText: '', fields: bestFields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision' })
+      }
+
+      const classification = buildClassification({ rawText: '', fields: bestFields, aiClassification: bestClassification, filename: inputFilename, contentType: effectiveContentType })
+      const meta = {
+        ...buildExtractionMeta('', bestFields),
+        classification,
+        ai: {
+          enabled: isAiOcrEnabled(),
+          attempted: true,
+          error: aiError || 'ai_missing_fields',
+          detail: usedEnhancement ? 'enhanced_retry_used' : aiDetail,
+          missing: bestMissing.missing,
+        },
+      }
+      return jsonResponse(200, { ok: true, rawText: '', fields: bestFields, meta, ai: true, aiModel: resolveModel(), aiTier: 'vision', mode: 'ai_vision_partial' })
     }
 
     if (!googleVisionEnabled) {
@@ -3892,7 +4069,7 @@ export async function handler(event) {
             {
               image: { content: base64Image },
               features: [{ type: 'DOCUMENT_TEXT_DETECTION' }, { type: 'TEXT_DETECTION' }],
-              imageContext: { languageHints: ['sl', 'en', 'de', 'it'] },
+              imageContext: { languageHints: ['sl', 'hr', 'en', 'de', 'it'] },
             },
           ],
         }
@@ -3928,7 +4105,7 @@ export async function handler(event) {
                 {
                   image: { content: enhanced },
                   features: [{ type: 'DOCUMENT_TEXT_DETECTION' }, { type: 'TEXT_DETECTION' }],
-                  imageContext: { languageHints: ['sl', 'en', 'de', 'it'] },
+                  imageContext: { languageHints: ['sl', 'hr', 'en', 'de', 'it'] },
                 },
               ],
             }
@@ -4063,6 +4240,17 @@ export async function handler(event) {
   } catch (err) {
     return jsonResponse(500, { ok: false, step: 'catch', error: 'unhandled_exception', detail: safeDetailFromError(err) })
   }
+}
+
+// Internal test hooks (not used by runtime code). Kept minimal and stable.
+export const __test = {
+  sanitizeFieldsAiOnly,
+  parseMoneyAmountLoose,
+  mapCurrencyLoose,
+  tryRepairIbanChecksum,
+  parsePdfText,
+  renderPdfPagesToPngBuffers,
+  __test_extractScannedPdfAiVision,
 }
 
 // Exported for unit tests (pure helpers; safe to import without invoking handler).
