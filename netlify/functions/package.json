@@ -2,6 +2,7 @@
   "name": "billbox-netlify-functions",
   "private": true,
   "description": "Dependencies for Netlify Functions only (kept separate from monorepo workspaces).",
+  "type": "module",
   "engines": {
     "node": "20.x",
     "npm": "10.x"

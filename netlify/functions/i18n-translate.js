@@ -29,7 +29,7 @@ function safeParse(body) {
   }
 }
 
-exports.handler = async (event) => {
+export async function handler(event) {
   if (event.httpMethod !== 'POST') {
     return json(405, { error: 'Method not allowed' })
   }

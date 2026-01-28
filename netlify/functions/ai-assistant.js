@@ -1,7 +1,7 @@
 // Minimal Netlify Function: AI assistant endpoint.
 // IMPORTANT: Keep API keys on the server only.
 
-const { createClient } = require('@supabase/supabase-js')
+import { createClient } from '@supabase/supabase-js'
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
@@ -69,7 +69,7 @@ function safeParse(body) {
   }
 }
 
-exports.handler = async (event) => {
+export async function handler(event) {
   if (event.httpMethod !== 'POST') {
     return json(405, { error: 'Method not allowed' })
   }
