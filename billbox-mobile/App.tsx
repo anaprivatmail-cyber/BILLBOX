@@ -12534,10 +12534,10 @@ function ProfileRenameGate() {
 function MainTabs() {
   const insets = useSafeAreaInsets()
   const bottomInset = Math.max(insets.bottom, 0)
-  // Keep the bar visually tight while still respecting safe-area.
-  // Minimum padding avoids icon clipping on Android gesture/nav bars.
-  const bottomPadding = Math.max(bottomInset, 8)
-  const barHeight = 46 + bottomPadding
+  // Ensure icons/labels are never clipped by system navigation bars.
+  // Keep a generous minimum padding on Android where insets can be reported as 0.
+  const bottomPadding = Math.max(bottomInset, 12)
+  const barHeight = 62 + bottomPadding
   const { lang } = useLangContext()
 
   return (
@@ -12565,7 +12565,7 @@ function MainTabs() {
             borderTopColor: 'transparent',
             borderTopWidth: 0,
             backgroundColor: themeColors.surface,
-            paddingTop: 4,
+            paddingTop: 8,
             paddingBottom: bottomPadding,
             height: barHeight,
           },
@@ -12574,6 +12574,9 @@ function MainTabs() {
             fontWeight: '600',
             marginTop: 0,
             marginBottom: 0,
+          },
+          tabBarItemStyle: {
+            paddingVertical: 6,
           },
           tabBarIconStyle: {
             marginTop: 0,
@@ -12589,22 +12592,8 @@ function MainTabs() {
 
             const iconName = icons[route.name] ?? 'ellipse-outline'
             const iconSize = route.name === 'Scan' ? 28 : 26
-            const showPill = route.name !== 'Scan'
             return (
-              <View
-                style={
-                  showPill
-                    ? {
-                      paddingHorizontal: 10,
-                      paddingVertical: 2,
-                      borderRadius: 14,
-                      backgroundColor: focused ? themeColors.primarySoft : 'transparent',
-                    }
-                    : undefined
-                }
-              >
-                <Ionicons name={iconName} size={iconSize} color={color} />
-              </View>
+              <Ionicons name={iconName} size={iconSize} color={color} />
             )
           },
         })}
