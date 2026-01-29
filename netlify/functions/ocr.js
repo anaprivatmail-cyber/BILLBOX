@@ -1939,7 +1939,7 @@ function jsonResponse(statusCode, payload) {
   }
 }
 
-async function enhanceImageBase64IfPossible(base64Image) {
+async function enhanceImageBase64IfPossible(base64Image, opts = {}) {
   // Optional dependency: keep tests/lightweight environments working without native modules.
   let sharp
   try {
@@ -1948,17 +1948,37 @@ async function enhanceImageBase64IfPossible(base64Image) {
   } catch {
     return null
   }
+
+  const mode = (opts && typeof opts.mode === 'string') ? opts.mode : 'mild'
+
   try {
     const input = Buffer.from(String(base64Image || ''), 'base64')
     if (!input || input.length < 16) return null
-    const outBuf = await sharp(input)
+
+    // IMPORTANT: allow upscaling for small/low-res photos (common OCR failure mode).
+    // We cap the target width to avoid excessive memory/time in serverless.
+    const targetWidth = mode === 'strong' ? 3000 : 2600
+    const quality = mode === 'strong' ? 95 : 92
+    const kernel = sharp?.kernel?.lanczos3 || undefined
+
+    let img = sharp(input)
       .rotate() // auto-orient
-      .resize({ width: 2000, withoutEnlargement: true })
+      .resize({ width: targetWidth, fit: 'inside', withoutEnlargement: false, kernel })
       .grayscale()
       .normalize()
-      .sharpen()
-      .jpeg({ quality: 92, mozjpeg: true })
+
+    // Mild: normalize + sharpen.
+    // Strong: add a bit of contrast/brightness push (helps faint/low-contrast prints).
+    if (mode === 'strong') {
+      img = img.linear(1.25, -18).sharpen({ sigma: 1.4 })
+    } else {
+      img = img.sharpen()
+    }
+
+    const outBuf = await img
+      .jpeg({ quality, mozjpeg: true })
       .toBuffer()
+
     return outBuf && outBuf.length ? outBuf.toString('base64') : null
   } catch {
     return null
@@ -3936,7 +3956,7 @@ export async function handler(event) {
       // If preferQr=true, attempt local QR decode first (bank-app behavior).
       if (preferQr) {
         const qrText0 = await tryDecodeQrFromBase64Image(base64Image)
-        const qrText = qrText0 || (await tryDecodeQrFromBase64Image(await enhanceImageBase64IfPossible(base64Image)))
+        const qrText = qrText0 || (await tryDecodeQrFromBase64Image(await enhanceImageBase64IfPossible(base64Image, { mode: 'strong' })))
         if (qrText) {
           const parsedQr = parsePaymentQR_QR(qrText)
           if (parsedQr) {
@@ -3978,11 +3998,26 @@ export async function handler(event) {
       } catch {}
 
       aiAttempted = true
-      const aiResult0 = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint, requestId })
+      let aiResult0 = await extractFieldsFromImageWithAI({ base64Image, contentType: effectiveContentType, languageHint, requestId })
       aiError = aiResult0 && aiResult0.error ? aiResult0.error : null
       aiDetail = aiResult0 && aiResult0.detail ? aiResult0.detail : null
 
-      const aiFields0 = aiResult0 && aiResult0.fields ? aiResult0.fields : null
+      let aiFields0 = aiResult0 && aiResult0.fields ? aiResult0.fields : null
+      if (!aiFields0) {
+        // First attempt may fail entirely on very blurry/low-res images.
+        // Retry once with a stronger enhancement before returning an error.
+        const enhancedStrong = await enhanceImageBase64IfPossible(base64Image, { mode: 'strong' })
+        if (enhancedStrong) {
+          const aiRetry = await extractFieldsFromImageWithAI({ base64Image: enhancedStrong, contentType: effectiveContentType, languageHint, requestId })
+          if (aiRetry?.fields) {
+            aiResult0 = aiRetry
+            aiFields0 = aiRetry.fields
+            aiError = aiRetry && aiRetry.error ? aiRetry.error : aiError
+            aiDetail = aiRetry && aiRetry.detail ? aiRetry.detail : aiDetail
+          }
+        }
+      }
+
       if (!aiFields0) {
         console.error('[OCR] AI vision failed.', { error: aiError, detail: aiDetail })
         return jsonResponse(500, { ok: false, error: 'ai_vision_failed', detail: aiDetail || aiError || 'unknown' })
@@ -3993,21 +4028,37 @@ export async function handler(event) {
       let bestClassification = aiResult0?.classification || null
       let usedEnhancement = false
 
-      // If key fields are missing, retry once with an enhanced image (when sharp is available).
+      // If key fields are missing, retry with enhanced images (when sharp is available).
       // This improves robustness on blurry/low-contrast photos without switching OCR engines.
       if (bestMissing.hasMissing) {
-        const enhanced = await enhanceImageBase64IfPossible(base64Image)
-        if (enhanced) {
+        const tryEnhanced = async (mode) => {
+          const enhanced = await enhanceImageBase64IfPossible(base64Image, { mode })
+          if (!enhanced) return null
           const aiResult1 = await extractFieldsFromImageWithAI({ base64Image: enhanced, contentType: effectiveContentType, languageHint, requestId })
           const aiFields1 = aiResult1 && aiResult1.fields ? aiResult1.fields : null
-          if (aiFields1) {
-            const fields1 = sanitizeFieldsAiOnly(aiFields1)
-            const missing1 = getMissingKeyFields(fields1)
-            // Prefer the attempt that yields fewer missing key fields.
-            if (!missing1.hasMissing || missing1.missing.length < bestMissing.missing.length) {
-              bestFields = fields1
-              bestMissing = missing1
-              bestClassification = aiResult1?.classification || bestClassification
+          if (!aiFields1) return null
+          const fields1 = sanitizeFieldsAiOnly(aiFields1)
+          const missing1 = getMissingKeyFields(fields1)
+          return { fields1, missing1, classification: aiResult1?.classification || null }
+        }
+
+        const mild = await tryEnhanced('mild')
+        if (mild) {
+          if (!mild.missing1.hasMissing || mild.missing1.missing.length < bestMissing.missing.length) {
+            bestFields = mild.fields1
+            bestMissing = mild.missing1
+            bestClassification = mild.classification || bestClassification
+            usedEnhancement = true
+          }
+        }
+
+        if (bestMissing.hasMissing) {
+          const strong = await tryEnhanced('strong')
+          if (strong) {
+            if (!strong.missing1.hasMissing || strong.missing1.missing.length < bestMissing.missing.length) {
+              bestFields = strong.fields1
+              bestMissing = strong.missing1
+              bestClassification = strong.classification || bestClassification
               usedEnhancement = true
             }
           }
@@ -4109,31 +4160,43 @@ export async function handler(event) {
       const firstBarcodes = first?.barcodeAnnotations
       const seemsWeak = (!preferQr || !firstBarcodes || !Array.isArray(firstBarcodes) || firstBarcodes.length === 0) && String(firstText || '').trim().length < 80
       if (seemsWeak) {
-        const enhanced = await enhanceImageBase64IfPossible(base64Image)
-        if (enhanced) {
+        const tryVisionWithEnhanced = async (mode) => {
+          const enhanced = await enhanceImageBase64IfPossible(base64Image, { mode })
+          if (!enhanced) return null
           if (preferQr) {
-            rawEnhanced = await visionAnnotateImage({ accessToken, base64Image: enhanced, timeoutMs: 15000 })
-          } else {
-            const payload = {
-              requests: [
-                {
-                  image: { content: enhanced },
-                  features: [{ type: 'DOCUMENT_TEXT_DETECTION' }, { type: 'TEXT_DETECTION' }],
-                  imageContext: { languageHints: ['sl', 'hr', 'en', 'de', 'it'] },
-                },
-              ],
-            }
-            const controller = new AbortController()
-            const timeout = setTimeout(() => controller.abort(), 15000)
-            const resp = await fetch('https://vision.googleapis.com/v1/images:annotate', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
-              signal: controller.signal,
-            })
-            clearTimeout(timeout)
-            if (resp.ok) rawEnhanced = await resp.json()
+            return await visionAnnotateImage({ accessToken, base64Image: enhanced, timeoutMs: 15000 })
           }
+          const payload = {
+            requests: [
+              {
+                image: { content: enhanced },
+                features: [{ type: 'DOCUMENT_TEXT_DETECTION' }, { type: 'TEXT_DETECTION' }],
+                imageContext: { languageHints: ['sl', 'hr', 'en', 'de', 'it'] },
+              },
+            ],
+          }
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 15000)
+          const resp = await fetch('https://vision.googleapis.com/v1/images:annotate', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          })
+          clearTimeout(timeout)
+          if (!resp.ok) return null
+          return await resp.json()
+        }
+
+        // Mild first, then strong if still weak.
+        rawEnhanced = await tryVisionWithEnhanced('mild')
+        const b0 = rawEnhanced?.responses?.[0]
+        const bText = (b0?.fullTextAnnotation?.text || b0?.textAnnotations?.[0]?.description || '').trim()
+        const bBar = Array.isArray(b0?.barcodeAnnotations) ? b0.barcodeAnnotations.length : 0
+        const stillWeak = (!preferQr || bBar === 0) && bText.length < 120
+        if (stillWeak) {
+          const rawEnhancedStrong = await tryVisionWithEnhanced('strong')
+          if (rawEnhancedStrong) rawEnhanced = rawEnhancedStrong
         }
       }
     } catch (e) {

@@ -2629,6 +2629,7 @@ function BillDetailsScreen() {
               label={tr('View linked warranty')}
               variant="secondary"
               iconName="shield-checkmark-outline"
+              style={{ marginTop: themeSpacing.sm }}
               onPress={() => navigation.navigate('Warranty Details', { warrantyId: linkedWarranty.id })}
             />
           ) : (
@@ -2636,6 +2637,7 @@ function BillDetailsScreen() {
               label={tr('Create warranty from this bill')}
               variant="secondary"
               iconName="shield-checkmark-outline"
+              style={{ marginTop: themeSpacing.sm }}
               onPress={async () => {
                 try {
                   // Enforce 1:1 rule (one bill -> max one warranty)
@@ -2796,12 +2798,12 @@ function BillDetailsScreen() {
                   style: 'destructive',
                   onPress: async () => {
                     try {
-                      await deleteAllAttachmentsForRecord(spaceId, 'bills', bill.id)
+                      await deleteAllAttachmentsForRecord(effectiveSpaceId, 'bills', bill.id)
                       if (supabase) {
-                        const { error } = await deleteBill(supabase, bill.id, spaceId)
+                        const { error } = await deleteBill(supabase, bill.id, effectiveSpaceId)
                         if (error) throw error
                       } else {
-                        await deleteLocalBill(spaceId, bill.id)
+                        await deleteLocalBill(effectiveSpaceId, bill.id)
                       }
                       Alert.alert(tr('Deleted'), tr('Bill removed.'))
                       navigation.goBack()
@@ -3782,16 +3784,142 @@ function ScanBillScreen() {
     const raw = String(text || '')
     const all = new Set<string>()
     const add = (s: string) => { if (s) all.add(s) }
+
+    const computeIbanChecksumDigits = (countryCode: string, bban: string): string | null => {
+      const cc = String(countryCode || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2)
+      const b = String(bban || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+      if (!/^[A-Z]{2}$/.test(cc)) return null
+      if (!b) return null
+
+      // IBAN checksum calculation: place country+"00" at end, convert letters to numbers, mod 97.
+      const rearranged = `${b}${cc}00`
+      let remainder = 0
+      for (let i = 0; i < rearranged.length; i++) {
+        const ch = rearranged[i]
+        const code = ch.charCodeAt(0)
+        if (code >= 48 && code <= 57) {
+          remainder = (remainder * 10 + (code - 48)) % 97
+        } else {
+          const val = code - 55
+          remainder = (remainder * 100 + val) % 97
+        }
+      }
+      const checksum = 98 - remainder
+      if (!Number.isFinite(checksum) || checksum <= 0 || checksum >= 100) return null
+      return String(checksum).padStart(2, '0')
+    }
+
+    const tryBuildIbanFromMissingChecksum = (candidate: string): string | null => {
+      const norm = normalizeIban(candidate)
+      if (!norm) return null
+      const cc = norm.slice(0, 2)
+      const expected = IBAN_LENGTHS[cc]
+      if (!expected) return null
+      // If the document omits the 2 checksum digits, we may get CC + BBAN (expected - 2 chars).
+      if (norm.length !== expected - 2) return null
+      const bban = norm.slice(2)
+      if (!/^[A-Z0-9]+$/.test(bban)) return null
+      const chk = computeIbanChecksumDigits(cc, bban)
+      if (!chk) return null
+      const built = `${cc}${chk}${bban}`
+      return isValidIbanChecksum(built) ? built : null
+    }
+
+    const tryBuildSloveniaIbanFromBbanDigits = (digits: string): string | null => {
+      const bbanDigits = String(digits || '').replace(/\D/g, '')
+      // Slovenia BBAN is 15 digits; IBAN is SI + 2 checksum + 15 digits (= 19 chars).
+      if (bbanDigits.length !== 15) return null
+      const chk = computeIbanChecksumDigits('SI', bbanDigits)
+      if (!chk) return null
+      const built = `SI${chk}${bbanDigits}`
+      return isValidIbanChecksum(built) ? built : null
+    }
+
+    const extractAccountLikeCandidates = (): string[] => {
+      const out: string[] = []
+      const lines = raw
+        .replace(/\r/g, '')
+        .split(/\n+/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+
+      const labelRe = /(\biban\b|\btrr\b|bank\s*account|account\s*(?:no\.?|number)?|\bra\u010dun\b|\bracun\b)/i
+      const grabFromLine = (l: string) => {
+        // Allow spaces and separators; we later normalize.
+        const m = String(l || '').match(/([A-Z]{2}\s*[0-9A-Z\s\-]{9,40}|\d[\d\s\-]{12,30})/i)
+        if (m?.[1]) out.push(String(m[1]))
+      }
+
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i]
+        if (!labelRe.test(l)) continue
+        grabFromLine(l)
+        const next = lines[i + 1]
+        if (next) grabFromLine(next)
+      }
+      return out
+    }
+
     const matches = raw.match(/\b[A-Z]{2}\d{2}(?:\s*[A-Z0-9]){11,34}\b/g) || []
     for (const m of matches) {
       const cand = normalizeIban(m)
-      if (cand && isValidIbanChecksum(cand)) add(cand)
+      if (!cand) continue
+      if (isValidIbanChecksum(cand)) add(cand)
+      else {
+        const repaired = tryRepairIbanChecksum(cand)
+        if (repaired) add(repaired)
+      }
     }
+
+    // Some invoices provide pay-to account without checksum digits or without the SI prefix.
+    // Try to rebuild a valid IBAN from labeled account/TRR lines.
+    for (const acct of extractAccountLikeCandidates()) {
+      const builtMissingChecksum = tryBuildIbanFromMissingChecksum(acct)
+      if (builtMissingChecksum) add(builtMissingChecksum)
+
+      const norm = normalizeIban(acct)
+      if (norm && norm.startsWith('SI') && /^SI\d{15}$/.test(norm)) {
+        const built = tryBuildSloveniaIbanFromBbanDigits(norm.slice(2))
+        if (built) add(built)
+      }
+
+      const digitsOnly = String(acct || '').replace(/\D/g, '')
+      const builtSi = tryBuildSloveniaIbanFromBbanDigits(digitsOnly)
+      if (builtSi) add(builtSi)
+    }
+
     if (rawIban) {
       const cand = normalizeIban(rawIban)
       if (cand && isValidIbanChecksum(cand)) add(cand)
+      else {
+        const repaired = tryRepairIbanChecksum(rawIban)
+        if (repaired) add(repaired)
+        const built = tryBuildIbanFromMissingChecksum(rawIban)
+        if (built) add(built)
+      }
     }
     return Array.from(all)
+  }
+
+  function tryRepairIbanChecksum(input: string): string | null {
+    const iban = normalizeIban(input)
+    if (!iban) return null
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,34}$/.test(iban)) return null
+    if (isValidIbanChecksum(iban)) return iban
+
+    // Common OCR confusions.
+    const repaired = iban
+      .slice(0, 2) +
+      iban
+        .slice(2)
+        .replace(/O/g, '0')
+        .replace(/[IL]/g, '1')
+        .replace(/S/g, '5')
+        .replace(/B/g, '8')
+        .replace(/Z/g, '2')
+
+    if (repaired !== iban && isValidIbanChecksum(repaired)) return repaired
+    return null
   }
 
   function detectCurrencyFromText(rawText: string, ibanCandidate?: string): string {
@@ -4291,41 +4419,34 @@ function ScanBillScreen() {
     }
 
     // Bank-level rule: do not guess critical payment fields.
-    // Only map payment details when explicitly marked for payment.
+    // Prefer an explicit IBAN coming from the backend (even when multiple candidates exist).
+    const preferredIban = allowPaymentFields && rawIban ? (tryRepairIbanChecksum(rawIban) || null) : null
     const ibanCandidates = allowPaymentFields ? extractIbanCandidates(rawText || '', rawIban) : []
-    if (allowPaymentFields) {
-      if (ibanCandidates.length > 1) {
-        setIbanOptions(ibanCandidates)
-        setIbanPickerVisible(true)
-      }
-      if (ibanCandidates.length === 1) {
-        if (canSetField('iban', ibanCandidates[0], editedRef.current.iban, iban)) {
-          setIban(ibanCandidates[0])
-          markFieldSource('iban')
-        }
-      }
-      if (ibanCandidates.length === 0 && !editedRef.current.iban && !iban.trim()) {
-        setIbanHint(tr('IBAN not found.'))
-      }
-    }
-    const foundIban = ibanCandidates.length === 1 ? ibanCandidates[0] : null
+    const foundIban = preferredIban || (ibanCandidates.length === 1 ? ibanCandidates[0] : null)
+
     if (allowPaymentFields && ibanCandidates.length) {
       console.log('[OCR] IBAN candidates:', ibanCandidates)
     }
+
     if (allowPaymentFields) {
-      if (isAiOnly && rawIban) {
-        const rawNorm = normalizeIban(rawIban)
-        if (rawNorm && canSetField('iban', rawNorm, editedRef.current.iban, iban)) {
-          setIban(rawNorm)
-          markFieldSource('iban')
-        }
-      } else if (foundIban) {
+      if (foundIban) {
         if (canSetField('iban', foundIban, editedRef.current.iban, iban)) {
           setIban(foundIban)
           markFieldSource('iban')
         }
-      } else if (rawIban) {
-        warnings.push(tr('IBAN could not be validated. Please check it.'))
+        setIbanPickerVisible(false)
+        setIbanOptions([])
+      } else {
+        if (ibanCandidates.length > 1 && !editedRef.current.iban && !iban.trim()) {
+          setIbanOptions(ibanCandidates)
+          setIbanPickerVisible(true)
+        }
+        if (ibanCandidates.length === 0 && !editedRef.current.iban && !iban.trim()) {
+          setIbanHint(tr('IBAN not found.'))
+        }
+        if (rawIban) {
+          warnings.push(tr('IBAN could not be validated. Please check it.'))
+        }
       }
     }
 
@@ -4770,7 +4891,8 @@ function ScanBillScreen() {
       if (typeof cat === 'string' && cat) setCategory(cat)
 
       const isInvoice = (classification as any)?.isInvoice
-      if (isInvoice === false && (clsConf == null || clsConf >= 0.7)) {
+      const billLikeOverride = /(predra\u010dun|predracun|proforma|pro\s*forma|proforma\s*rechnung|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b|\bestimate\b|devis|preventivo|\bofferta\b|\bp\u0159edra\u010dun\b|\bpr\u00e9facture\b)/i.test(raw)
+      if (isInvoice === false && (clsConf == null || clsConf >= 0.7) && !billLikeOverride) {
         Alert.alert(tr('Inbox'), tr('This looks like a non-bill document. Please verify before saving.'))
       } else if (clsConf != null && clsConf < 0.55) {
         Alert.alert(tr('Scan'), tr('AI is not fully confident. Please verify the details.'))
@@ -6339,8 +6461,11 @@ function InboxScreen() {
             const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
 
             const isInvoice = classification?.isInvoice
-            const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7)
-            const treatAsInvoice = isInvoice === true || (!treatAsNotInvoice && hasBasicAmount)
+            const billLikeOverride = /(predra\u010dun|predracun|proforma|pro\s*forma|proforma\s*rechnung|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b|\bestimate\b|devis|preventivo|\bofferta\b|\bp\u0159edra\u010dun\b|\bpr\u00e9facture\b)/i.test(String(rawText || ''))
+              || /(predra\u010dun|predracun|proforma|pro\s*forma|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b)/i.test(classifierText)
+
+            const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7) && !billLikeOverride
+            const treatAsInvoice = isInvoice === true || billLikeOverride || (!treatAsNotInvoice && hasBasicAmount)
 
             let nextStatus: any = it.status || 'new'
             if (treatAsNotInvoice) nextStatus = it.status || 'new'
@@ -6463,8 +6588,11 @@ function InboxScreen() {
         const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
 
         const isInvoice = classification?.isInvoice
-        const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7)
-        const treatAsInvoice = isInvoice === true || (!treatAsNotInvoice && hasBasicAmount)
+        const billLikeOverride = /(predra\u010dun|predracun|proforma|pro\s*forma|proforma\s*rechnung|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b|\bestimate\b|devis|preventivo|\bofferta\b|\bp\u0159edra\u010dun\b|\bpr\u00e9facture\b)/i.test(String(rawText || ''))
+          || /(predra\u010dun|predracun|proforma|pro\s*forma|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b)/i.test(classifierText)
+
+        const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7) && !billLikeOverride
+        const treatAsInvoice = isInvoice === true || billLikeOverride || (!treatAsNotInvoice && hasBasicAmount)
 
         let nextStatus: any = 'new'
         if (treatAsNotInvoice) nextStatus = item.status || 'new'
@@ -12407,8 +12535,9 @@ function MainTabs() {
   const insets = useSafeAreaInsets()
   const bottomInset = Math.max(insets.bottom, 0)
   // Keep the bar visually tight while still respecting safe-area.
-  // A small minimum bottom padding prevents icon clipping on Android.
-  const bottomPadding = bottomInset > 0 ? Math.max(bottomInset - 4, 0) : 6
+  // Minimum padding avoids icon clipping on Android gesture/nav bars.
+  const bottomPadding = Math.max(bottomInset, 8)
+  const barHeight = 46 + bottomPadding
   const { lang } = useLangContext()
 
   return (
@@ -12436,9 +12565,9 @@ function MainTabs() {
             borderTopColor: 'transparent',
             borderTopWidth: 0,
             backgroundColor: themeColors.surface,
-            paddingTop: 6,
+            paddingTop: 4,
             paddingBottom: bottomPadding,
-            height: 50 + bottomPadding,
+            height: barHeight,
           },
           tabBarLabelStyle: {
             fontSize: 10,
