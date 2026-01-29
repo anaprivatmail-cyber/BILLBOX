@@ -7307,6 +7307,32 @@ function BillsListScreen() {
     setStatusFilter(value ? 'unpaid' : 'all')
   }, [])
 
+  useEffect(() => {
+    const preset = (route as any)?.params?.filterPreset
+    if (!preset || typeof preset !== 'object') return
+
+    if (typeof preset.supplierQuery === 'string') setSupplierQuery(preset.supplierQuery)
+    if (typeof preset.amountMin === 'string') setAmountMin(preset.amountMin)
+    if (typeof preset.amountMax === 'string') setAmountMax(preset.amountMax)
+    if (typeof preset.dateMode === 'string') setDateMode(preset.dateMode)
+    if (typeof preset.dateFrom === 'string') setDateFrom(preset.dateFrom)
+    if (typeof preset.dateTo === 'string') setDateTo(preset.dateTo)
+    if (typeof preset.hasAttachmentsOnly === 'boolean') setHasAttachmentsOnly(preset.hasAttachmentsOnly)
+    if (typeof preset.includeArchived === 'boolean') setIncludeArchived(preset.includeArchived)
+    if (typeof preset.overdueOnly === 'boolean') setOverdueOnly(preset.overdueOnly)
+
+    if (typeof preset.unpaidOnly === 'boolean') handleUnpaidToggle(preset.unpaidOnly)
+    if (typeof preset.statusFilter === 'string') handleStatusChange(preset.statusFilter)
+    if (typeof preset.filtersExpanded === 'boolean') setFiltersExpanded(preset.filtersExpanded)
+    else setFiltersExpanded(false)
+
+    requestAnimationFrame(() => {
+      try { listRef.current?.scrollToOffset({ offset: 0, animated: true }) } catch {}
+    })
+
+    navigation.setParams?.({ filterPreset: null })
+  }, [handleStatusChange, handleUnpaidToggle, navigation, route])
+
   const openDatePicker = useCallback((field: 'from' | 'to') => {
     const current = parseDateValue(field === 'from' ? dateFrom : dateTo) || new Date()
     if (Platform.OS === 'android') {
@@ -8809,28 +8835,95 @@ function HomeScreen() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 borderWidth: StyleSheet.hairlineWidth,
-                borderColor: '#DDD6FE',
-                backgroundColor: '#5B21B6',
+                borderColor: colors.border,
+                backgroundColor: colors.surface,
               }}
               accessibilityLabel={tr('Home summary settings')}
             >
-              <Ionicons name="options-outline" size={18} color="#FFFFFF" />
+              <Ionicons name="options-outline" size={18} color={themeColors.primary} />
             </TouchableOpacity>
           </View>
 
           <View style={styles.homeMetricsRow}>
-            <View style={[styles.homeMetricCard, styles.homeMetricCardUnpaid]}>
+            <Pressable
+              onPress={() => {
+                navigation.navigate('Bills', {
+                  filterPreset: {
+                    supplierQuery: '',
+                    amountMin: '',
+                    amountMax: '',
+                    dateMode: 'due',
+                    dateFrom: '',
+                    dateTo: '',
+                    statusFilter: 'unpaid',
+                    unpaidOnly: true,
+                    overdueOnly: false,
+                    hasAttachmentsOnly: false,
+                    includeArchived: false,
+                    filtersExpanded: false,
+                  },
+                })
+              }}
+              style={({ pressed }) => [styles.homeMetricCard, styles.homeMetricCardUnpaid, pressed && { opacity: 0.92 }]}
+              hitSlop={8}
+            >
               <Text style={styles.homeMetricValue} numberOfLines={1}>{totalUnpaidValue}</Text>
               <Text style={styles.homeMetricLabel}>{tr('Total unpaid')}</Text>
-            </View>
-            <View style={[styles.homeMetricCard, styles.homeMetricCardOverdue]}>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                navigation.navigate('Bills', {
+                  filterPreset: {
+                    supplierQuery: '',
+                    amountMin: '',
+                    amountMax: '',
+                    dateMode: 'due',
+                    dateFrom: '',
+                    dateTo: '',
+                    statusFilter: 'unpaid',
+                    unpaidOnly: true,
+                    overdueOnly: true,
+                    hasAttachmentsOnly: false,
+                    includeArchived: false,
+                    filtersExpanded: false,
+                  },
+                })
+              }}
+              style={({ pressed }) => [styles.homeMetricCard, styles.homeMetricCardOverdue, pressed && { opacity: 0.92 }]}
+              hitSlop={8}
+            >
               <Text style={styles.homeMetricValue} numberOfLines={1}>{overdueValue}</Text>
               <Text style={styles.homeMetricLabel}>{tr('Overdue')}</Text>
-            </View>
-            <View style={[styles.homeMetricCard, styles.homeMetricCardNext]}>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                const next = String(activeSummary?.nextDueDate || '').trim()
+                const isIso = /^\d{4}-\d{2}-\d{2}$/.test(next)
+                navigation.navigate('Bills', {
+                  filterPreset: {
+                    supplierQuery: '',
+                    amountMin: '',
+                    amountMax: '',
+                    dateMode: 'due',
+                    dateFrom: isIso ? next : '',
+                    dateTo: isIso ? next : '',
+                    statusFilter: 'unpaid',
+                    unpaidOnly: true,
+                    overdueOnly: false,
+                    hasAttachmentsOnly: false,
+                    includeArchived: false,
+                    filtersExpanded: false,
+                  },
+                })
+              }}
+              style={({ pressed }) => [styles.homeMetricCard, styles.homeMetricCardNext, pressed && { opacity: 0.92 }]}
+              hitSlop={8}
+            >
               <Text style={styles.homeMetricValue} numberOfLines={1}>{nextDueValue}</Text>
               <Text style={styles.homeMetricLabel}>{tr('Next due date')}</Text>
-            </View>
+            </Pressable>
           </View>
 
           <View style={{ marginTop: themeSpacing.sm }}>
