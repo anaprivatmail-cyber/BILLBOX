@@ -39,7 +39,24 @@ function planConfigFromProduct(productId) {
   return null
 }
 
+async function isCompOverrideUser(supabase, userId) {
+  if (!supabase || !userId) return false
+  try {
+    const { data, error } = await supabase
+      .from('entitlements')
+      .select('*')
+      .eq('user_id', userId)
+      .limit(1)
+      .maybeSingle()
+    if (error) return false
+    return Boolean(data?.is_comp) || String(data?.subscription_source || '').trim().toLowerCase() === 'comp'
+  } catch {
+    return false
+  }
+}
+
 async function activateEntitlementsForIap(supabase, userId, productId, platform) {
+  if (await isCompOverrideUser(supabase, userId)) return
   const cfg = planConfigFromProduct(productId)
   if (!cfg) throw new Error('unknown_product')
 

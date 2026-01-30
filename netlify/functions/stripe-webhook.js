@@ -41,8 +41,25 @@ function toBuffer(event) {
   return Buffer.from(event.body || '')
 }
 
+async function isCompOverrideUser(supabase, userId) {
+  if (!supabase || !userId) return false
+  try {
+    const { data, error } = await supabase
+      .from('entitlements')
+      .select('*')
+      .eq('user_id', userId)
+      .limit(1)
+      .maybeSingle()
+    if (error) return false
+    return Boolean(data?.is_comp) || String(data?.subscription_source || '').trim().toLowerCase() === 'comp'
+  } catch {
+    return false
+  }
+}
+
 async function updateEntitlementsStatus(supabase, userId, patch) {
   if (!supabase || !userId) return
+  if (await isCompOverrideUser(supabase, userId)) return
   const payload = { ...patch, updated_at: new Date().toISOString() }
   await supabase.from('entitlements').update(payload).eq('user_id', userId)
 }
@@ -56,6 +73,7 @@ function planConfig(plan) {
 }
 
 async function activateEntitlements(supabase, userId, plan) {
+  if (await isCompOverrideUser(supabase, userId)) return
   const cfg = planConfig(plan)
   const nowIso = new Date().toISOString()
   let prevPlan = null

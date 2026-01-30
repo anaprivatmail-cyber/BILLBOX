@@ -113,6 +113,8 @@ export async function handler() {
     for (const row of rows || []) {
       const userId = row.user_id
       const status = String(row.status || '').trim().toLowerCase()
+      const isComp = Boolean(row?.is_comp) || String(row?.subscription_source || '').trim().toLowerCase() === 'comp'
+      if (isComp) continue
       const graceUntil = row.grace_until ? new Date(row.grace_until) : null
       const exportUntil = row.export_until ? new Date(row.export_until) : null
       const deleteAt = row.delete_at ? new Date(row.delete_at) : null

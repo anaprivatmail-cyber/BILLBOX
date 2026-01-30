@@ -36,6 +36,7 @@ async function getUserFromAuthHeader(event) {
 }
 
 function normalizeEntitlements(row) {
+  const isComp = Boolean(row?.is_comp) || String(row?.subscription_source || '').trim().toLowerCase() === 'comp'
   const plan = String(row?.plan || 'free')
   const spaceId = row?.space_id ? String(row.space_id) : null
   const spaceId2 = row?.space_id2 ? String(row.space_id2) : (row?.space_id_2 ? String(row.space_id_2) : null)
@@ -67,6 +68,14 @@ function normalizeEntitlements(row) {
     effectivePlan = 'free'
     effectiveExportsEnabled = false
     effectiveCanUseOcr = false
+  } else if (isComp) {
+    // Admin/comp override: permanent Pro/Več access that should not be overwritten by billing state.
+    // Still respect deletion flags above.
+    effectiveStatus = 'active'
+    lifecycleStatus = 'active_vec'
+    effectivePlan = 'pro'
+    effectiveExportsEnabled = true
+    effectiveCanUseOcr = true
   } else if (status === 'export_only') {
     effectiveStatus = 'export_only'
     lifecycleStatus = 'export_only'
@@ -226,6 +235,11 @@ export async function handler(event) {
     // Handle trial / grace / export-only expiry transitions.
     try {
       const now = new Date()
+      const isComp = Boolean(row?.is_comp) || String(row?.subscription_source || '').trim().toLowerCase() === 'comp'
+      if (isComp) {
+        row = await ensureEntitlementsSpaceIds(supabase, userId, row)
+        return jsonResponse(200, { ok: true, entitlements: normalizeEntitlements(row) })
+      }
       const status = String(row?.status || 'active').trim().toLowerCase()
       const trialEndsAt = row?.trial_ends_at ? new Date(row.trial_ends_at) : null
       const graceUntil = row?.grace_until ? new Date(row.grace_until) : null
