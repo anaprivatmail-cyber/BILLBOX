@@ -4882,10 +4882,8 @@ function ScanBillScreen() {
       const isQr = /qr/i.test(sourceHint)
       const source: 'QR' | 'OCR' = isQr ? 'QR' : 'OCR'
 
-      const inferredArchiveOnly = inferArchiveOnlyFromText(raw, f)
-      const inboxStatus = (payload as any)?.inboxStatus
-      const archiveOnlyFromInbox = inboxStatus === 'archived' ? true : (inboxStatus === 'pending' ? false : null)
-      setArchiveOnly(archiveOnlyFromInbox == null ? inferredArchiveOnly : archiveOnlyFromInbox)
+      // Never auto-archive on prefill. Archiving must be an explicit user action.
+      setArchiveOnly(false)
 
       const cat = (classification as any)?.category
       if (typeof cat === 'string' && cat) setCategory(cat)
@@ -5404,7 +5402,7 @@ function ScanBillScreen() {
     const invoiceTrimmed = invoiceNumber.trim()
     const currencyTrimmed = currency.trim().toUpperCase()
     const amt = Number(String(amountStr).replace(',', '.'))
-    const isArchiveOnly = overrideArchiveOnly || archiveOnly
+    const isArchiveOnly = typeof overrideArchiveOnly === 'boolean' ? overrideArchiveOnly : archiveOnly
 
     const missing = {
       supplier: !supplierTrimmed,
@@ -6254,7 +6252,10 @@ function InboxScreen() {
   const [importing, setImporting] = useState(false)
   const [highlightId, setHighlightId] = useState<string | null>(null)
 
-  const effectiveSpaceId = spaceId || space?.id || 'default'
+  // Local inbox is stored per app profile slot (e.g. "personal", "personal2").
+  const inboxSpaceKey = spaceId || 'default'
+  // Server inbox is scoped by the real space UUID.
+  const serverSpaceId = space?.id || null
 
   const formatResetDate = useCallback((iso: string | null | undefined) => {
     if (!iso) return ''
@@ -6360,17 +6361,18 @@ function InboxScreen() {
     if (!supabase) return
     // Email inbox is a Več-only feature; do not sync on other plans.
     if (entitlements.plan !== 'pro') return
+    if (!serverSpaceId) return
     try {
       const { data, error } = await supabase
         .from('inbox_items')
         .select('id, space_id, status, received_at, created_at, attachment_bucket, attachment_path, attachment_name, mime_type, meta, subject, sender')
-        .eq('space_id', effectiveSpaceId)
+        .eq('space_id', serverSpaceId)
         .order('received_at', { ascending: false })
         .limit(50)
 
       if (error) return
 
-      const local = await listInbox(effectiveSpaceId)
+      const local = await listInbox(inboxSpaceKey)
       const byId = new Map<string, InboxItem>()
       for (const it of local) byId.set(String(it.id), it)
 
@@ -6384,7 +6386,7 @@ function InboxScreen() {
         const exists = byId.get(id)
         if (exists) {
           if (status && exists.status !== status) {
-            await updateInboxItem(effectiveSpaceId, id, { status })
+            await updateInboxItem(inboxSpaceKey, id, { status })
           }
           continue
         }
@@ -6405,7 +6407,7 @@ function InboxScreen() {
         if (row?.sender) meta.sender = row.sender
         meta.source = 'email'
         const added = await addToInbox({
-          spaceId: effectiveSpaceId,
+          spaceId: inboxSpaceKey,
           id,
           uri: signed.signedUrl,
           name,
@@ -6429,8 +6431,8 @@ function InboxScreen() {
 
             // Only spend OCR/AI on bills/proformas/offers or warranties.
             if (cls.kind === 'other') {
-              await updateInboxItem(effectiveSpaceId, it.id, { notes: tr('Not a bill or warranty'), status: it.status || 'new' })
-              await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
+              await updateInboxItem(inboxSpaceKey, it.id, { notes: tr('Not a bill or warranty'), status: it.status || 'new' })
+              await scheduleInboxReviewReminder(it.id, it.name, inboxSpaceKey)
               continue
             }
 
@@ -6446,8 +6448,8 @@ function InboxScreen() {
               if (w.expiresAt) parts.push(`${tr('Valid until')}: ${w.expiresAt}`)
               if (w.durationMonths) parts.push(`${tr('Duration')}: ${w.durationMonths} ${tr('months')}`)
               const nextNotes = parts.join('\n') || tr('Warranty document')
-              await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: { _kind: 'warranty', ...w, rawText }, notes: nextNotes, status: it.status || 'new' })
-              await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
+              await updateInboxItem(inboxSpaceKey, it.id, { extractedFields: { _kind: 'warranty', ...w, rawText }, notes: nextNotes, status: it.status || 'new' })
+              await scheduleInboxReviewReminder(it.id, it.name, inboxSpaceKey)
               continue
             }
 
@@ -6455,7 +6457,6 @@ function InboxScreen() {
             const { fields, summary, rawText, mode, meta: ocrMeta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: it.mimeType, filename: it.name })
             const classification = ocrMeta?.classification || null
             const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
-            const archiveOnlyInferred = inferArchiveOnlyFromText(typeof rawText === 'string' ? rawText : '', fields)
             const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
             const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
             const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
@@ -6469,14 +6470,14 @@ function InboxScreen() {
 
             let nextStatus: any = it.status || 'new'
             if (treatAsNotInvoice) nextStatus = it.status || 'new'
-            else if (treatAsInvoice) nextStatus = (archiveOnlyInferred && hasBasicAmount) ? 'archived' : 'pending'
+            else if (treatAsInvoice) nextStatus = (nextStatus === 'archived') ? 'archived' : 'pending'
 
             const reason = classification?.reason ? String(classification.reason) : ''
             const nextNotes = treatAsNotInvoice ? (reason ? `${tr('Not an invoice')}: ${reason}` : tr('Not an invoice')) : summary
 
-            await updateInboxItem(effectiveSpaceId, it.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
-            if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(it.id, effectiveSpaceId)
-            else await scheduleInboxReviewReminder(it.id, it.name, effectiveSpaceId)
+            await updateInboxItem(inboxSpaceKey, it.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
+            if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(it.id, inboxSpaceKey)
+            else await scheduleInboxReviewReminder(it.id, it.name, inboxSpaceKey)
           } catch (e: any) {
             const code = e?.code || null
             if (code === 'ocr_quota_exceeded') {
@@ -6485,7 +6486,7 @@ function InboxScreen() {
               const text = dateLabel
                 ? tr('You reached the monthly OCR limit. Continue after {date} or upgrade.', { date: dateLabel })
                 : tr('OCR monthly quota exceeded.')
-              await updateInboxItem(effectiveSpaceId, it.id, { notes: text, status: it.status || 'new' })
+              await updateInboxItem(inboxSpaceKey, it.id, { notes: text, status: it.status || 'new' })
             }
             // ignore auto-OCR failures; user can retry manually
           }
@@ -6494,14 +6495,14 @@ function InboxScreen() {
     } catch {
       // ignore server inbox sync failures; local inbox still works
     }
-  }, [supabase, effectiveSpaceId, entitlements?.canUseOCR, entitlements.plan])
+  }, [supabase, serverSpaceId, inboxSpaceKey, entitlements?.canUseOCR, entitlements.plan])
 
   const refresh = useCallback(async () => {
     if (spaceLoading || !space) return
     await syncServerInbox()
-    const list = await listInbox(effectiveSpaceId)
+    const list = await listInbox(inboxSpaceKey)
     setItems(list)
-  }, [spaceLoading, space, effectiveSpaceId, syncServerInbox])
+  }, [spaceLoading, space, inboxSpaceKey, syncServerInbox])
 
   useFocusEffect(useCallback(() => {
     refresh()
@@ -6527,13 +6528,13 @@ function InboxScreen() {
       const file = res.assets?.[0]
       if (!file?.uri) return
       const item = await addToInbox({
-        spaceId,
+        spaceId: inboxSpaceKey,
         uri: file.uri,
         name: file.name || 'document',
         mimeType: file.mimeType || undefined,
         meta: { source: 'device' },
       })
-      await scheduleInboxReviewReminder(item.id, item.name, spaceId)
+      await scheduleInboxReviewReminder(item.id, item.name, inboxSpaceKey)
       await refresh()
       Alert.alert(tr('Inbox'), tr('Added to Inbox.'))
     } catch (e: any) {
@@ -6573,8 +6574,8 @@ function InboxScreen() {
         if (w.expiresAt) parts.push(`${tr('Valid until')}: ${w.expiresAt}`)
         if (w.durationMonths) parts.push(`${tr('Duration')}: ${w.durationMonths} ${tr('months')}`)
         const nextNotes = parts.join('\n') || tr('Warranty document')
-        await updateInboxItem(spaceId, item.id, { extractedFields: { _kind: 'warranty', ...w, rawText }, notes: nextNotes, status: item.status || 'new' })
-        await scheduleInboxReviewReminder(item.id, item.name, spaceId)
+        await updateInboxItem(inboxSpaceKey, item.id, { extractedFields: { _kind: 'warranty', ...w, rawText }, notes: nextNotes, status: item.status || 'new' })
+        await scheduleInboxReviewReminder(item.id, item.name, inboxSpaceKey)
         await refresh()
         Alert.alert(tr('Scan complete'), nextNotes)
       } else {
@@ -6582,7 +6583,6 @@ function InboxScreen() {
 
         const classification = meta?.classification || null
         const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
-        const archiveOnlyInferred = inferArchiveOnlyFromText(typeof rawText === 'string' ? rawText : '', fields)
         const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
         const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
         const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
@@ -6596,14 +6596,14 @@ function InboxScreen() {
 
         let nextStatus: any = 'new'
         if (treatAsNotInvoice) nextStatus = item.status || 'new'
-        else if (treatAsInvoice) nextStatus = (archiveOnlyInferred && hasBasicAmount) ? 'archived' : 'pending'
+        else if (treatAsInvoice) nextStatus = (item.status === 'archived') ? 'archived' : 'pending'
 
         const reason = classification?.reason ? String(classification.reason) : ''
         const nextNotes = treatAsNotInvoice ? (reason ? `${tr('Not an invoice')}: ${reason}` : tr('Not an invoice')) : summary
 
-        await updateInboxItem(spaceId, item.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
-        if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(item.id, spaceId)
-        else await scheduleInboxReviewReminder(item.id, item.name, spaceId)
+        await updateInboxItem(inboxSpaceKey, item.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
+        if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(item.id, inboxSpaceKey)
+        else await scheduleInboxReviewReminder(item.id, item.name, inboxSpaceKey)
         await refresh()
         Alert.alert(tr('Scan complete'), summary)
       }
@@ -6655,27 +6655,34 @@ function InboxScreen() {
       Alert.alert(tr('Scan first'), tr('Scan the document to prefill the bill.'))
       return
     }
-    navigation.navigate('Scan', {
-      inboxPrefill: {
-        id: item.id,
-        fields: item.extractedFields,
-        attachmentPath: item.localPath,
-        mimeType: item.mimeType,
-        inboxStatus: item.status,
-      },
-    })
+    try {
+      setBusy(item.id)
+      const sourceUri = (item as any).localPath || item.uri
+      const cached = await ensureLocalReadableFile(sourceUri, item.name || 'document', item.mimeType, { allowBase64Fallback: true })
+      navigation.navigate('Scan', {
+        inboxPrefill: {
+          id: item.id,
+          fields: item.extractedFields,
+          attachmentPath: cached?.uri || sourceUri,
+          mimeType: item.mimeType,
+          inboxStatus: item.status,
+        },
+      })
+    } finally {
+      setBusy(null)
+    }
   }
 
   async function archiveItem(item: InboxItem) {
-    await updateInboxItem(spaceId, item.id, { status: 'archived' })
-    await cancelInboxReviewReminder(item.id, spaceId)
+    await updateInboxItem(inboxSpaceKey, item.id, { status: 'archived' })
+    await cancelInboxReviewReminder(item.id, inboxSpaceKey)
     await refresh()
   }
 
   async function removeItem(item: InboxItem) {
     Alert.alert(tr('Delete?'), tr('Remove this inbox item permanently?'), [
       { text: tr('Cancel'), style: 'cancel' },
-      { text: tr('Delete'), style: 'destructive', onPress: async () => { await cancelInboxReviewReminder(item.id, spaceId); await removeInboxItem(spaceId, item.id); await refresh() } },
+      { text: tr('Delete'), style: 'destructive', onPress: async () => { await cancelInboxReviewReminder(item.id, inboxSpaceKey); await removeInboxItem(inboxSpaceKey, item.id); await refresh() } },
     ])
   }
 
@@ -12721,6 +12728,8 @@ function SettingsScreen() {
   const [renameTarget, setRenameTarget] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renameVisible, setRenameVisible] = useState(false)
+  const [removeTarget, setRemoveTarget] = useState<null | { id: string; displayName: string; slotLabel: string }>(null)
+  const [removeVisible, setRemoveVisible] = useState(false)
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
   const [inboxLoading, setInboxLoading] = useState(false)
@@ -12840,64 +12849,30 @@ function SettingsScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('Profiles')} />
-          {(['personal', 'personal2'] as const).map((id) => {
-            const sp = spacesCtx.spaces.find((s) => s.id === id) || null
-            const active = spacesCtx.current?.id === id
-            const slotLabel = payerLabelFromSpaceId(id)
-            const locked = id === 'personal2' && (!sp || entitlements.plan !== 'pro')
 
-            if (!sp) {
-              return (
-                <View
-                  key={id}
-                  style={{ marginBottom: themeSpacing.xs, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}
-                >
-                  <Text style={{ fontWeight: '600' }}>{slotLabel}</Text>
-                  <Text style={styles.mutedText}>{locked ? tr('Locked (Več only)') : tr('Not created yet')}</Text>
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                    {locked ? (
-                      <AppButton
-                        label={tr('Upgrade to Več')}
-                        variant="secondary"
-                        iconName="arrow-up-circle-outline"
-                        onPress={() => {
-                          if (IS_EXPO_GO) {
-                            Alert.alert(tr('Upgrade'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.'))
-                            return
-                          }
-                          navigation.navigate('Payments', { focusPlan: 'pro' })
-                        }}
-                      />
-                    ) : (
-                      <AppButton
-                        label={tr('Create Profil 2')}
-                        variant="secondary"
-                        iconName="add-outline"
-                        onPress={() => {
-                          setCreatingPayer2(true)
-                          setPayer2NameDraft('Profil 2')
-                        }}
-                      />
-                    )}
-                  </View>
-                </View>
-              )
-            }
+          {(() => {
+            const p1 = spacesCtx.spaces.find((s) => s.id === 'personal') || null
+            const p2 = spacesCtx.spaces.find((s) => s.id === 'personal2') || null
+            const p1Active = spacesCtx.current?.id === 'personal'
+            const p2Active = spacesCtx.current?.id === 'personal2'
+            const p1Slot = payerLabelFromSpaceId('personal')
+            const p2Slot = payerLabelFromSpaceId('personal2')
+            const p2Locked = entitlements.plan !== 'pro'
+
+            if (!p1) return null
 
             return (
-              <View
-                key={sp.id}
-                style={{ marginBottom: themeSpacing.xs, borderWidth: 1, borderColor: active ? '#2b6cb0' : '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}
-              >
-                <Text style={{ fontWeight: '600' }}>{slotLabel} {active ? `• ${tr('Active')}` : ''}</Text>
-                <Text style={styles.mutedText}>{tr('Name:')} {sp.name || '—'}</Text>
+              <View style={{ borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}>
+                <Text style={{ fontWeight: '600' }}>{p1Slot} {p1Active ? `• ${tr('Active')}` : ''}</Text>
+                <Text style={[styles.bodyText, { fontWeight: '800', marginTop: 2 }]}>{p1.name || '—'}</Text>
+
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                  {!active && (
+                  {!p1Active && (
                     <AppButton
                       label={tr('Switch')}
                       variant="secondary"
                       iconName="swap-horizontal-outline"
-                      onPress={() => spacesCtx.setCurrent(sp.id)}
+                      onPress={() => spacesCtx.setCurrent(p1.id)}
                     />
                   )}
                   <AppButton
@@ -12905,21 +12880,84 @@ function SettingsScreen() {
                     variant="secondary"
                     iconName="create-outline"
                     onPress={() => {
-                      setRenameTarget(sp.id)
-                      setRenameDraft(sp.name || '')
+                      setRenameTarget(p1.id)
+                      setRenameDraft(p1.name || '')
                       setRenameVisible(true)
                     }}
                   />
-                  <AppButton
-                    label={tr('Remove')}
-                    variant="ghost"
-                    iconName="trash-outline"
-                    onPress={() => spacesCtx.remove(sp.id)}
-                  />
+                </View>
+
+                <View style={{ marginTop: themeSpacing.sm, paddingTop: themeSpacing.xs, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: themeColors.border }}>
+                  <Text style={{ fontWeight: '600' }}>{p2Slot} {p2Active ? `• ${tr('Active')}` : ''}</Text>
+
+                  {!p2 ? (
+                    <View style={{ marginTop: 4 }}>
+                      <Text style={styles.mutedText}>{p2Locked ? tr('Locked (Več only)') : tr('Not created yet')}</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+                        {p2Locked ? (
+                          <AppButton
+                            label={tr('Upgrade to Več')}
+                            variant="secondary"
+                            iconName="arrow-up-circle-outline"
+                            onPress={() => {
+                              if (IS_EXPO_GO) {
+                                Alert.alert(tr('Upgrade'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.'))
+                                return
+                              }
+                              navigation.navigate('Payments', { focusPlan: 'pro' })
+                            }}
+                          />
+                        ) : (
+                          <AppButton
+                            label={tr('Create Profil 2')}
+                            variant="secondary"
+                            iconName="add-outline"
+                            onPress={() => {
+                              setCreatingPayer2(true)
+                              setPayer2NameDraft('Profil 2')
+                            }}
+                          />
+                        )}
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={{ marginTop: 4 }}>
+                      <Text style={[styles.bodyText, { fontWeight: '800' }]}>{p2.name || '—'}</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+                        {!p2Active && (
+                          <AppButton
+                            label={tr('Switch')}
+                            variant="secondary"
+                            iconName="swap-horizontal-outline"
+                            onPress={() => spacesCtx.setCurrent(p2.id)}
+                          />
+                        )}
+                        <AppButton
+                          label={tr('Rename')}
+                          variant="secondary"
+                          iconName="create-outline"
+                          onPress={() => {
+                            setRenameTarget(p2.id)
+                            setRenameDraft(p2.name || '')
+                            setRenameVisible(true)
+                          }}
+                        />
+                        <AppButton
+                          label={tr('Remove')}
+                          variant="ghost"
+                          iconName="trash-outline"
+                          onPress={() => {
+                            setRemoveTarget({ id: p2.id, displayName: p2.name || p2Slot, slotLabel: p2Slot })
+                            setRemoveVisible(true)
+                          }}
+                        />
+                      </View>
+                    </View>
+                  )}
                 </View>
               </View>
             )
-          })}
+          })()}
         </Surface>
 
         <Surface elevated>
@@ -13074,6 +13112,45 @@ function SettingsScreen() {
           <Text style={styles.bodyText}>{tr('Website:')} {diagnostics.website}</Text>
           <Text style={styles.bodyText}>{tr('Info email:')} {diagnostics.infoEmail}</Text>
         </Surface>
+
+        <Modal visible={removeVisible} transparent animationType="fade" onRequestClose={() => setRemoveVisible(false)}>
+          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
+            <Surface elevated style={styles.iosPickerSheet}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <Ionicons name="warning-outline" size={20} color="#c53030" />
+                <Text style={styles.screenHeaderTitle}>{tr('Remove')}</Text>
+              </View>
+              <View style={{ marginTop: themeSpacing.sm }}>
+                <InlineInfo
+                  tone="danger"
+                  iconName="alert-circle-outline"
+                  message={tr('This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.', { displayName: removeTarget?.displayName || '' })}
+                />
+              </View>
+              <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
+                <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setRemoveVisible(false)} />
+                <AppButton
+                  label={tr('Remove')}
+                  iconName="trash-outline"
+                  variant="secondary"
+                  style={{ backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' }}
+                  labelStyle={{ color: '#991B1B' }}
+                  onPress={async () => {
+                    const target = removeTarget
+                    setRemoveVisible(false)
+                    setRemoveTarget(null)
+                    if (!target) return
+                    try {
+                      await spacesCtx.remove(target.id)
+                    } catch {
+                      Alert.alert(tr('Error'), tr('Unable to save.'))
+                    }
+                  }}
+                />
+              </View>
+            </Surface>
+          </View>
+        </Modal>
 
         <Modal visible={renameVisible} transparent animationType="fade" onRequestClose={() => setRenameVisible(false)}>
           <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
