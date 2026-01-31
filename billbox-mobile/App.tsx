@@ -13467,7 +13467,7 @@ function PayScreen() {
   const [debtorStreet, setDebtorStreet] = useState('')
   const [debtorPostalCode, setDebtorPostalCode] = useState('')
   const [debtorCity, setDebtorCity] = useState('')
-  const [debtorCountry, setDebtorCountry] = useState('SI')
+  const [debtorCountry, setDebtorCountry] = useState('')
   const [permissionExplained, setPermissionExplained] = useState(false)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
@@ -13803,20 +13803,16 @@ function PayScreen() {
     const postalCode = String(debtorPostalCode || '').trim()
     const city = String(debtorCity || '').trim()
     const country = String(debtorCountry || '').trim().toUpperCase()
+    const country2 = country && /^[A-Z]{2}$/.test(country) ? country : ''
 
     if (!name || !ibanNorm || !isValidIbanChecksum(ibanNorm)) {
       Alert.alert(tr('Missing bank details'), tr('Please set your IBAN (and BIC if required by your bank).'))
       return
     }
-
-    if (!street || !postalCode || !city || !/^[A-Z]{2}$/.test(country || '')) {
-      Alert.alert(tr('Missing bank details'), tr('Please set your address for SEPA export.'))
-      return
-    }
     try {
       await AsyncStorage.setItem(
         `billbox.pay.debtor.${sid}`,
-        JSON.stringify({ name, iban: ibanNorm, bic: bicNorm, street, postalCode, city, country })
+        JSON.stringify({ name, iban: ibanNorm, bic: bicNorm, street, postalCode, city, country: country2 })
       )
       setDebtorName(name)
       setDebtorIban(ibanNorm)
@@ -13824,7 +13820,7 @@ function PayScreen() {
       setDebtorStreet(street)
       setDebtorPostalCode(postalCode)
       setDebtorCity(city)
-      setDebtorCountry(country)
+      setDebtorCountry(country2)
       setBankConfigVisible(false)
       Alert.alert(tr('Saved'))
     } catch {
@@ -13847,15 +13843,10 @@ function PayScreen() {
     const postalCode = String(debtorPostalCode || '').trim()
     const city = String(debtorCity || '').trim()
     const country = String(debtorCountry || '').trim().toUpperCase()
+    const country2 = country && /^[A-Z]{2}$/.test(country) ? country : ''
 
     if (!name || !ibanNorm || !isValidIbanChecksum(ibanNorm)) {
       Alert.alert(tr('Missing bank details'), tr('Please set your IBAN (and BIC if required by your bank).'))
-      setBankConfigVisible(true)
-      return
-    }
-
-    if (!street || !postalCode || !city || !/^[A-Z]{2}$/.test(country || '')) {
-      Alert.alert(tr('Missing bank details'), tr('Please set your address for SEPA export.'))
       setBankConfigVisible(true)
       return
     }
@@ -13885,7 +13876,7 @@ function PayScreen() {
         debtorStreet: street,
         debtorPostalCode: postalCode,
         debtorCity: city,
-        debtorCountry: country,
+        debtorCountry: country2,
         bills: picked,
       })
 
