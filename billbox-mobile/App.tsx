@@ -7066,6 +7066,17 @@ function BillsListScreen() {
     return digits ? `${letters} ${digits}` : letters
   }
 
+  function normalizeReferenceNumber(input: string): string {
+    return String(input || '').toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/g, '')
+  }
+
+  function buildReferenceFromModel(model: string, number: string): string {
+    const m = String(model || '').replace(/\s+/g, '').toUpperCase()
+    const n = normalizeReferenceNumber(number)
+    if (!m || !n) return ''
+    return `${m}${n}`
+  }
+
   const [filtersExpanded, setFiltersExpanded] = useState(true)
   const [supplierQuery, setSupplierQuery] = useState('')
   const [amountMin, setAmountMin] = useState('')
