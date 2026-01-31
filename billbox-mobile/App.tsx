@@ -7304,6 +7304,12 @@ function BillsListScreen() {
     return new Date(y, m - 1, d)
   }, [])
 
+  const today = useMemo(() => {
+    void dayKey
+    const base = new Date()
+    return new Date(base.getFullYear(), base.getMonth(), base.getDate())
+  }, [dayKey])
+
   const getWarrantyStatus = useCallback((w: Warranty): 'active' | 'expiring' | 'expired' | 'no_expiry' => {
     const expires = parseDateValue((w as any)?.expires_at)
     if (!expires) return 'no_expiry'
@@ -7323,12 +7329,6 @@ function BillsListScreen() {
     const parsed = parseDateValue(value)
     return parsed ? parsed.toLocaleDateString() : '—'
   }, [parseDateValue])
-
-  const today = useMemo(() => {
-    void dayKey
-    const base = new Date()
-    return new Date(base.getFullYear(), base.getMonth(), base.getDate())
-  }, [dayKey])
 
   const loadBills = useCallback(async (silent = false) => {
     if (spaceLoading || !space) return
