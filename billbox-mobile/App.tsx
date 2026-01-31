@@ -14397,7 +14397,9 @@ function PayScreen() {
             <SectionHeader title={tr('Pay')} />
             <Text style={styles.bodyText}>{tr('Choose what to do with the selected bills:')}</Text>
             <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-              <AppButton label={tr('Export SEPA XML')} iconName="download-outline" onPress={exportSepaXmlSelected} />
+              {upcoming.filter((b) => selected[b.id]).length >= 3 ? (
+                <AppButton label={tr('Export SEPA XML')} iconName="download-outline" onPress={exportSepaXmlSelected} />
+              ) : null}
               <AppButton label={tr('Export CSV')} variant="secondary" iconName="download-outline" onPress={exportCsvSelected} />
               <AppButton label={tr('Bank details')} variant="secondary" iconName="settings-outline" onPress={() => setBankConfigVisible(true)} />
               <AppButton label={tr('Pay selected')} iconName="card-outline" onPress={paySelected} />
