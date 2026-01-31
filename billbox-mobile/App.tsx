@@ -7058,6 +7058,14 @@ function BillsListScreen() {
     }
   }, [])
 
+  function normalizeReferenceModel(input: string): string {
+    const raw = String(input || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (!raw) return ''
+    const letters = /^[A-Z]{2}/.test(raw) ? raw.slice(0, 2) : 'SI'
+    const digits = raw.replace(/^[A-Z]{2}/, '').replace(/[^0-9]/g, '').slice(0, 2)
+    return digits ? `${letters} ${digits}` : letters
+  }
+
   const [filtersExpanded, setFiltersExpanded] = useState(true)
   const [supplierQuery, setSupplierQuery] = useState('')
   const [amountMin, setAmountMin] = useState('')
