@@ -63,6 +63,17 @@ function looksLikeMisassignedName(input) {
   return false
 }
 
+function looksLikePersonName(input) {
+  const t = String(input || '').replace(/\s+/g, ' ').trim()
+  if (!t) return false
+  if (/[0-9]/.test(t)) return false
+  if (/\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc)\b/i.test(t)) return false
+  const parts = t.split(' ').filter(Boolean)
+  if (parts.length < 2 || parts.length > 3) return false
+  const cap = (w) => /^[A-ZČŠŽ][a-zà-žčšž]+$/.test(w)
+  return parts.every(cap) && t.length <= 32
+}
+
 function safeParseJson(s) {
   try {
     return s ? JSON.parse(s) : null
@@ -1453,7 +1464,11 @@ function sanitizeFields(rawText, fields) {
 
   const rawTextStr = String(rawText || '')
   const firstLine = String(rawTextStr.split(/\r?\n/)[0] || '').trim()
-  const isQrText = firstLine === 'BCD' || /\bUPNQR\b/i.test(rawTextStr)
+  const trimmedText = rawTextStr.trim()
+  const isQrText =
+    firstLine === 'BCD' ||
+    firstLine === 'UPNQR' ||
+    (trimmedText.length > 0 && trimmedText.length < 480 && /\bUPNQR\b/i.test(trimmedText))
 
   const reviewReasons = []
 
@@ -1554,6 +1569,7 @@ function sanitizeFields(rawText, fields) {
     if (!v) return false
     if (!/[A-Za-zÀ-žČŠŽčšž]/.test(v)) return false
     if (looksLikeMisassignedName(v)) return false
+    if (looksLikePersonName(v)) return false
     if (isUrlOrEmailLike(v)) return false
     return true
   }
@@ -3286,8 +3302,34 @@ function parseUPN_QR(text) {
       const n = String(m[1] || '').trim()
       if (!n) continue
       if (/UPNQR|\bUPN\b/i.test(n)) continue
+      if (looksLikePersonName(n)) continue
       creditor_name = n
       break
+    }
+
+    const findOrganizationLine = () => {
+      const orgRe = /\b(d\.o\.o\.|d\.d\.|s\.p\.|gmbh|ag|oy|ab|sas|sarl|s\.r\.l\.|llc|ltd|inc|osnovna\s+\u0161ola|\u0161ola|zavod|ob\u010dina|ministrstvo|univerza|\u0161olski|javna\s+ustanova|dru\u0161tvo)\b/i
+      let best = null
+      let bestScore = -1
+      for (const l of lines) {
+        const s = String(l || '').replace(/\s+/g, ' ').trim()
+        if (!s) continue
+        if (!/[A-Za-zÀ-žČŠŽčšž]/.test(s)) continue
+        if (looksLikeMisassignedName(s)) continue
+        if (looksLikePersonName(s)) continue
+        if (/^[0-9\s.,:\-\/]+$/.test(s)) continue
+        if (/\b(iban|sklic|reference|model|namen|purpose|znesek|rok\s*pla\S*|zapad)\b/i.test(s)) continue
+        let score = 0
+        if (orgRe.test(s)) score += 5
+        if (s.length >= 4 && s.length <= 60) score += 2
+        if (/\b(d\.o\.o\.|d\.d\.|s\.p\.)\b/i.test(s)) score += 3
+        if (score > bestScore) { bestScore = score; best = s }
+      }
+      return bestScore >= 3 ? best : null
+    }
+    if (!creditor_name || looksLikePersonName(creditor_name)) {
+      const orgLine = findOrganizationLine()
+      if (orgLine) creditor_name = orgLine
     }
 
     let due_date = null
@@ -3659,7 +3701,13 @@ export async function handler(event) {
           const parsedQr = parsePaymentQR_QR(text)
           if (parsedQr) {
             console.log('[OCR] QR found:', true, { mode: 'qr_text' })
-            return jsonResponse(200, { ok: true, rawText: text, fields: sanitizeFields(text, parsedQr), ai: false, aiModel: null, aiTier: null, mode: 'qr_text' })
+            const fields = sanitizeFields(text, parsedQr)
+            const qrPayee = String(fields?.supplier || fields?.creditor_name || parsedQr?.creditor_name || '').trim()
+            if (!qrPayee || looksLikePersonName(qrPayee)) {
+              console.log('[OCR] QR payee looks like person; continuing with OCR/AI.', { mode: 'qr_text' })
+            } else {
+              return jsonResponse(200, { ok: true, rawText: text, fields, ai: false, aiModel: null, aiTier: null, mode: 'qr_text' })
+            }
           }
         }
 
@@ -3753,10 +3801,16 @@ export async function handler(event) {
               const parsedQr = parsePaymentQR_QR(qrText)
               if (parsedQr) {
                 console.log('[OCR] QR found:', true, { mode: 'qr_pdf_raster', page: p.page })
+                const fields = sanitizeFields(qrText, parsedQr)
+                const qrPayee = String(fields?.supplier || fields?.creditor_name || parsedQr?.creditor_name || '').trim()
+                if (!qrPayee || looksLikePersonName(qrPayee)) {
+                  console.log('[OCR] QR payee looks like person; continuing with OCR/AI.', { mode: 'qr_pdf_raster', page: p.page })
+                  break
+                }
                 return jsonResponse(200, {
                   ok: true,
                   rawText: qrText,
-                  fields: sanitizeFields(qrText, parsedQr),
+                  fields,
                   ai: false,
                   aiModel: null,
                   aiTier: null,
@@ -3965,7 +4019,13 @@ export async function handler(event) {
               await incrementUsage()
               usageCounted = true
             } catch {}
-            return jsonResponse(200, { ok: true, rawText: qrText, fields: sanitizeFields(qrText, parsedQr), ai: false, aiModel: null, aiTier: null, mode: 'qr_local' })
+            const fields = sanitizeFields(qrText, parsedQr)
+            const qrPayee = String(fields?.supplier || fields?.creditor_name || parsedQr?.creditor_name || '').trim()
+            if (!qrPayee || looksLikePersonName(qrPayee)) {
+              console.log('[OCR] QR payee looks like person; continuing with OCR/AI.', { mode: 'qr_local' })
+            } else {
+              return jsonResponse(200, { ok: true, rawText: qrText, fields, ai: false, aiModel: null, aiTier: null, mode: 'qr_local' })
+            }
           }
         }
       }

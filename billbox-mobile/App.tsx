@@ -2634,8 +2634,22 @@ function BillDetailsScreen() {
       if (url) Linking.openURL(url)
       else Alert.alert(tr('Open failed'), tr('Could not get URL'))
     } else {
-      if (uri) Linking.openURL(uri)
-      else Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
+      if (!uri) {
+        Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
+        return
+      }
+      try {
+        const hasScheme = /^[a-z]+:/.test(uri)
+        const fileUri = hasScheme ? uri : `file://${uri}`
+        if (Platform.OS === 'android' && fileUri.startsWith('file://')) {
+          const contentUri = await FileSystem.getContentUriAsync(fileUri)
+          await Linking.openURL(contentUri)
+        } else {
+          await Linking.openURL(fileUri)
+        }
+      } catch {
+        Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+      }
     }
   }
 
@@ -2813,17 +2827,20 @@ function BillDetailsScreen() {
           <View style={styles.billActionsRow}>
             <AppButton
               label={tr('Send in 1 day')}
-              variant="secondary"
+              variant="outline"
+              style={{ backgroundColor: '#FFFFFF' }}
               onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 1, effectiveSpaceId); showDetailNotice(tr('Next reminder in 1 day.')) }}
             />
             <AppButton
               label={tr('Send in 3 days')}
-              variant="secondary"
+              variant="outline"
+              style={{ backgroundColor: '#FFFFFF' }}
               onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 3, effectiveSpaceId); showDetailNotice(tr('Next reminder in 3 days.')) }}
             />
             <AppButton
               label={tr('Send in 7 days')}
-              variant="secondary"
+              variant="outline"
+              style={{ backgroundColor: '#FFFFFF' }}
               onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 7, effectiveSpaceId); showDetailNotice(tr('Next reminder in 7 days.')) }}
             />
           </View>
@@ -3481,6 +3498,7 @@ function ScanBillScreen() {
   const [categoryOverrides, setCategoryOverrides] = useState<Record<string, string>>({})
   const [categoryPickerVisible, setCategoryPickerVisible] = useState(false)
   const lastAutoExtractUriRef = useRef<string>('')
+  const lastOverdueWarnedRef = useRef<string>('')
 
   const [lastQR, setLastQR] = useState('')
   const [torch, setTorch] = useState<'on' | 'off'>('off')
@@ -3570,6 +3588,23 @@ function ScanBillScreen() {
     if (s.length > 70) return true
     return false
   }
+
+  const warnIfOverdueDueDate = useCallback((isoDate: string) => {
+    const iso = String(isoDate || '').trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return
+    const today = new Date().toISOString().slice(0, 10)
+    if (iso >= today) return
+    if (lastOverdueWarnedRef.current === iso) return
+    lastOverdueWarnedRef.current = iso
+    Alert.alert(
+      tr('Due date is in the past'),
+      tr('This bill is overdue. Do you want to update the due date?'),
+      [
+        { text: tr('Change date'), onPress: () => setShowDuePicker(true) },
+        { text: tr('Keep date'), style: 'cancel' },
+      ],
+    )
+  }, [tr])
 
   function pickNameCandidate(...candidates: any[]): string {
     for (const c of candidates) {
@@ -4500,7 +4535,12 @@ function ScanBillScreen() {
       fieldSourceRankRef.current[key] = typeof rankOverride === 'number' ? rankOverride : incomingRank
     }
 
-    const isQr = incomingRank === 0
+    const rawTextTrimmed = String(rawText || '').trim()
+    const isQr = incomingRank === 0 && (
+      rawTextTrimmed.startsWith('BCD') ||
+      rawTextTrimmed.startsWith('UPNQR') ||
+      (rawTextTrimmed.length > 0 && rawTextTrimmed.length < 480 && /\bUPNQR\b/i.test(rawTextTrimmed))
+    )
 
     const looksLikeTelecomIdentifier = (v: string): boolean => {
       const s = String(v || '').replace(/\s+/g, ' ').trim()
@@ -4860,6 +4900,7 @@ function ScanBillScreen() {
       if (parsedDue && /^\d{4}-\d{2}-\d{2}$/.test(parsedDue) && canSetField('due_date', parsedDue, editedRef.current.dueDate, dueDate)) {
         setDueDate(parsedDue)
         markFieldSource('due_date')
+        warnIfOverdueDueDate(parsedDue)
       }
       if (!isQr && !editedRef.current.dueDate && !dueDate.trim() && !dueClean) {
         const base = new Date()
@@ -7110,6 +7151,16 @@ function BillsListScreen() {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
   }, [spacesCtx.spaces])
 
+  const supplierOptions = useMemo(() => {
+    const all = (bills || [])
+      .map((b) => String(b.supplier || '').trim())
+      .filter((v) => v.length > 0)
+    const unique = Array.from(new Set(all)).sort((a, b) => a.localeCompare(b))
+    const term = supplierQuery.trim().toLowerCase()
+    if (!term) return unique.slice(0, 8)
+    return unique.filter((name) => name.toLowerCase().includes(term)).slice(0, 8)
+  }, [bills, supplierQuery])
+
   const payerNameForId = useCallback((id: string): string => {
     const sp = payerSpaces.find((s) => s.id === id) || null
     const name = (sp?.name || '').trim()
@@ -8505,6 +8556,46 @@ function BillsListScreen() {
     return `Overdue by ${Math.abs(diffDays)} day${diffDays === -1 ? '' : 's'}`
   }, [today])
 
+  const [billDuePickerVisible, setBillDuePickerVisible] = useState(false)
+  const [billDuePickerValue, setBillDuePickerValue] = useState(new Date())
+  const [billDuePickerTarget, setBillDuePickerTarget] = useState<Bill & { __spaceId?: string } | null>(null)
+
+  const openBillDueDatePicker = useCallback((bill: Bill & { __spaceId?: string }) => {
+    const current = parseDateValue(bill.due_date) || new Date()
+    if (Platform.OS === 'android') {
+      DateTimePickerAndroid.open({
+        mode: 'date',
+        value: current,
+        onChange: async (_event, selectedDate) => {
+          if (!selectedDate) return
+          const next = formatDateInput(selectedDate)
+          const billSpaceId = String((bill as any)?.__spaceId || spaceId || '')
+          await updateBillDueDate(bill, next, billSpaceId)
+        },
+      })
+      return
+    }
+    setBillDuePickerTarget(bill)
+    setBillDuePickerValue(current)
+    setBillDuePickerVisible(true)
+  }, [formatDateInput, parseDateValue, spaceId])
+
+  const updateBillDueDate = useCallback(async (bill: Bill & { __spaceId?: string }, nextDate: string, billSpaceId: string) => {
+    try {
+      if (supabase) {
+        const { data } = await setBillDueDate(supabase, bill.id, nextDate, billSpaceId)
+        if (data) setBills((prev) => prev.map((b) => (b.id === bill.id ? { ...(data as any), __spaceId: (b as any).__spaceId } : b)))
+        else setBills((prev) => prev.map((b) => (b.id === bill.id ? { ...b, due_date: nextDate } : b)))
+      } else {
+        await setLocalBillDueDate(billSpaceId, bill.id, nextDate)
+        setBills((prev) => prev.map((b) => (b.id === bill.id ? { ...b, due_date: nextDate } : b)))
+      }
+      showToast(tr('Due date updated.'), 'success')
+    } catch {
+      Alert.alert(tr('Update failed'), tr('Unable to update due date.'))
+    }
+  }, [supabase, tr, showToast])
+
   const renderBillItem = useCallback(({ item }: { item: Bill & { __spaceId?: string } }) => {
     const dueDate = parseDateValue(item.due_date)
     const trackedDate = getBillDate(item, dateMode)
@@ -8567,6 +8658,21 @@ function BillsListScreen() {
             )}
           </View>
 
+          {isOverdue && (
+            <View style={styles.billMetaRow}>
+              <View style={styles.billMetaGroup}>
+                <Ionicons name="calendar-clear-outline" size={16} color="#6B7280" />
+                <Text style={styles.billMetaSecondary}>{tr('Change due date')}</Text>
+              </View>
+              <AppButton
+                label={tr('Pick date')}
+                variant="outline"
+                iconName="calendar-outline"
+                onPress={() => openBillDueDatePicker(item)}
+              />
+            </View>
+          )}
+
           <View style={styles.billMetaRow}>
             <View style={styles.billMetaGroup}>
               <Ionicons name="person-circle-outline" size={16} color="#6B7280" />
@@ -8585,7 +8691,7 @@ function BillsListScreen() {
         </Pressable>
       </Surface>
     )
-  }, [attachmentCounts, dateMode, formatAmount, formatDisplayDate, getBillDate, highlightId, navigation, parseDateValue, payerNameForId, relativeDueText, space?.name, spaceId, today, tr, warrantyBillIds])
+  }, [attachmentCounts, dateMode, formatAmount, formatDisplayDate, getBillDate, highlightId, navigation, openBillDueDatePicker, parseDateValue, payerNameForId, relativeDueText, space?.name, spaceId, today, tr, warrantyBillIds])
 
   if (spaceLoading || !space) {
     return (
@@ -8676,11 +8782,26 @@ function BillsListScreen() {
                     ]}
                   />
 
-                  <AppInput
-                    placeholder={tr('Supplier')}
-                    value={supplierQuery}
-                    onChangeText={setSupplierQuery}
-                  />
+                  <View style={{ position: 'relative' }}>
+                    <AppInput
+                      placeholder={tr('Supplier')}
+                      value={supplierQuery}
+                      onChangeText={setSupplierQuery}
+                    />
+                    {supplierOptions.length > 0 && supplierQuery.trim().length > 0 && (
+                      <View style={styles.supplierSuggestList}>
+                        {supplierOptions.map((name) => (
+                          <Pressable
+                            key={name}
+                            onPress={() => setSupplierQuery(name)}
+                            style={({ pressed }) => [styles.supplierSuggestItem, pressed ? { backgroundColor: '#EFF6FF' } : null]}
+                          >
+                            <Text style={styles.supplierSuggestText} numberOfLines={1}>{name}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    )}
+                  </View>
 
                   <View style={styles.filterRow}>
                     <AppInput
@@ -8833,6 +8954,35 @@ function BillsListScreen() {
             <View style={styles.iosPickerActions}>
               <AppButton label={tr('Cancel')} variant="ghost" onPress={cancelIosPicker} />
               <AppButton label={tr('Use date')} onPress={confirmIosPicker} />
+            </View>
+          </Surface>
+        </View>
+      )}
+
+      {isIOS && billDuePickerVisible && billDuePickerTarget && (
+        <View style={styles.iosPickerOverlay}>
+          <Surface elevated style={styles.iosPickerSheet}>
+            <Text style={styles.filterLabel}>{tr('Select date')}</Text>
+            <DateTimePicker
+              mode="date"
+              display="inline"
+              value={billDuePickerValue}
+              onChange={(_, selected) => {
+                if (selected) setBillDuePickerValue(selected)
+              }}
+            />
+            <View style={styles.iosPickerActions}>
+              <AppButton label={tr('Cancel')} variant="ghost" onPress={() => { setBillDuePickerVisible(false); setBillDuePickerTarget(null) }} />
+              <AppButton
+                label={tr('Use date')}
+                onPress={async () => {
+                  const next = formatDateInput(billDuePickerValue)
+                  const billSpaceId = String((billDuePickerTarget as any)?.__spaceId || spaceId || '')
+                  setBillDuePickerVisible(false)
+                  await updateBillDueDate(billDuePickerTarget, next, billSpaceId)
+                  setBillDuePickerTarget(null)
+                }}
+              />
             </View>
           </Surface>
         </View>
@@ -9381,7 +9531,7 @@ function HomeScreen() {
         const supabase = getSupabase()
         const todayIso = dayKey
 
-        const next: { spaceId: string; spaceName: string; totalUnpaid: number; overdueCount: number; nextDueDate: string | null }[] = []
+        const next: { spaceId: string; spaceName: string; totalUnpaid: number; unpaidCount: number; overdueCount: number; overdueTotal: number; nextDueDate: string | null; nextDueTotal: number }[] = []
 
         for (const sp of payerSpaces) {
           const sid = sp.id
@@ -9396,18 +9546,28 @@ function HomeScreen() {
           }
 
           let totalUnpaid = 0
+          let unpaidCount = 0
           let overdueCount = 0
+          let overdueTotal = 0
           let nextDue: string | null = null
+          let nextDueTotal = 0
 
           for (const bill of bills) {
             if (!isBillUnpaid(bill.status)) continue
+            unpaidCount += 1
             totalUnpaid += bill.amount || 0
             if (!bill.due_date) continue
             const due = bill.due_date
             if (due < todayIso) {
               overdueCount += 1
+              overdueTotal += bill.amount || 0
             } else {
-              if (!nextDue || due < nextDue) nextDue = due
+              if (!nextDue || due < nextDue) {
+                nextDue = due
+                nextDueTotal = bill.amount || 0
+              } else if (nextDue && due === nextDue) {
+                nextDueTotal += bill.amount || 0
+              }
             }
           }
 
@@ -9415,8 +9575,11 @@ function HomeScreen() {
             spaceId: sid,
             spaceName: (sp?.name || '').trim() || payerLabelFromSpaceId(sid),
             totalUnpaid,
+            unpaidCount,
             overdueCount,
+            overdueTotal,
             nextDueDate: nextDue,
+            nextDueTotal,
           })
         }
 
@@ -9442,6 +9605,7 @@ function HomeScreen() {
   const tiles = [
     { label: tr('Add bill'), icon: 'scan-outline', description: tr('Capture QR codes or import documents.'), target: 'Scan' },
     { label: tr('Bills'), icon: 'receipt-outline', description: tr('Review and manage all bills.'), target: 'Bills' },
+    { label: tr('Inbox'), icon: 'mail-outline', description: tr('Review received documents.'), target: 'Inbox' },
     { label: tr('Payments'), icon: 'card-outline', description: tr('Plan and schedule payments.'), target: 'Pay' },
     { label: tr('Warranties'), icon: 'shield-checkmark-outline', description: tr('Track product warranties.'), target: 'Warranties' },
     { label: tr('Reports'), icon: 'bar-chart-outline', description: tr('Analytics and totals.'), target: 'Reports' },
@@ -9454,11 +9618,22 @@ function HomeScreen() {
   const totalUnpaidValue = activeSummary
     ? (homeSummaryVisibility.totalUnpaid ? `EUR ${Number(activeSummary.totalUnpaid || 0).toFixed(2)}` : mask)
     : (homeSummaryVisibility.totalUnpaid ? '—' : mask)
+  const totalUnpaidSubValue = activeSummary
+    ? (homeSummaryVisibility.totalUnpaid ? tr('{count} bills', { count: activeSummary.unpaidCount || 0 }) : mask)
+    : (homeSummaryVisibility.totalUnpaid ? '—' : mask)
   const overdueValue = activeSummary
+    ? (homeSummaryVisibility.overdue ? `EUR ${Number(activeSummary.overdueTotal || 0).toFixed(2)}` : mask)
+    : (homeSummaryVisibility.overdue ? '—' : mask)
+  const overdueSubValue = activeSummary
     ? (homeSummaryVisibility.overdue ? tr('{count} bills', { count: activeSummary.overdueCount || 0 }) : mask)
     : (homeSummaryVisibility.overdue ? '—' : mask)
   const nextDueValue = activeSummary
     ? (homeSummaryVisibility.nextDue ? (activeSummary.nextDueDate || tr('None')) : mask)
+    : (homeSummaryVisibility.nextDue ? '—' : mask)
+  const nextDueSubValue = activeSummary
+    ? (homeSummaryVisibility.nextDue
+      ? (activeSummary.nextDueDate ? `EUR ${Number(activeSummary.nextDueTotal || 0).toFixed(2)}` : '—')
+      : mask)
     : (homeSummaryVisibility.nextDue ? '—' : mask)
 
   const retentionNotices = useMemo(() => {
@@ -9603,6 +9778,7 @@ function HomeScreen() {
               hitSlop={8}
             >
               <Text style={styles.homeMetricValue} numberOfLines={1}>{totalUnpaidValue}</Text>
+              <Text style={styles.homeMetricSubValue} numberOfLines={1}>{totalUnpaidSubValue}</Text>
               <Text style={styles.homeMetricLabel}>{tr('Total unpaid')}</Text>
             </Pressable>
 
@@ -9629,6 +9805,7 @@ function HomeScreen() {
               hitSlop={8}
             >
               <Text style={styles.homeMetricValue} numberOfLines={1}>{overdueValue}</Text>
+              <Text style={styles.homeMetricSubValue} numberOfLines={1}>{overdueSubValue}</Text>
               <Text style={styles.homeMetricLabel}>{tr('Overdue')}</Text>
             </Pressable>
 
@@ -9657,6 +9834,7 @@ function HomeScreen() {
               hitSlop={8}
             >
               <Text style={styles.homeMetricValue} numberOfLines={1}>{nextDueValue}</Text>
+              <Text style={styles.homeMetricSubValue} numberOfLines={1}>{nextDueSubValue}</Text>
               <Text style={styles.homeMetricLabel}>{tr('Next due date')}</Text>
             </Pressable>
           </View>
@@ -11209,7 +11387,11 @@ function ReportsScreen() {
   })
   const [dateMode, setDateMode] = useState<'due' | 'invoice' | 'created'>('due')
   const [groupBy, setGroupBy] = useState<'month' | 'year'>('month')
-  const [status, setStatus] = useState<'all' | 'unpaid' | 'paid' | 'archived'>('all')
+  const [statusSelections, setStatusSelections] = useState<{ unpaid: boolean; paid: boolean; archived: boolean }>(() => ({
+    unpaid: true,
+    paid: true,
+    archived: false,
+  }))
   const [supplierQuery, setSupplierQuery] = useState('')
   const [amountMin, setAmountMin] = useState('')
   const [amountMax, setAmountMax] = useState('')
@@ -11229,6 +11411,12 @@ function ReportsScreen() {
   useEffect(() => {
     if (!isPro && reportsView === 'chart') setReportsView('table')
   }, [isPro, reportsView])
+
+  useEffect(() => {
+    if (!isPro && statusSelections.archived) {
+      setStatusSelections((prev) => ({ ...prev, archived: false }))
+    }
+  }, [isPro, statusSelections.archived])
 
   const onSelectReportsView = useCallback((next: 'table' | 'chart') => {
     if (next === 'chart' && !isPro) {
@@ -11345,6 +11533,24 @@ function ReportsScreen() {
     })
   }
 
+  const selectedStatusList = useMemo(() => {
+    const list: Array<'unpaid' | 'paid' | 'archived'> = []
+    if (statusSelections.unpaid) list.push('unpaid')
+    if (statusSelections.paid) list.push('paid')
+    if (statusSelections.archived && isPro) list.push('archived')
+    if (list.length) return list
+    return isPro ? (['unpaid', 'paid', 'archived'] as const) : (['unpaid', 'paid'] as const)
+  }, [isPro, statusSelections.archived, statusSelections.paid, statusSelections.unpaid])
+
+  const isStatusIncluded = useCallback((bill: Bill) => {
+    for (const s of selectedStatusList) {
+      if (s === 'unpaid' && isBillUnpaid(bill.status)) return true
+      if (s === 'paid' && bill.status === 'paid') return true
+      if (s === 'archived' && bill.status === 'archived') return true
+    }
+    return false
+  }, [selectedStatusList])
+
   function getBillDateForMode(bill: Bill, mode: typeof dateMode): string {
     if (mode === 'invoice') {
       const raw = (bill as any).invoice_date || bill.created_at
@@ -11405,13 +11611,7 @@ function ReportsScreen() {
       if (!d) return false
       if (d < range.start || d > range.end) return false
 
-      if (status !== 'all') {
-        if (status === 'unpaid') {
-          if (!isBillUnpaid(b.status)) return false
-        } else {
-          if (b.status !== status) return false
-        }
-      }
+      if (!isStatusIncluded(b)) return false
 
       if (supplierTerm && !String(b.supplier || '').toLowerCase().includes(supplierTerm)) return false
 
@@ -11422,7 +11622,7 @@ function ReportsScreen() {
 
       return true
     })
-  }, [amountMax, amountMin, bills, dateMode, isPro, range.end, range.start, status, supplierQuery])
+  }, [amountMax, amountMin, bills, dateMode, isPro, isStatusIncluded, range.end, range.start, supplierQuery])
 
   const supplierQuickPicks = useMemo(() => {
     const allowAdvanced = isPro
@@ -11432,13 +11632,7 @@ function ReportsScreen() {
       const d = getBillDateForMode(b, modeForDate)
       if (!d) continue
       if (d < range.start || d > range.end) continue
-      if (status !== 'all') {
-        if (status === 'unpaid') {
-          if (!isBillUnpaid(b.status)) continue
-        } else {
-          if (b.status !== status) continue
-        }
-      }
+      if (!isStatusIncluded(b)) continue
       const name = String(b.supplier || '').trim()
       if (!name) continue
       supplierTotalsInRange[name] = (supplierTotalsInRange[name] || 0) + (b.currency === 'EUR' ? b.amount : 0)
@@ -11447,7 +11641,7 @@ function ReportsScreen() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
       .map(([supplier]) => supplier)
-  }, [bills, dateMode, isPro, range.end, range.start, status])
+  }, [bills, dateMode, isPro, isStatusIncluded, range.end, range.start])
 
   const totals = useMemo(() => {
     const totalBillsInRange = filtered.length
@@ -11474,17 +11668,77 @@ function ReportsScreen() {
     return { points, max }
   }, [dateMode, filtered, groupBy, isPro])
 
+  const reportPalette = ['#2563EB', '#F97316', '#10B981', '#A855F7', '#0EA5E9', '#E11D48']
+
+  const seriesByStatus = useMemo(() => {
+    const keyFn = groupBy === 'year' ? yyyyKey : yyyymmKey
+    const modeForDate = isPro ? dateMode : 'due'
+    const grouped: Record<string, Record<string, number>> = {}
+    const statuses = selectedStatusList
+    for (const b of filtered) {
+      const iso = getBillDateForMode(b, modeForDate)
+      const key = keyFn(iso) || '—'
+      const statusKey = isBillUnpaid(b.status) ? 'unpaid' : b.status === 'paid' ? 'paid' : b.status === 'archived' ? 'archived' : null
+      if (!statusKey || !statuses.includes(statusKey)) continue
+      grouped[key] = grouped[key] || {}
+      grouped[key][statusKey] = (grouped[key][statusKey] || 0) + (b.currency === 'EUR' ? b.amount : 0)
+    }
+    const keys = Object.keys(grouped).sort()
+    const series = statuses.map((status) => {
+      const points = keys.map((k) => ({ key: k, value: grouped[k]?.[status] || 0 }))
+      return { status, points }
+    })
+    const max = series.reduce((m, s) => Math.max(m, ...(s.points.map((p) => p.value))), 0)
+    return { keys, series, max }
+  }, [dateMode, filtered, getBillDateForMode, groupBy, isPro, selectedStatusList])
+
+  const tableRows = useMemo(() => {
+    const modeForDate = isPro ? dateMode : 'due'
+    return [...filtered]
+      .sort((a, b) => {
+        const ad = getBillDateForMode(a, modeForDate)
+        const bd = getBillDateForMode(b, modeForDate)
+        return String(ad).localeCompare(String(bd))
+      })
+      .map((b) => ({
+        id: b.id,
+        supplier: String(b.supplier || '').trim() || tr('Unknown'),
+        date: getBillDateForMode(b, modeForDate),
+        amount: b.currency === 'EUR' ? `EUR ${b.amount.toFixed(2)}` : `${b.amount.toFixed(2)} ${b.currency || ''}`,
+      }))
+  }, [dateMode, filtered, getBillDateForMode, isPro, tr])
+
+  const lineSeries = useMemo(() => {
+    if (isPro && selectedStatusList.length > 1) {
+      return seriesByStatus.series.map((s, idx) => ({
+        id: s.status,
+        label: s.status === 'unpaid' ? tr('Unpaid') : s.status === 'paid' ? tr('Paid') : tr('Archived'),
+        color: reportPalette[idx % reportPalette.length],
+        points: s.points,
+      }))
+    }
+    return [{ id: 'total', label: tr('Total'), color: themeColors.primary, points: series.points }]
+  }, [isPro, reportPalette, selectedStatusList.length, series.points, seriesByStatus.series, tr])
+
+  const lineMax = useMemo(() => {
+    return lineSeries.reduce((m, s) => Math.max(m, ...(s.points.map((p) => p.value))), 0)
+  }, [lineSeries])
+
   const linePoints = useMemo(() => {
     const width = Math.max(0, reportsChartSize.width - 24)
     const height = Math.max(0, reportsChartSize.height - 24)
-    const count = series.points.length
+    const count = lineSeries[0]?.points.length || 0
     if (!count || width <= 0 || height <= 0) return []
-    return series.points.map((p, idx) => {
-      const x = 12 + (count === 1 ? width / 2 : (idx / (count - 1)) * width)
-      const y = 12 + (series.max > 0 ? (1 - p.value / series.max) * height : height)
-      return { ...p, x, y }
+    const max = lineMax || 1
+    return lineSeries.map((seriesItem) => {
+      const points = seriesItem.points.map((p, idx) => {
+        const x = 12 + (count === 1 ? width / 2 : (idx / (count - 1)) * width)
+        const y = 12 + (max > 0 ? (1 - p.value / max) * height : height)
+        return { ...p, x, y }
+      })
+      return { id: seriesItem.id, label: seriesItem.label, color: seriesItem.color, points }
     })
-  }, [reportsChartSize.height, reportsChartSize.width, series.max, series.points])
+  }, [lineMax, lineSeries, reportsChartSize.height, reportsChartSize.width])
 
   const showBasicInsights = useCallback(() => {
     if (!filtered.length) {
@@ -11526,7 +11780,7 @@ function ReportsScreen() {
       filters: {
         start: range.start,
         end: range.end,
-        status,
+        status: selectedStatusList,
         analytics_mode: isAdvanced ? 'advanced' : 'basic',
         date_mode: isAdvanced ? dateMode : 'due',
         group_by: groupBy,
@@ -11537,7 +11791,7 @@ function ReportsScreen() {
       totals,
       series: series.points,
     }
-  }, [amountMax, amountMin, dateMode, entitlements.plan, groupBy, isPro, range.end, range.start, selectedPayerIds, series.points, status, supplierQuery, totals])
+  }, [amountMax, amountMin, dateMode, entitlements.plan, groupBy, isPro, range.end, range.start, selectedPayerIds, series.points, selectedStatusList, supplierQuery, totals])
 
   const onExportPress = useCallback(() => {
     if (!entitlements.exportsEnabled) {
@@ -11616,6 +11870,98 @@ function ReportsScreen() {
     setExportBusyLabel(tr('Preparing PDF…'))
     try {
       const profileLabel = selectedPayerIds.map((id) => payerLabelFromSpaceId(id)).join(' + ')
+      const chartSvg = (() => {
+        const points = series.points
+        if (!points.length) return ''
+        const w = 520
+        const h = 220
+        const padL = 40
+        const padB = 28
+        const padT = 12
+        const padR = 12
+        const plotW = w - padL - padR
+        const plotH = h - padT - padB
+        const max = series.max || 1
+        const barW = plotW / points.length
+        const bars = points.map((p, i) => {
+          const valH = Math.max(2, (p.value / max) * plotH)
+          const x = padL + i * barW + 6
+          const y = padT + (plotH - valH)
+          const bw = Math.max(6, barW - 12)
+          const color = reportPalette[i % reportPalette.length]
+          return `<rect x="${x}" y="${y}" width="${bw}" height="${valH}" rx="4" fill="${color}" />`
+        }).join('')
+        const xLabels = points.map((p, i) => {
+          const x = padL + i * barW + barW / 2
+          return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${p.key}</text>`
+        }).join('')
+        return `
+          <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
+            <rect x="0" y="0" width="${w}" height="${h}" fill="#fff" />
+            <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${h - padB}" stroke="#CBD5F5" />
+            <line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" stroke="#CBD5F5" />
+            <line x1="${padL}" y1="${padT + plotH * 0.5}" x2="${w - padR}" y2="${padT + plotH * 0.5}" stroke="#E2E8F0" />
+            <line x1="${padL}" y1="${padT}" x2="${w - padR}" y2="${padT}" stroke="#E2E8F0" />
+            <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${max.toFixed(0)}</text>
+            <text x="${padL - 6}" y="${padT + plotH * 0.5 + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${(max * 0.5).toFixed(0)}</text>
+            <text x="${padL - 6}" y="${h - padB + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR 0</text>
+            ${bars}
+            ${xLabels}
+          </svg>
+        `
+      })()
+      const lineSvg = (() => {
+        const seriesItems = lineSeries
+        const count = seriesItems[0]?.points.length || 0
+        if (!count) return ''
+        const w = 520
+        const h = 220
+        const padL = 40
+        const padB = 28
+        const padT = 12
+        const padR = 12
+        const plotW = w - padL - padR
+        const plotH = h - padT - padB
+        const max = lineMax || 1
+        const xLabels = seriesItems[0].points.map((p, i) => {
+          const x = padL + i * (plotW / Math.max(1, count - 1))
+          return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${p.key}</text>`
+        }).join('')
+        const lines = seriesItems.map((s) => {
+          const points = s.points.map((p, i) => {
+            const x = padL + i * (plotW / Math.max(1, count - 1))
+            const y = padT + (max > 0 ? (1 - p.value / max) * plotH : plotH)
+            return `${x},${y}`
+          }).join(' ')
+          const dots = s.points.map((p, i) => {
+            const x = padL + i * (plotW / Math.max(1, count - 1))
+            const y = padT + (max > 0 ? (1 - p.value / max) * plotH : plotH)
+            return `<circle cx="${x}" cy="${y}" r="3" fill="${s.color}" />`
+          }).join('')
+          return `<polyline fill="none" stroke="${s.color}" stroke-width="2" points="${points}" />${dots}`
+        }).join('')
+        return `
+          <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
+            <rect x="0" y="0" width="${w}" height="${h}" fill="#fff" />
+            <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${h - padB}" stroke="#CBD5F5" />
+            <line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" stroke="#CBD5F5" />
+            <line x1="${padL}" y1="${padT + plotH * 0.5}" x2="${w - padR}" y2="${padT + plotH * 0.5}" stroke="#E2E8F0" />
+            <line x1="${padL}" y1="${padT}" x2="${w - padR}" y2="${padT}" stroke="#E2E8F0" />
+            <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${max.toFixed(0)}</text>
+            <text x="${padL - 6}" y="${padT + plotH * 0.5 + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${(max * 0.5).toFixed(0)}</text>
+            <text x="${padL - 6}" y="${h - padB + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR 0</text>
+            ${lines}
+            ${xLabels}
+          </svg>
+        `
+      })()
+      const tableHtml = tableRows.map((r) => `
+        <tr>
+          <td>${r.supplier}</td>
+          <td>${r.date || '—'}</td>
+          <td style="text-align:right;">${r.amount}</td>
+        </tr>
+      `).join('')
       const html = `
         <html>
           <head>
@@ -11646,13 +11992,14 @@ function ReportsScreen() {
               <div class="row"><div class="k">${tr('Unpaid total (EUR)')}</div><div class="v">EUR ${totals.unpaidTotalEur.toFixed(2)}</div></div>
             </div>
             <div class="card">
-              <div class="k" style="margin-bottom:8px;">${groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')}</div>
-              <table>
-                <thead><tr><th>${tr('Period')}</th><th>${tr('Amount (EUR)')}</th></tr></thead>
-                <tbody>
-                  ${series.points.map((p) => `<tr><td>${p.key}</td><td>EUR ${p.value.toFixed(2)}</td></tr>`).join('')}
-                </tbody>
-              </table>
+              ${reportsView === 'chart'
+                ? `
+                  <div class="k" style="margin-bottom:8px;">${groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')}</div>
+                  ${chartSvg || `<div class="k">${tr('No bills in this range.')}</div>`}
+                  ${lineSvg ? `<div style="margin-top:12px;">${lineSvg}</div>` : ''}
+                `
+                : `<div class="k" style="margin-bottom:8px;">${tr('Table')}</div><table><thead><tr><th>${tr('Supplier')}</th><th>${tr('Due')}</th><th style=\"text-align:right;\">${tr('Amount (EUR)')}</th></tr></thead><tbody>${tableHtml || ''}</tbody></table>`
+              }
             </div>
           </body>
         </html>
@@ -11783,11 +12130,27 @@ function ReportsScreen() {
             <View style={{ marginTop: themeSpacing.sm }}>
               <Text style={styles.filterLabel}>{tr('Status')}</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                <AppButton label={tr('All')} variant={status === 'all' ? 'secondary' : 'ghost'} onPress={() => setStatus('all')} />
-                <AppButton label={tr('Unpaid')} variant={status === 'unpaid' ? 'secondary' : 'ghost'} onPress={() => setStatus('unpaid')} />
-                <AppButton label={tr('Paid')} variant={status === 'paid' ? 'secondary' : 'ghost'} onPress={() => setStatus('paid')} />
+                <AppButton
+                  label={tr('All')}
+                  variant={selectedStatusList.length === (isPro ? 3 : 2) ? 'secondary' : 'ghost'}
+                  onPress={() => setStatusSelections({ unpaid: true, paid: true, archived: isPro })}
+                />
+                <AppButton
+                  label={tr('Unpaid')}
+                  variant={statusSelections.unpaid ? 'secondary' : 'ghost'}
+                  onPress={() => setStatusSelections((prev) => ({ ...prev, unpaid: !prev.unpaid }))}
+                />
+                <AppButton
+                  label={tr('Paid')}
+                  variant={statusSelections.paid ? 'secondary' : 'ghost'}
+                  onPress={() => setStatusSelections((prev) => ({ ...prev, paid: !prev.paid }))}
+                />
                 {isPro ? (
-                  <AppButton label={tr('Archived')} variant={status === 'archived' ? 'secondary' : 'ghost'} onPress={() => setStatus('archived')} />
+                  <AppButton
+                    label={tr('Archived')}
+                    variant={statusSelections.archived ? 'secondary' : 'ghost'}
+                    onPress={() => setStatusSelections((prev) => ({ ...prev, archived: !prev.archived }))}
+                  />
                 ) : null}
               </View>
             </View>
@@ -11875,40 +12238,99 @@ function ReportsScreen() {
                 <>
                   <View style={styles.reportChartCard}>
                     <Text style={styles.reportChartTitle}>{tr('Bar chart')}</Text>
-                    <View style={styles.reportBarsRow}>
-                      {series.points.map((p) => (
-                        <View key={p.key} style={styles.reportBarItem}>
-                          <View style={styles.reportBarTrack}>
-                            <View style={[styles.reportBarFill, { height: `${Math.max(0, Math.min(100, p.pct))}%` }]} />
-                          </View>
-                          <Text style={styles.reportBarLabel}>{p.key}</Text>
+                    <View style={styles.reportChartFrame}>
+                      <View style={styles.reportAxisRow}>
+                        <View style={styles.reportYAxis}>
+                          <Text style={styles.reportYAxisLabel}>EUR {series.max.toFixed(0)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR {(series.max * 0.5).toFixed(0)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR 0</Text>
                         </View>
-                      ))}
+                        <View style={{ flex: 1 }}>
+                          <View style={{ height: 140 }}>
+                            <View style={[styles.reportGridLine, { top: 0 }]} />
+                            <View style={[styles.reportGridLine, { top: 70 }]} />
+                            <View style={[styles.reportGridLine, { bottom: 0 }]} />
+                            <View style={styles.reportBarsRow}>
+                              {series.points.map((p, idx) => (
+                                <View key={p.key} style={styles.reportBarItem}>
+                                  <View style={styles.reportBarTrack}>
+                                    <View
+                                      style={[
+                                        styles.reportBarFill,
+                                        {
+                                          height: `${Math.max(0, Math.min(100, p.pct))}%`,
+                                          backgroundColor: reportPalette[idx % reportPalette.length],
+                                        },
+                                      ]}
+                                    />
+                                  </View>
+                                  <Text style={styles.reportBarLabel}>{p.key}</Text>
+                                </View>
+                              ))}
+                            </View>
+                          </View>
+                          <View style={styles.reportXAxis} />
+                        </View>
+                      </View>
                     </View>
                   </View>
 
                   <View style={styles.reportChartCard}>
                     <Text style={styles.reportChartTitle}>{tr('Line chart')}</Text>
-                    <View
-                      style={styles.reportLineChart}
-                      onLayout={(e) => {
-                        const { width, height } = e.nativeEvent.layout
-                        if (width && height && (width !== reportsChartSize.width || height !== reportsChartSize.height)) {
-                          setReportsChartSize({ width, height })
-                        }
-                      }}
-                    >
-                      {linePoints.map((p, idx) => {
-                        const next = linePoints[idx + 1]
-                        return (
-                          <React.Fragment key={p.key}>
-                            {next ? (
-                              <View style={[styles.reportLineSegment, { left: p.x, top: p.y, width: Math.max(2, next.x - p.x) }]} />
-                            ) : null}
-                            <View style={[styles.reportLineDot, { left: p.x - 4, top: p.y - 4 }]} />
-                          </React.Fragment>
-                        )
-                      })}
+                    {linePoints.length > 1 ? (
+                      <View style={styles.reportLegendRow}>
+                        {linePoints.map((s) => (
+                          <View key={s.id} style={styles.reportLegendItem}>
+                            <View style={[styles.reportLegendSwatch, { backgroundColor: s.color }]} />
+                            <Text style={styles.reportLegendLabel}>{s.label}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
+                    <View style={styles.reportChartFrame}>
+                      <View style={styles.reportAxisRow}>
+                        <View style={[styles.reportYAxis, { height: 160 }]}>
+                          <Text style={styles.reportYAxisLabel}>EUR {lineMax.toFixed(0)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR {(lineMax * 0.5).toFixed(0)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR 0</Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <View
+                            style={styles.reportLineChart}
+                            onLayout={(e) => {
+                              const { width, height } = e.nativeEvent.layout
+                              if (width && height && (width !== reportsChartSize.width || height !== reportsChartSize.height)) {
+                                setReportsChartSize({ width, height })
+                              }
+                            }}
+                          >
+                            <View style={[styles.reportGridLine, { top: 8 }]} />
+                            <View style={[styles.reportGridLine, { top: 80 }]} />
+                            <View style={[styles.reportGridLine, { bottom: 8 }]} />
+                            {linePoints.map((seriesItem) => (
+                              <React.Fragment key={seriesItem.id}>
+                                {seriesItem.points.map((p, idx) => {
+                                  const next = seriesItem.points[idx + 1]
+                                  return (
+                                    <React.Fragment key={`${seriesItem.id}-${p.key}`}>
+                                      {next ? (
+                                        <View
+                                          style={[
+                                            styles.reportLineSegment,
+                                            { left: p.x, top: p.y, width: Math.max(2, next.x - p.x), backgroundColor: seriesItem.color },
+                                          ]}
+                                        />
+                                      ) : null}
+                                      <View style={[styles.reportLineDot, { left: p.x - 4, top: p.y - 4, backgroundColor: seriesItem.color }]} />
+                                    </React.Fragment>
+                                  )
+                                })}
+                              </React.Fragment>
+                            ))}
+                          </View>
+                          <View style={styles.reportXAxis} />
+                        </View>
+                      </View>
                     </View>
                   </View>
                 </>
@@ -11916,21 +12338,20 @@ function ReportsScreen() {
             </View>
           ) : (
             <View style={{ paddingVertical: themeSpacing.sm }}>
-              {series.points.length === 0 ? (
+              {tableRows.length === 0 ? (
                 <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
               ) : (
                 <View style={{ gap: 10 }}>
                   <View style={styles.reportTableHeaderRow}>
-                    <Text style={[styles.mutedText, { flex: 1 }]}>{tr('Period')}</Text>
-                    <Text style={[styles.mutedText, { width: 120, textAlign: 'right' }]}>{tr('Amount (EUR)')}</Text>
+                    <Text style={[styles.mutedText, { flex: 1 }]}>{tr('Supplier')}</Text>
+                    <Text style={[styles.mutedText, { width: 96 }]}>{tr('Due')}</Text>
+                    <Text style={[styles.mutedText, { width: 110, textAlign: 'right' }]}>{tr('Amount (EUR)')}</Text>
                   </View>
-                  {series.points.map((p) => (
-                    <View key={p.key} style={styles.reportTableRowCard}>
-                      <Text style={styles.reportRowTitle}>{p.key}</Text>
-                      <View style={styles.reportRowBarTrack}>
-                        <View style={[styles.reportRowBarFill, { width: `${Math.max(0, Math.min(100, p.pct))}%` }]} />
-                      </View>
-                      <Text style={styles.reportRowValue}>EUR {p.value.toFixed(2)}</Text>
+                  {tableRows.map((row) => (
+                    <View key={row.id} style={styles.reportTableRow}>
+                      <Text style={[styles.bodyText, { flex: 1 }]} numberOfLines={1}>{row.supplier}</Text>
+                      <Text style={[styles.mutedText, { width: 96 }]}>{row.date || '—'}</Text>
+                      <Text style={[styles.bodyText, { width: 110, textAlign: 'right', fontWeight: '700' }]}>{row.amount}</Text>
                     </View>
                   ))}
                 </View>
@@ -12737,6 +13158,7 @@ function PayScreen() {
   const [permissionExplained, setPermissionExplained] = useState(false)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
+  const spacesCtx = useSpacesContext()
 
   const dayKey = useDayKey()
   const [planBucket, setPlanBucket] = useState<'today' | 'week' | 'month'>('today')
@@ -12789,6 +13211,24 @@ function PayScreen() {
   const cancelIosPicker = useCallback(() => {
     setIosPickerVisible(false)
   }, [])
+  const payerSpaces = useMemo(() => {
+    return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
+  }, [spacesCtx.spaces])
+
+  const billSpaceIds = useMemo(() => {
+    const ids = payerSpaces.map((s) => s.id)
+    const p1 = ids.includes('personal') ? 'personal' : (ids[0] || null)
+    const p2 = ids.includes('personal2') ? 'personal2' : null
+    const canUsePayer2 = Number(entitlements?.payerLimit || 1) >= 2
+
+    if (isPayerSpaceId(spaceId)) {
+      if (spaceId === 'personal2' && (!canUsePayer2 || !p2)) return p1 ? [p1] : []
+      return [spaceId]
+    }
+    if (p1) return [p1]
+    return spaceId ? [spaceId] : []
+  }, [entitlements?.payerLimit, payerSpaces, spaceId])
+
   useEffect(() => { (async ()=>{
     if (!permissionExplained) {
       await ensureNotificationConfig()
@@ -12799,26 +13239,43 @@ function PayScreen() {
       setPermissionExplained(true)
     }
     if (spaceLoading || !space) return
+    const ids = billSpaceIds.length ? billSpaceIds : (spaceId ? [spaceId] : [])
     if (supabase) {
-      const { data } = await listBills(supabase, spaceId)
+      const { data } = await listBills(supabase, ids.length > 1 ? ids : (ids[0] || spaceId), entitlements)
       let next = (data || []) as Bill[]
       if (entitlements.plan === 'pro') {
-        next = await ensureInstallmentBills({ spaceId, supabase, existingBills: next, horizonMonths: 2 })
+        const merged: Bill[] = []
+        for (const sid of ids) {
+          const group = next.filter((b) => (b as any)?.space_id === sid || (b as any)?.__spaceId === sid)
+          const ensured = await ensureInstallmentBills({ spaceId: sid, supabase, existingBills: group, horizonMonths: 2 })
+          for (const b of ensured || []) merged.push(b as any)
+        }
+        next = merged.length ? merged : next
       } else {
         next = next.filter((b) => !isInstallmentBill(b))
       }
       setItems(next)
     } else {
-      const locals = await loadLocalBills(spaceId)
-      let next = (locals as any) as Bill[]
+      const collected: Bill[] = []
+      for (const sid of ids) {
+        const locals = await loadLocalBills(sid)
+        for (const b of (locals as any) || []) collected.push(b as any)
+      }
+      let next = collected as Bill[]
       if (entitlements.plan === 'pro') {
-        next = await ensureInstallmentBills({ spaceId, supabase: null, existingBills: next, horizonMonths: 2 })
+        const merged: Bill[] = []
+        for (const sid of ids) {
+          const group = next.filter((b) => (b as any)?.__spaceId === sid)
+          const ensured = await ensureInstallmentBills({ spaceId: sid, supabase: null, existingBills: group, horizonMonths: 2 })
+          for (const b of ensured || []) merged.push(b as any)
+        }
+        next = merged.length ? merged : next
       } else {
         next = next.filter((b) => !isInstallmentBill(b))
       }
       setItems(next)
     }
-  })() }, [dayKey, supabase, permissionExplained, spaceLoading, space, spaceId, entitlements.plan])
+  })() }, [dayKey, supabase, permissionExplained, spaceLoading, space, spaceId, entitlements, billSpaceIds])
   const upcoming = items.filter(b=> b.status==='unpaid').sort((a,b)=> (a.pay_date||a.due_date).localeCompare(b.pay_date||b.due_date))
   const today = dayKey
   const thisWeekEnd = useMemo(() => {
@@ -13067,36 +13524,33 @@ function PayScreen() {
               onPress={() => setPlanBucket('today')}
               style={({ pressed }) => [
                 styles.payUrgencyTab,
-                styles.payUrgencyToday,
                 planBucket === 'today' ? styles.payUrgencyTabActiveToday : null,
                 pressed ? styles.payUrgencyTabPressed : null,
               ]}
             >
-              <Text style={styles.payUrgencyTabText}>{tr('Today')}</Text>
+              <Text style={[styles.payUrgencyTabText, planBucket === 'today' ? styles.payUrgencyTabTextActive : null]}>{tr('Today')}</Text>
             </Pressable>
 
             <Pressable
               onPress={() => setPlanBucket('week')}
               style={({ pressed }) => [
                 styles.payUrgencyTab,
-                styles.payUrgencyWeek,
                 planBucket === 'week' ? styles.payUrgencyTabActiveWeek : null,
                 pressed ? styles.payUrgencyTabPressed : null,
               ]}
             >
-              <Text style={styles.payUrgencyTabText}>{tr('This week')}</Text>
+              <Text style={[styles.payUrgencyTabText, planBucket === 'week' ? styles.payUrgencyTabTextActive : null]}>{tr('This week')}</Text>
             </Pressable>
 
             <Pressable
               onPress={() => setPlanBucket('month')}
               style={({ pressed }) => [
                 styles.payUrgencyTab,
-                styles.payUrgencyMonth,
                 planBucket === 'month' ? styles.payUrgencyTabActiveMonth : null,
                 pressed ? styles.payUrgencyTabPressed : null,
               ]}
             >
-              <Text style={styles.payUrgencyTabText}>{tr('In 1 month')}</Text>
+              <Text style={[styles.payUrgencyTabText, planBucket === 'month' ? styles.payUrgencyTabTextActive : null]}>{tr('In 1 month')}</Text>
             </Pressable>
           </View>
 
@@ -13796,35 +14250,37 @@ function SettingsScreen() {
           ) : null}
         </Surface>
 
-        <Surface elevated>
-          <SectionHeader title={tr('Email inbox')} />
-          {inboxLoading ? (
-            <Text style={styles.mutedText}>{tr('Loading inbox…')}</Text>
-          ) : inboxConfigured && inboxAddress ? (
-            <View style={{ gap: themeSpacing.xs }}>
-              <Text style={styles.bodyText}>{tr('Your BillBox inbox')}</Text>
-              <Text style={styles.mutedText}>{inboxAddress}</Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                <AppButton
-                  label={tr('Copy address')}
-                  variant="secondary"
-                  iconName="copy-outline"
-                  onPress={async () => {
-                    if (!inboxAddress) return
-                    try {
-                      await Clipboard.setStringAsync(inboxAddress)
-                      Alert.alert(tr('Copied'))
-                    } catch {
-                      Alert.alert(tr('Error'), tr('Could not copy.'))
-                    }
-                  }}
-                />
+        <Pressable onPress={() => navigation.navigate('Inbox')} style={({ pressed }) => pressed ? { opacity: 0.96 } : null}>
+          <Surface elevated>
+            <SectionHeader title={tr('Email inbox')} />
+            {inboxLoading ? (
+              <Text style={styles.mutedText}>{tr('Loading inbox…')}</Text>
+            ) : inboxConfigured && inboxAddress ? (
+              <View style={{ gap: themeSpacing.xs }}>
+                <Text style={styles.bodyText}>{tr('Your BillBox inbox')}</Text>
+                <Text style={styles.mutedText}>{inboxAddress}</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+                  <AppButton
+                    label={tr('Copy address')}
+                    variant="secondary"
+                    iconName="copy-outline"
+                    onPress={async () => {
+                      if (!inboxAddress) return
+                      try {
+                        await Clipboard.setStringAsync(inboxAddress)
+                        Alert.alert(tr('Copied'))
+                      } catch {
+                        Alert.alert(tr('Error'), tr('Could not copy.'))
+                      }
+                    }}
+                  />
+                </View>
               </View>
-            </View>
-          ) : (
-            <Text style={styles.mutedText}>{inboxError || tr('Inbox address not configured.')}</Text>
-          )}
-        </Surface>
+            ) : (
+              <Text style={styles.mutedText}>{inboxError || tr('Inbox address not configured.')}</Text>
+            )}
+          </Surface>
+        </Pressable>
 
         <Surface elevated>
           <SectionHeader title={tr('Language')} />
@@ -14477,6 +14933,7 @@ const styles = StyleSheet.create({
       justifyContent: 'center',
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: '#E5E7EB',
+      backgroundColor: '#F9FAFB',
     },
     // Active styles only change color (no layout/behavior changes).
     payUrgencyTabActiveToday: {
@@ -14484,12 +14941,12 @@ const styles = StyleSheet.create({
       borderColor: '#B91C1C',
     },
     payUrgencyTabActiveWeek: {
-      backgroundColor: '#FCA5A5',
-      borderColor: '#F87171',
+      backgroundColor: '#F97316',
+      borderColor: '#EA580C',
     },
     payUrgencyTabActiveMonth: {
-      backgroundColor: '#FEE2E2',
-      borderColor: '#FECACA',
+      backgroundColor: '#F59E0B',
+      borderColor: '#D97706',
     },
     payUrgencyTabPressed: {
       opacity: 0.92,
@@ -14497,20 +14954,10 @@ const styles = StyleSheet.create({
     payUrgencyTabText: {
       fontSize: 12,
       fontWeight: '700',
-      color: '#111827',
+      color: '#1F2937',
     },
-    payUrgencyToday: {
-      // Most important: make Today stand out (stronger red tone).
-      backgroundColor: '#F87171',
-      borderColor: '#EF4444',
-    },
-    payUrgencyWeek: {
-      backgroundColor: '#FECACA',
-      borderColor: '#FCA5A5',
-    },
-    payUrgencyMonth: {
-      backgroundColor: '#FEF2F2',
-      borderColor: '#FEE2E2',
+    payUrgencyTabTextActive: {
+      color: '#FFFFFF',
     },
     payUrgencySummaryRow: {
       flexDirection: 'row',
@@ -14687,11 +15134,24 @@ const styles = StyleSheet.create({
   reportTableRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: themeColors.border },
   reportChartCard: { padding: themeSpacing.sm, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
   reportChartTitle: { fontSize: 12, fontWeight: '700', color: '#334155', marginBottom: themeSpacing.sm },
+  reportLegendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm, marginBottom: themeSpacing.sm },
+  reportLegendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  reportLegendSwatch: { width: 10, height: 10, borderRadius: 5 },
+  reportLegendLabel: { fontSize: 11, color: '#475569' },
   reportBarsRow: { flexDirection: 'row', alignItems: 'flex-end', gap: themeSpacing.xs },
   reportBarItem: { flex: 1, alignItems: 'center', gap: 6 },
-  reportBarTrack: { width: '100%', height: 120, borderRadius: 8, backgroundColor: '#E2E8F0', overflow: 'hidden', justifyContent: 'flex-end' },
+  reportBarTrack: { width: '100%', height: 140, borderRadius: 8, backgroundColor: '#F1F5F9', overflow: 'hidden', justifyContent: 'flex-end' },
   reportBarFill: { width: '100%', backgroundColor: themeColors.primary, borderRadius: 8 },
   reportBarLabel: { fontSize: 11, color: '#64748B' },
+  reportChartFrame: { borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, padding: 10, backgroundColor: '#FFFFFF' },
+  reportAxisRow: { flexDirection: 'row', alignItems: 'flex-end', gap: themeSpacing.sm },
+  reportYAxis: { width: 42, alignItems: 'flex-end', justifyContent: 'space-between', height: 140 },
+  reportYAxisLabel: { fontSize: 10, color: '#64748B' },
+  reportXAxis: { flex: 1, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#CBD5F5', marginTop: 6 },
+  reportGridLine: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#E2E8F0' },
+  reportLineChart: { height: 160, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, backgroundColor: '#FFFFFF' },
+  reportLineSegment: { position: 'absolute', height: 2, backgroundColor: themeColors.primary, borderRadius: 2 },
+  reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: themeColors.primary },
   reportLineChart: { height: 160, borderRadius: 12, backgroundColor: '#F8FAFC', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
   reportLineSegment: { position: 'absolute', height: 2, backgroundColor: '#1D4ED8' },
   reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: '#1D4ED8' },
@@ -14731,10 +15191,29 @@ const styles = StyleSheet.create({
   formDivider: { marginVertical: themeSpacing.sm },
   attachmentButtons: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap },
   saveButton: { marginTop: themeSpacing.md },
+  supplierSuggestList: {
+    position: 'absolute',
+    top: 46,
+    left: 0,
+    right: 0,
+    zIndex: 20,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  supplierSuggestItem: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: themeColors.border,
+  },
+  supplierSuggestText: { fontSize: 13, color: themeColors.text, fontWeight: '600' },
   attachmentRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
   attachmentCard: { padding: 0 },
-  attachmentCardContent: { padding: themeLayout.cardPadding, paddingBottom: themeSpacing.sm },
-  attachmentFileName: { marginTop: themeSpacing.sm, fontSize: 14, fontWeight: '700', color: '#111827' },
+  attachmentCardContent: { padding: themeLayout.cardPadding, paddingBottom: themeSpacing.xs },
+  attachmentFileName: { marginTop: themeSpacing.xs, fontSize: 14, fontWeight: '700', color: '#111827' },
   attachmentPreview: { marginTop: themeSpacing.sm, gap: themeLayout.gap },
   attachmentImage: { width: 160, height: 120, borderRadius: 12 },
   attachmentPreviewCompact: { gap: themeSpacing.xs },
@@ -14770,6 +15249,7 @@ const styles = StyleSheet.create({
   homeMetricCardOverdue: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
   homeMetricCardNext: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
   homeMetricValue: { fontSize: 16, fontWeight: '800', color: themeColors.text },
+  homeMetricSubValue: { marginTop: 2, fontSize: 11, color: '#475569', fontWeight: '600' },
   homeMetricLabel: { marginTop: 4, fontSize: 11, color: themeColors.textMuted },
   statCard: {
     paddingVertical: themeSpacing.xs,
