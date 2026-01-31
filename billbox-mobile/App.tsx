@@ -13716,10 +13716,11 @@ function PayScreen() {
     bills: Bill[]
   }): string {
     const txs = args.bills
-    const ctrlSum = txs.reduce((sum, b) => sum + Number(b.amount || 0), 0)
+    const ctrlCents = txs.reduce((sum, b) => sum + Math.round(Number(b.amount || 0) * 100), 0)
+    const ctrlSum = ctrlCents / 100
     const nb = txs.length
 
-    const debtorNm = escapeXml(args.debtorName)
+    const debtorNm = escapeXml(String(args.debtorName || '').slice(0, 70))
     const debtorIbanNorm = normalizeIban(args.debtorIban) || ''
     const debtorBicNorm = args.debtorBic ? normalizeBic(args.debtorBic) : ''
 
@@ -13756,6 +13757,7 @@ function PayScreen() {
     const pmtInf = `    <PmtInf>\n` +
       `      <PmtInfId>${escapeXml(args.msgId)}-P1</PmtInfId>\n` +
       `      <PmtMtd>TRF</PmtMtd>\n` +
+      `      <BtchBookg>true</BtchBookg>\n` +
       `      <NbOfTxs>${nb}</NbOfTxs>\n` +
       `      <CtrlSum>${ctrlSum.toFixed(2)}</CtrlSum>\n` +
       `      <PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf>\n` +
@@ -13769,7 +13771,7 @@ function PayScreen() {
       `      <ChrgBr>SLEV</ChrgBr>\n`
 
     const txXml = txs.map((b) => {
-      const creditor = escapeXml(String(b.creditor_name || b.supplier || ''))
+      const creditor = escapeXml(String(b.creditor_name || b.supplier || '').slice(0, 70))
       const creditorIban = escapeXml(String(normalizeIban(b.iban || '') || ''))
       const endToEnd = escapeXml(String(b.invoice_number || b.id).slice(0, 35))
       const ref = String([b.reference_model, b.reference].filter(Boolean).join(' ').trim())
@@ -13778,7 +13780,7 @@ function PayScreen() {
       return (
         `      <CdtTrfTxInf>\n` +
         `        <PmtId><EndToEndId>${endToEnd || 'NOTPROVIDED'}</EndToEndId></PmtId>\n` +
-        `        <Amt><InstdAmt Ccy="EUR">${Number(b.amount || 0).toFixed(2)}</InstdAmt></Amt>\n` +
+        `        <Amt><InstdAmt Ccy="EUR">${(Math.round(Number(b.amount || 0) * 100) / 100).toFixed(2)}</InstdAmt></Amt>\n` +
         `        <Cdtr><Nm>${creditor || 'UNKNOWN'}</Nm></Cdtr>\n` +
         `        <CdtrAcct><Id><IBAN>${creditorIban}</IBAN></Id></CdtrAcct>\n` +
         (memo ? `        <RmtInf><Ustrd>${memo}</Ustrd></RmtInf>\n` : '') +
@@ -13862,10 +13864,22 @@ function PayScreen() {
       return
     }
 
+    const badAmount = picked.find((b) => !Number.isFinite(Number(b.amount)) || Number(b.amount) <= 0)
+    if (badAmount) {
+      Alert.alert(tr('Export SEPA XML'), tr('Some selected bills have invalid amount.'))
+      return
+    }
+
+    const missingCreditorName = picked.find((b) => !String(b.creditor_name || b.supplier || '').trim())
+    if (missingCreditorName) {
+      Alert.alert(tr('Export SEPA XML'), tr('Some selected bills are missing creditor name.'))
+      return
+    }
+
     try {
       const now = new Date()
       const msgId = `BILLBOX-${now.toISOString().replace(/[-:.TZ]/g, '')}`
-      const createdAtIso = now.toISOString().slice(0, 19)
+      const createdAtIso = now.toISOString().replace(/\.\d{3}Z$/, 'Z')
       const xml = buildPain001Xml({
         msgId,
         createdAtIso,
