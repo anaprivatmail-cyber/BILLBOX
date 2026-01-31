@@ -13702,6 +13702,17 @@ function PayScreen() {
     return v
   }
 
+  function inferDebtorBicFromIban(iban: string): string {
+    const norm = String(normalizeIban(iban) || '').toUpperCase()
+    // Free/offline heuristic: Revolut Bank UAB uses Lithuanian IBAN with bank code 32500.
+    // LTkk bbbb bccc cccc cccc (bank code is positions 5-9, 0-based 4..8).
+    if (norm.startsWith('LT') && norm.length >= 9) {
+      const bankCode = norm.slice(4, 9)
+      if (bankCode === '32500') return 'REVOLT21'
+    }
+    return ''
+  }
+
   function buildPain001Xml(args: {
     msgId: string
     createdAtIso: string
@@ -13840,6 +13851,8 @@ function PayScreen() {
     const name = String(debtorName || '').trim()
     const ibanNorm = normalizeIban(debtorIban || '')
     const bicNorm = debtorBic ? normalizeBic(debtorBic) : ''
+    const inferredBic = !bicNorm && ibanNorm ? inferDebtorBicFromIban(ibanNorm) : ''
+    const bicFinal = bicNorm || inferredBic
 
     const street = String(debtorStreet || '').trim()
     const postalCode = String(debtorPostalCode || '').trim()
@@ -13886,7 +13899,7 @@ function PayScreen() {
         executionDate: String(planningDate || new Date().toISOString().slice(0, 10)),
         debtorName: name,
         debtorIban: ibanNorm,
-        debtorBic: bicNorm || undefined,
+        debtorBic: bicFinal || undefined,
         debtorStreet: street,
         debtorPostalCode: postalCode,
         debtorCity: city,
