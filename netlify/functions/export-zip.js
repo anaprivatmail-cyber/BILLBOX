@@ -76,6 +76,15 @@ export async function handler(event) {
       ? spaceIdsRaw.map((v) => String(v || '').trim()).filter(Boolean).slice(0, 5)
       : []
     const filters = body.filters || {}
+    const attachmentTypesRaw = Array.isArray(body.attachmentTypes)
+      ? body.attachmentTypes
+      : Array.isArray(body.attachment_types)
+        ? body.attachment_types
+        : null
+    const attachmentTypes = attachmentTypesRaw
+      ? attachmentTypesRaw.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+      : []
+    const exportPart = body.exportPart || null
     const billIdsRaw = Array.isArray(body.billIds)
       ? body.billIds
       : Array.isArray(body.bill_ids)
@@ -184,6 +193,16 @@ export async function handler(event) {
 
     const seenNames = new Set()
 
+    const isPdfName = (name) => /\.pdf$/i.test(String(name || ''))
+    const isImageName = (name) => /\.(png|jpe?g|webp)$/i.test(String(name || ''))
+    const includeAttachment = (name) => {
+      if (!attachmentTypes.length) return true
+      const n = String(name || '')
+      if (attachmentTypes.includes('pdf') && isPdfName(n)) return true
+      if (attachmentTypes.includes('image') && isImageName(n)) return true
+      return false
+    }
+
     for (const bill of filteredBills) {
       const due = String(bill.due_date || '')
       const year = due.slice(0, 4) || 'unknown'
@@ -193,6 +212,7 @@ export async function handler(event) {
 
       const billAtt = await listAttachments(supabase, userId, 'bills', bill.id)
       for (const a of billAtt) {
+        if (!includeAttachment(a.name)) continue
         try {
           const buf = await downloadAttachment(supabase, a.path)
           const entryName = ensureUniqueName(seenNames, `${baseDir}/${sanitizeFilename(a.name, 'attachment')}`)
@@ -206,6 +226,7 @@ export async function handler(event) {
       if (w?.id) {
         const wAtt = await listAttachments(supabase, userId, 'warranties', w.id)
         for (const a of wAtt) {
+          if (!includeAttachment(a.name)) continue
           try {
             const buf = await downloadAttachment(supabase, a.path)
             const entryName = ensureUniqueName(seenNames, `${baseDir}/warranty/${sanitizeFilename(a.name, 'attachment')}`)
@@ -223,7 +244,8 @@ export async function handler(event) {
     const start = String(filters?.start || '')
     const end = String(filters?.end || '')
     const selectionLabel = billIds.length ? `selection-${filteredBills.length}` : `${start || 'range'}-${end || ''}`
-    const filename = sanitizeFilename(`billbox-attachments-${selectionLabel}.zip`, 'billbox-attachments.zip')
+    const partSuffix = exportPart?.index && exportPart?.count ? `-part-${exportPart.index}-of-${exportPart.count}` : ''
+    const filename = sanitizeFilename(`billbox-attachments-${selectionLabel}${partSuffix}.zip`, 'billbox-attachments.zip')
     const path = `${userId}/exports/${Date.now()}-${filename}`
 
     const uploaded = await uploadAndSign({

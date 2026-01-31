@@ -1108,6 +1108,11 @@ function billStatusForDb(status: any): 'pending' | 'paid' | 'archived' {
   return 'pending'
 }
 
+function isBillStatusConstraintError(error: any): boolean {
+  const rawMsg = String(error?.message || '')
+  return /bills\s+status\s+check|check\s+constraint.*status|violates\s+check\s+constraint/i.test(rawMsg)
+}
+
 type Bill = {
   id: string
   user_id: string
@@ -1296,9 +1301,35 @@ async function resolveDbExportScopePayload(
 async function createBill(supabase: SupabaseClient, input: CreateBillInput): Promise<{ data: Bill | null; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
   const dbSpaceId = await resolveDbSpaceId(supabase, input.space_id || null)
-  const payload: any = { ...input, user_id: userId, status: billStatusForDb(input.status || 'unpaid'), space_id: dbSpaceId }
-  const { data, error } = await supabase.from('bills').insert(payload).select().single()
-  return { data: (data as Bill) || null, error }
+  const desired = input.status || 'unpaid'
+  const primaryStatus = billStatusForDb(desired)
+
+  const payloadBase: any = { ...input, user_id: userId, space_id: dbSpaceId }
+  const primaryPayload: any = { ...payloadBase, status: primaryStatus }
+  const first = await supabase.from('bills').insert(primaryPayload).select().single()
+  if (!first.error) return { data: (first.data as Bill) || null, error: null }
+
+  // Backward-compatible: some DBs only allow 'unpaid'/'paid' (no 'pending' or 'archived').
+  if (isBillStatusConstraintError(first.error)) {
+    if (primaryStatus === 'pending') {
+      const retry = await supabase.from('bills').insert({ ...payloadBase, status: 'unpaid' }).select().single()
+      return { data: (retry.data as Bill) || null, error: (retry.error as any) || null }
+    }
+    if (primaryStatus === 'archived') {
+      const purposeRaw = typeof (payloadBase as any)?.purpose === 'string' ? String((payloadBase as any).purpose) : ''
+      const markedPurpose = purposeRaw.includes(ARCHIVE_PURPOSE_MARKER)
+        ? purposeRaw
+        : (purposeRaw ? `${ARCHIVE_PURPOSE_MARKER}\n${purposeRaw}` : ARCHIVE_PURPOSE_MARKER)
+      const retry = await supabase
+        .from('bills')
+        .insert({ ...payloadBase, status: 'paid', purpose: markedPurpose })
+        .select()
+        .single()
+      return { data: (retry.data as Bill) || null, error: (retry.error as any) || null }
+    }
+  }
+
+  return { data: (first.data as Bill) || null, error: first.error }
 }
 
 async function deleteBill(supabase: SupabaseClient, id: string, _spaceId?: string | null): Promise<{ error: PostgrestError | null }>{
@@ -1312,15 +1343,60 @@ async function deleteBill(supabase: SupabaseClient, id: string, _spaceId?: strin
 
 async function setBillStatus(supabase: SupabaseClient, id: string, status: BillStatus, _spaceId?: string | null): Promise<{ data: Bill | null; error: PostgrestError | null }>{
   const userId = await getCurrentUserId(supabase)
-  let q = supabase
-    .from('bills')
-    .update({ status: billStatusForDb(status) })
-    .eq('user_id', userId)
-    .eq('id', id)
+  const primaryStatus = billStatusForDb(status)
+  const baseMatch: any = { user_id: userId, id }
+
   const dbSpaceId = await resolveDbSpaceId(supabase, _spaceId || null)
-  if (dbSpaceId) q = q.eq('space_id', dbSpaceId)
-  const { data, error } = await q.select().single()
-  return { data: (data as Bill) || null, error }
+  const applySpace = (q: any) => dbSpaceId ? q.eq('space_id', dbSpaceId) : q
+
+  // First try with the preferred status mapping.
+  let q = applySpace(
+    supabase
+      .from('bills')
+      .update({ status: primaryStatus })
+      .eq('user_id', baseMatch.user_id)
+      .eq('id', baseMatch.id)
+  )
+  const first = await q.select().single()
+  if (!first.error) return { data: (first.data as Bill) || null, error: null }
+
+  if (isBillStatusConstraintError(first.error)) {
+    if (primaryStatus === 'pending') {
+      const retry = await applySpace(
+        supabase
+          .from('bills')
+          .update({ status: 'unpaid' })
+          .eq('user_id', baseMatch.user_id)
+          .eq('id', baseMatch.id)
+      ).select().single()
+      return { data: (retry.data as Bill) || null, error: (retry.error as any) || null }
+    }
+    if (primaryStatus === 'archived') {
+      // If DB doesn't support 'archived', store as 'paid' with an internal marker in purpose.
+      const current = await applySpace(
+        supabase
+          .from('bills')
+          .select('purpose')
+          .eq('user_id', baseMatch.user_id)
+          .eq('id', baseMatch.id)
+          .maybeSingle()
+      )
+      const purposeRaw = typeof (current.data as any)?.purpose === 'string' ? String((current.data as any).purpose) : ''
+      const markedPurpose = purposeRaw.includes(ARCHIVE_PURPOSE_MARKER)
+        ? purposeRaw
+        : (purposeRaw ? `${ARCHIVE_PURPOSE_MARKER}\n${purposeRaw}` : ARCHIVE_PURPOSE_MARKER)
+      const retry = await applySpace(
+        supabase
+          .from('bills')
+          .update({ status: 'paid', purpose: markedPurpose })
+          .eq('user_id', baseMatch.user_id)
+          .eq('id', baseMatch.id)
+      ).select().single()
+      return { data: (retry.data as Bill) || null, error: (retry.error as any) || null }
+    }
+  }
+
+  return { data: (first.data as Bill) || null, error: first.error }
 }
 
 async function setBillDueDate(
@@ -2428,31 +2504,15 @@ function SpaceProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const removeHandler = useCallback(async (id: string) => {
-    const sp = spaces.find((s) => s.id === id) || null
-    const slotLabel = payerLabelFromSpaceId(id)
-    const displayName = sp?.name ? `"${sp.name}"` : slotLabel
     const isPayer1 = id === 'personal'
-    const message = isPayer1
-        ? tr('This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nAfter removal, {slotLabel} will be re-created and you will be asked to name it again.', { displayName, slotLabel })
-        : tr('This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.', { displayName })
-
-      Alert.alert(tr('Remove {slotLabel}?', { slotLabel }), message, [
-        { text: tr('Cancel'), style: 'cancel' },
-        {
-          text: tr('Remove'),
-        style: 'destructive',
-        onPress: async () => {
-          if (isPayer1) {
-            try { await AsyncStorage.removeItem('billbox.onboarding.payer1Named') } catch {}
-          }
-          await purgePayerData(id)
-          await removeSpace(id)
-          const ensured = await ensureSpacesDefaults()
-          setSpaces(ensured.spaces)
-          setSpaceId(ensured.currentId)
-        },
-      },
-    ])
+    if (isPayer1) {
+      try { await AsyncStorage.removeItem('billbox.onboarding.payer1Named') } catch {}
+    }
+    await purgePayerData(id)
+    await removeSpace(id)
+    const ensured = await ensureSpacesDefaults()
+    setSpaces(ensured.spaces)
+    setSpaceId(ensured.currentId)
   }, [spaces])
 
   const current = spaces.find((s) => s.id === spaceId) || null
@@ -2481,12 +2541,41 @@ function BillDetailsScreen() {
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [invoiceSaving, setInvoiceSaving] = useState(false)
+  const [defaultReminderInfo, setDefaultReminderInfo] = useState<string | null>(null)
+  const [detailNotice, setDetailNotice] = useState<string | null>(null)
+  const detailNoticeTimerRef = useRef<any>(null)
+  const [dangerConfirm, setDangerConfirm] = useState<{
+    title: string
+    message: string
+    confirmLabel?: string
+    onConfirm: () => void | Promise<void>
+  } | null>(null)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+
+  const showDetailNotice = useCallback((message: string, durationMs = 2200) => {
+    if (detailNoticeTimerRef.current) clearTimeout(detailNoticeTimerRef.current)
+    setDetailNotice(message)
+    detailNoticeTimerRef.current = setTimeout(() => {
+      setDetailNotice(null)
+      detailNoticeTimerRef.current = null
+    }, Math.max(800, durationMs))
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (detailNoticeTimerRef.current) clearTimeout(detailNoticeTimerRef.current)
+    }
+  }, [])
+
+  const showDangerConfirm = useCallback((title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string) => {
+    setDangerConfirm({ title, message, onConfirm, confirmLabel })
+  }, [])
 
   const effectiveSpaceId = spaceIdOverride || spaceId
 
   useEffect(() => {
     setInvoiceNumber(String((bill as any)?.invoice_number || ''))
+    setDefaultReminderInfo(null)
   }, [bill?.id])
 
   useEffect(() => { (async ()=>{
@@ -2524,7 +2613,7 @@ function BillDetailsScreen() {
     const type = asset.type || 'image/jpeg'
     const up = await uploadAttachmentFromUri(effectiveSpaceId, 'bills', bill!.id, asset.uri, name, type)
     if (up.error) Alert.alert(tr('Upload failed'), up.error)
-    else Alert.alert(tr('Attachment uploaded'), tr('Image attached to bill'))
+    else showDetailNotice(tr('Image attached to bill'))
   }
 
   async function addPdf() {
@@ -2535,7 +2624,7 @@ function BillDetailsScreen() {
     const name = file.name || 'document.pdf'
     const up = await uploadAttachmentFromUri(effectiveSpaceId, 'bills', bill!.id, file.uri, name, 'application/pdf')
     if (up.error) Alert.alert(tr('Upload failed'), up.error)
-    else Alert.alert(tr('Attachment uploaded'), tr('PDF attached to bill'))
+    else showDetailNotice(tr('PDF attached to bill'))
     await refresh()
   }
 
@@ -2551,10 +2640,16 @@ function BillDetailsScreen() {
   }
 
   async function remove(path: string) {
-    Alert.alert(tr('Delete attachment?'), tr('This file will be removed.'), [
-      { text: tr('Cancel'), style: 'cancel' },
-      { text: tr('Delete'), style: 'destructive', onPress: async () => { const { error } = await deleteAttachment(effectiveSpaceId, 'bills', bill!.id, path); if (error) Alert.alert(tr('Delete failed'), error); else await refresh() } }
-    ])
+    showDangerConfirm(
+      tr('Delete attachment?'),
+      tr('This file will be removed.'),
+      async () => {
+        const { error } = await deleteAttachment(effectiveSpaceId, 'bills', bill!.id, path)
+        if (error) Alert.alert(tr('Delete failed'), error)
+        else await refresh()
+      },
+      tr('Delete')
+    )
   }
 
   async function saveInvoiceNumber() {
@@ -2569,7 +2664,7 @@ function BillDetailsScreen() {
       } else {
         await setLocalBillInvoiceNumber(effectiveSpaceId, bill.id, next)
       }
-      Alert.alert(tr('Updated'), tr('Invoice number saved.'))
+      showDetailNotice(tr('Invoice number saved.'))
     } catch (e: any) {
       Alert.alert(tr('Save failed'), e?.message || tr('Unable to save.'))
     } finally {
@@ -2600,23 +2695,16 @@ function BillDetailsScreen() {
           }
         />
 
+        {detailNotice ? (
+          <InlineInfo tone="success" iconName="checkmark-circle-outline" message={detailNotice} />
+        ) : null}
+
         <Surface elevated>
           <SectionHeader title={tr('Bill summary')} />
           <Text style={styles.bodyText}>{bill.currency} {bill.amount.toFixed(2)} • {tr('Due')} {bill.due_date}</Text>
           {!!(bill as any).invoice_number && <Text style={styles.bodyText}>{tr('Invoice number')}: {(bill as any).invoice_number}</Text>}
           {!!bill.reference && <Text style={styles.bodyText}>{tr('Reference number')}: {bill.reference}</Text>}
           {!!bill.iban && <Text style={styles.bodyText}>{tr('IBAN')}: {bill.iban}</Text>}
-          <View style={{ marginTop: themeSpacing.sm, gap: 6 }}>
-            <Text style={styles.fieldLabel}>{tr('Invoice number (optional)')}</Text>
-            <AppInput placeholder={tr('Invoice number')} value={invoiceNumber} onChangeText={setInvoiceNumber} />
-            <AppButton
-              label={invoiceSaving ? tr('Saving…') : tr('Save invoice number')}
-              iconName="save-outline"
-              variant="secondary"
-              onPress={saveInvoiceNumber}
-              loading={invoiceSaving}
-            />
-          </View>
           {!bill.due_date && (
             <InlineInfo
               tone="warning"
@@ -2647,7 +2735,7 @@ function BillDetailsScreen() {
                       const { data } = await listWarranties(s0, effectiveSpaceId)
                       const existing = (data || []).find((w: any) => w.bill_id === bill.id) || null
                       if (existing?.id) {
-                        Alert.alert(tr('Warranty already exists'), tr('Opening the existing warranty for this bill.'))
+                        showDetailNotice(tr('Opening the existing warranty for this bill.'))
                         navigation.navigate('Warranty Details', { warrantyId: existing.id })
                         return
                       }
@@ -2655,7 +2743,7 @@ function BillDetailsScreen() {
                       const locals = await loadLocalWarranties(effectiveSpaceId)
                       const existing = (locals || []).find((w: any) => w.bill_id === bill.id) || null
                       if ((existing as any)?.id) {
-                        Alert.alert(tr('Warranty already exists'), tr('Opening the existing warranty for this bill.'))
+                        showDetailNotice(tr('Opening the existing warranty for this bill.'))
                         navigation.navigate('Warranty Details', { warrantyId: (existing as any).id })
                         return
                       }
@@ -2673,7 +2761,7 @@ function BillDetailsScreen() {
                     createdId = local.id
                   }
                   if (createdId) {
-                    Alert.alert(tr('Warranty created'), tr('Linked to this bill.'))
+                    showDetailNotice(tr('Linked to this bill.'))
                     navigation.navigate('Warranty Details', { warrantyId: createdId })
                   }
                 } catch (e: any) {
@@ -2700,7 +2788,8 @@ function BillDetailsScreen() {
                   return
                 }
                 await scheduleBillReminders({ ...bill, space_id: effectiveSpaceId } as any, undefined, effectiveSpaceId)
-                Alert.alert(tr('Reminders'), tr('Scheduled default reminders for this bill.'))
+                setDefaultReminderInfo(tr('Default reminders: 3 days before at 10:00 and on due date at 09:00.'))
+                showDetailNotice(tr('Scheduled default reminders for this bill.'))
               }}
             />
             <AppButton
@@ -2709,25 +2798,33 @@ function BillDetailsScreen() {
               iconName="notifications-off-outline"
               onPress={async ()=>{
                 await cancelBillReminders(bill.id, effectiveSpaceId)
-                Alert.alert(tr('Reminders'), tr('Canceled for this bill.'))
+                showDetailNotice(tr('Canceled for this bill.'))
               }}
             />
           </View>
+          {defaultReminderInfo ? (
+            <InlineInfo
+              tone="info"
+              iconName="information-circle-outline"
+              message={defaultReminderInfo}
+              style={{ marginTop: themeSpacing.xs }}
+            />
+          ) : null}
           <View style={styles.billActionsRow}>
             <AppButton
-              label={tr('Snooze 1 day')}
+              label={tr('Send in 1 day')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 1, effectiveSpaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 1 day.')) }}
+              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 1, effectiveSpaceId); showDetailNotice(tr('Next reminder in 1 day.')) }}
             />
             <AppButton
-              label={tr('Snooze 3 days')}
+              label={tr('Send in 3 days')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 3, effectiveSpaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 3 days.')) }}
+              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 3, effectiveSpaceId); showDetailNotice(tr('Next reminder in 3 days.')) }}
             />
             <AppButton
-              label={tr('Snooze 7 days')}
+              label={tr('Send in 7 days')}
               variant="secondary"
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 7, effectiveSpaceId); Alert.alert(tr('Snoozed'), tr('Next reminder in 7 days.')) }}
+              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 7, effectiveSpaceId); showDetailNotice(tr('Next reminder in 7 days.')) }}
             />
           </View>
         </Surface>
@@ -2760,10 +2857,11 @@ function BillDetailsScreen() {
             <FlatList
               data={attachments}
               keyExtractor={(a)=>a.path}
-              contentContainerStyle={styles.listContent}
+              contentContainerStyle={[styles.listContent, { paddingTop: themeSpacing.sm }]}
               renderItem={({ item }) => (
-                <Surface elevated style={styles.billRowCard}>
-                  <Text style={styles.cardTitle}>{item.name}</Text>
+                <Surface elevated padded={false} style={[styles.billRowCard, styles.attachmentCard]}>
+                  <View style={styles.attachmentCardContent}>
+                    <Text style={styles.attachmentFileName}>{item.name}</Text>
                   <View style={styles.billActionsRow}>
                     <AppButton
                       label={tr('Open')}
@@ -2778,6 +2876,7 @@ function BillDetailsScreen() {
                       onPress={()=>remove(item.path)}
                     />
                   </View>
+                  </View>
                 </Surface>
               )}
             />
@@ -2785,38 +2884,59 @@ function BillDetailsScreen() {
         </Surface>
 
         <Surface elevated>
-          <SectionHeader title={tr('Danger zone')} />
           <AppButton
             label={tr('Delete bill')}
             variant="ghost"
             iconName="trash-outline"
             onPress={() => {
-              Alert.alert(tr('Delete bill?'), tr('Are you sure? This cannot be undone. Attachments will be deleted too.'), [
-                { text: tr('Cancel'), style: 'cancel' },
-                {
-                  text: tr('Delete'),
-                  style: 'destructive',
-                  onPress: async () => {
-                    try {
-                      await deleteAllAttachmentsForRecord(effectiveSpaceId, 'bills', bill.id)
-                      if (supabase) {
-                        const { error } = await deleteBill(supabase, bill.id, effectiveSpaceId)
-                        if (error) throw error
-                      } else {
-                        await deleteLocalBill(effectiveSpaceId, bill.id)
-                      }
-                      Alert.alert(tr('Deleted'), tr('Bill removed.'))
-                      navigation.goBack()
-                    } catch (e: any) {
-                      Alert.alert(tr('Delete failed'), e?.message || tr('Unable to delete bill'))
+              showDangerConfirm(
+                tr('Delete bill?'),
+                tr('Are you sure? This cannot be undone. Attachments will be deleted too.'),
+                async () => {
+                  try {
+                    await deleteAllAttachmentsForRecord(effectiveSpaceId, 'bills', bill.id)
+                    if (supabase) {
+                      const { error } = await deleteBill(supabase, bill.id, effectiveSpaceId)
+                      if (error) throw error
+                    } else {
+                      await deleteLocalBill(effectiveSpaceId, bill.id)
                     }
-                  },
+                    showDetailNotice(tr('Bill removed.'))
+                    navigation.goBack()
+                  } catch (e: any) {
+                    Alert.alert(tr('Delete failed'), e?.message || tr('Unable to delete bill'))
+                  }
                 },
-              ])
+                tr('Delete')
+              )
             }}
           />
         </Surface>
       </View>
+
+      <Modal visible={!!dangerConfirm} transparent animationType="fade" onRequestClose={() => setDangerConfirm(null)}>
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={{ width: '100%', maxWidth: 520, alignSelf: 'center' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
+              <Ionicons name="warning" size={20} color="#DC2626" />
+              <Text style={[styles.screenHeaderTitle, { color: '#DC2626' }]}>{dangerConfirm?.title || ''}</Text>
+            </View>
+            <Text style={[styles.bodyText, { marginTop: themeSpacing.xs, color: '#DC2626' }]}>{dangerConfirm?.message || ''}</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
+              <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setDangerConfirm(null)} />
+              <AppButton
+                label={dangerConfirm?.confirmLabel || tr('Delete')}
+                iconName="alert-circle-outline"
+                onPress={async () => {
+                  const action = dangerConfirm?.onConfirm
+                  setDangerConfirm(null)
+                  if (action) await action()
+                }}
+              />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
     </Screen>
   )
 }
@@ -3304,6 +3424,23 @@ function ScanBillScreen() {
   const [dueDate, setDueDate] = useState('')
   const [showDuePicker, setShowDuePicker] = useState(false)
   const [archiveOnly, setArchiveOnly] = useState(archiveOnlyFromBillDraftSelection(DEFAULT_BILL_DRAFT_SELECTION))
+  const [saveNotice, setSaveNotice] = useState<string | null>(null)
+  const saveNoticeTimerRef = useRef<any>(null)
+
+  const showSaveNotice = useCallback((message: string, durationMs = 2200) => {
+    if (saveNoticeTimerRef.current) clearTimeout(saveNoticeTimerRef.current)
+    setSaveNotice(message)
+    saveNoticeTimerRef.current = setTimeout(() => {
+      setSaveNotice(null)
+      saveNoticeTimerRef.current = null
+    }, Math.max(800, durationMs))
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (saveNoticeTimerRef.current) clearTimeout(saveNoticeTimerRef.current)
+    }
+  }, [])
 
   const [creditorName, setCreditorName] = useState('')
   const [iban, setIban] = useState('')
@@ -3371,6 +3508,47 @@ function ScanBillScreen() {
     const languageHint = getCurrentLang()
     void extractWithOCR(uri, pendingAttachment?.type || undefined, { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
   }, [pendingAttachment?.type, pendingAttachment?.uri])
+
+  const buildAttachmentNameFromInvoiceNumber = useCallback((inv: string, originalName: string, mime?: string): string => {
+    const invoice = String(inv || '').trim()
+    if (!invoice) return originalName
+    // Avoid renaming when we only have a generated placeholder.
+    if (/^DOC-\d{8}-\d{3}$/i.test(invoice) || /^DOC-/i.test(invoice)) return originalName
+    const safeBase = invoice
+      .toUpperCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^A-Z0-9._-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[-.]+|[-.]+$/g, '')
+    if (!safeBase) return originalName
+
+    const orig = String(originalName || '').trim()
+    const extFromName = (() => {
+      const m = orig.match(/\.([a-z0-9]{2,6})$/i)
+      return m?.[1] ? `.${m[1].toLowerCase()}` : ''
+    })()
+    const extFromMime = (() => {
+      const t = String(mime || '').toLowerCase()
+      if (t.includes('pdf')) return '.pdf'
+      if (t.includes('png')) return '.png'
+      if (t.includes('jpg') || t.includes('jpeg')) return '.jpg'
+      if (t.startsWith('image/')) return '.jpg'
+      return ''
+    })()
+    const ext = extFromName || extFromMime
+    return `${safeBase}${ext || ''}`
+  }, [])
+
+  useEffect(() => {
+    if (!pendingAttachment?.uri) return
+    const inv = String(invoiceNumber || '').trim()
+    if (!inv) return
+    const nextName = buildAttachmentNameFromInvoiceNumber(inv, pendingAttachment.name, pendingAttachment.type)
+    if (!nextName) return
+    if (nextName === pendingAttachment.name) return
+    // Only rename once the invoice number is known; do not change the URI.
+    setPendingAttachment((prev) => prev ? ({ ...prev, name: nextName }) : prev)
+  }, [buildAttachmentNameFromInvoiceNumber, invoiceNumber, pendingAttachment?.name, pendingAttachment?.type, pendingAttachment?.uri])
 
   function looksLikeMisassignedName(input: any): boolean {
     const s = (input ?? '').toString().trim()
@@ -3540,7 +3718,8 @@ function ScanBillScreen() {
     { key: 'fuel', pattern: /(gorivo|petrol|diesel|bencin|bencin|fuel|pumpa|gas\s*station|shell|omv|ina)/i },
     { key: 'subscription', pattern: /(naro\u010dnin|subscription|membership|plan|monthly|mese\u010dno)/i },
     { key: 'service', pattern: /(storitev|service|vzdr\u017eevanje|maintenance|servis|repair|popravilo)/i },
-    { key: 'warranty_product', pattern: /(garanc|warranty|izdelek|product|artikel|item|device|aparat)/i },
+    { key: 'white_goods', pattern: /(bela\s*tehnika|elektrodom|gospodinjsk\S*\s*aparat|praln\S*\s*stroj|pomivaln\S*\s*stroj|hladilnik|zamrzovalnik|pe\u010dica|\u0161tedilnik|bojler|mikrovalovn\S*|su\u0161iln\S*\s*stroj|washing\s*machine|dishwasher|fridge|freezer|oven|stove)/i },
+    { key: 'machines_equipment', pattern: /(stroj\S*|naprav\S*|machine\b|equipment\b|tool\b|kompresor|generator|motor\b|pump\b|\u010drpalka|bagger|excavat\S*)/i },
   ]
 
   const CATEGORY_OPTIONS = [
@@ -3551,12 +3730,22 @@ function ScanBillScreen() {
     { key: 'fuel', labelKey: 'Category: fuel' },
     { key: 'subscription', labelKey: 'Category: subscription' },
     { key: 'service', labelKey: 'Category: service' },
-    { key: 'warranty_product', labelKey: 'Category: warranty product' },
+    { key: 'white_goods', labelKey: 'Category: white goods' },
+    { key: 'machines_equipment', labelKey: 'Category: machines/equipment' },
     { key: 'other', labelKey: 'Category: other' },
   ]
 
+  // Legacy categories: keep for label rendering, but do not show in the picker.
+  const CATEGORY_LABEL_ONLY = [
+    { key: 'warranty_product', labelKey: 'Category: warranty product' },
+  ]
+
+  const CATEGORY_OPTIONS_PICKER = CATEGORY_OPTIONS
+
+  const CATEGORY_OPTIONS_ALL = [...CATEGORY_OPTIONS, ...CATEGORY_LABEL_ONLY]
+
   const getCategoryLabel = (key: string): string => {
-    const found = CATEGORY_OPTIONS.find((c) => c.key === key)
+    const found = CATEGORY_OPTIONS_ALL.find((c) => c.key === key)
     return found ? tr(found.labelKey) : key
   }
 
@@ -3780,6 +3969,13 @@ function ScanBillScreen() {
     return bestRaw
   }
 
+  function hasTrOrAccountLabel(t: string): boolean {
+    const s = String(t || '')
+    // Slovenian invoices often use TR/TRR for "transakcijski račun" (bank account).
+    // Only treat it as a label when it looks like a label (e.g. "TR:"), not a country code in an IBAN.
+    return /(\btrr\b|\btr\s*[:\-]|transakcij\S*\s*ra\u010dun|transakcij\S*\s*racun|\bbic\b|\bswift\b|\bbanka\b|\bbank\b)/i.test(s)
+  }
+
   function extractIbanCandidates(text: string, rawIban?: string): string[] {
     const raw = String(text || '')
     const all = new Set<string>()
@@ -3843,19 +4039,36 @@ function ScanBillScreen() {
         .map((l) => l.trim())
         .filter(Boolean)
 
-      const labelRe = /(\biban\b|\btrr\b|bank\s*account|account\s*(?:no\.?|number)?|\bra\u010dun\b|\bracun\b)/i
+      const labelRe = /(\biban\b|\btrr\b|\btr\b|bank\s*account|account\s*(?:no\.?|number)?|\bra\u010dun\b|\bracun\b)/i
+      const bankContextRe = /(\bbic\b|\bswift\b|\bsepa\b|\bbank\b|\bbanka\b|\btrr\b|\btr\b|transakcij\S*\s*ra\u010dun|transakcij\S*\s*racun|\bnlb\b|\bskb\b|\bintesa\b|\bunicredit\b|\bsparkasse\b|\botp\b|\babanka\b|\bdelavska\b)/i
       const grabFromLine = (l: string) => {
         // Allow spaces and separators; we later normalize.
         const m = String(l || '').match(/([A-Z]{2}\s*[0-9A-Z\s\-]{9,40}|\d[\d\s\-]{12,30})/i)
         if (m?.[1]) out.push(String(m[1]))
       }
 
+      const grabSiBbanFromContext = (l: string) => {
+        const line = String(l || '')
+        if (!bankContextRe.test(line)) return
+        const chunks = line.match(/\b\d[\d\s\-]{13,22}\b/g) || []
+        for (const c of chunks) {
+          const digitsOnly = String(c || '').replace(/\D/g, '')
+          if (digitsOnly.length === 15) out.push(digitsOnly)
+        }
+      }
+
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i]
+        // Some invoices show only TRR/BBAN digits plus BIC/SWIFT/bank line without the word "IBAN".
+        // Capture 15-digit SI account candidates only when bank context is present.
+        grabSiBbanFromContext(l)
         if (!labelRe.test(l)) continue
         grabFromLine(l)
         const next = lines[i + 1]
-        if (next) grabFromLine(next)
+        if (next) {
+          grabFromLine(next)
+          grabSiBbanFromContext(next)
+        }
       }
       return out
     }
@@ -4289,6 +4502,18 @@ function ScanBillScreen() {
 
     const isQr = incomingRank === 0
 
+    const looksLikeTelecomIdentifier = (v: string): boolean => {
+      const s = String(v || '').replace(/\s+/g, ' ').trim()
+      if (!s) return false
+      // Telecom invoices often contain identifiers that are NOT meaningful as "purchase item".
+      if (/\bIP\s*-?\s*telefonsk/i.test(s)) return true
+      if (/\b(?:msisdn|imei|imsi|iccid|sim|e-?sim)\b/i.test(s)) return true
+      if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(s)) return true // IPv4
+      if (/\b\+?\d{6,15}\b/.test(s)) return true // phone-like numbers
+      if (/\b\d{6,}\b/.test(s) && /\b(telefon|phone|call|mob|mobile|telekom|telecom)\b/i.test(s)) return true
+      return false
+    }
+
     // FINAL GLOBAL FLOW: always map extracted fields into the draft.
     // Archive-only affects validation/required-ness, but should NOT prevent
     // prefilling payment fields from OCR/PDF (user may choose to pay later).
@@ -4404,10 +4629,14 @@ function ScanBillScreen() {
     if (!editedRef.current.purchaseItem) {
       const purposeCandidate = String(rawPurpose || '').replace(/\s+/g, ' ').trim()
       const purposeLooksLikeItem = purposeCandidate && !/^pla\u010dilo\b/i.test(purposeCandidate)
-      const itemCandidate =
-        String(rawItem || '').replace(/\s+/g, ' ').trim() ||
-        (!isQr ? (extractMeaningfulPurposeFromText(rawText) || '') : '') ||
-        (purposeLooksLikeItem ? purposeCandidate : '')
+      const detectedCategoryForItem = detectCategoryFromText(nameCandidate || rawSupplier || rawCreditor || '', String(rawPurpose || ''), String(rawItem || ''))
+      const meaningfulFromText = !isQr ? (extractMeaningfulPurposeFromText(rawText) || '') : ''
+      const rawItemClean = String(rawItem || '').replace(/\s+/g, ' ').trim()
+
+      let itemCandidate = rawItemClean || meaningfulFromText || (purposeLooksLikeItem ? purposeCandidate : '')
+      if (detectedCategoryForItem === 'telecom' && itemCandidate && looksLikeTelecomIdentifier(itemCandidate)) {
+        itemCandidate = meaningfulFromText || (purposeLooksLikeItem ? purposeCandidate : '') || ''
+      }
       if (itemCandidate && canSetField('purchase_item', itemCandidate, editedRef.current.purchaseItem, purchaseItem)) {
         setPurchaseItem(itemCandidate)
         markFieldSource('purchase_item')
@@ -4423,6 +4652,10 @@ function ScanBillScreen() {
     const preferredIban = allowPaymentFields && rawIban ? (tryRepairIbanChecksum(rawIban) || null) : null
     const ibanCandidates = allowPaymentFields ? extractIbanCandidates(rawText || '', rawIban) : []
     const foundIban = preferredIban || (ibanCandidates.length === 1 ? ibanCandidates[0] : null)
+
+    const sawTrOrAccountLabel = allowPaymentFields
+      ? hasTrOrAccountLabel(rawText || '') || hasTrOrAccountLabel(String(rawPaymentDetails || ''))
+      : false
 
     if (allowPaymentFields && ibanCandidates.length) {
       console.log('[OCR] IBAN candidates:', ibanCandidates)
@@ -4442,7 +4675,11 @@ function ScanBillScreen() {
           setIbanPickerVisible(true)
         }
         if (ibanCandidates.length === 0 && !editedRef.current.iban && !iban.trim()) {
-          setIbanHint(tr('IBAN not found.'))
+          warnings.push(
+            sawTrOrAccountLabel
+              ? tr('Payment account (TR/TRR) detected, but IBAN could not be determined. Please verify it.')
+              : tr('IBAN not found.')
+          )
         }
         if (rawIban) {
           warnings.push(tr('IBAN could not be validated. Please check it.'))
@@ -4647,8 +4884,10 @@ function ScanBillScreen() {
         // the structured fields (IBAN/reference) so "Save bill for payment" works.
         if (!editedRef.current.iban && !iban.trim()) {
           const extractedIban = extractFirstValidIban(detailsClean)
-          if (extractedIban && canSetField('iban', extractedIban, editedRef.current.iban, iban)) {
-            setIban(extractedIban)
+          const derivedCandidates = extractIbanCandidates(detailsClean)
+          const derived = extractedIban || (derivedCandidates.length === 1 ? derivedCandidates[0] : null)
+          if (derived && canSetField('iban', derived, editedRef.current.iban, iban)) {
+            setIban(derived)
             markFieldSource('iban')
           }
         }
@@ -4748,6 +4987,10 @@ function ScanBillScreen() {
     if (!iban.trim()) {
       const extracted = extractFirstValidIban(next)
       if (extracted) setIban(extracted)
+      else {
+        const derived = extractIbanCandidates(next)
+        if (derived.length === 1) setIban(derived[0])
+      }
     }
     if (!reference.trim()) {
       const extractedRef = extractReferenceCandidate(next)
@@ -4817,6 +5060,18 @@ function ScanBillScreen() {
     paymentDetails ||
     pendingAttachment
   )
+
+  const resetInvoiceAndItemAutofillForNewAttachment = useCallback(() => {
+    // New document => never keep previous document's invoice number / subject.
+    // Also reset precedence ranks so OCR/AI for the new file can overwrite.
+    editedRef.current.invoiceNumber = false
+    editedRef.current.purchaseItem = false
+    try { delete (fieldSourceRankRef.current as any)['invoice_number'] } catch {}
+    try { delete (fieldSourceRankRef.current as any)['purchase_item'] } catch {}
+    setInvoiceNumber('')
+    setPurchaseItem('')
+    setMissingBasicFields((prev) => ({ ...prev, invoice: false, purchaseItem: false }))
+  }, [])
 
   const clearExtraction = useCallback(() => {
     setManual('')
@@ -4927,6 +5182,8 @@ function ScanBillScreen() {
       if (res.canceled) return
       const asset = res.assets?.[0]
       if (!asset?.uri) return
+
+      resetInvoiceAndItemAutofillForNewAttachment()
       const logMeta = {
         originalUri: asset.uri,
         mimeType: asset.mimeType || 'image/jpeg',
@@ -4975,6 +5232,8 @@ function ScanBillScreen() {
       if (res.canceled) return
       const file = res.assets?.[0]
       if (!file?.uri) return
+
+      resetInvoiceAndItemAutofillForNewAttachment()
       const logMeta = {
         originalUri: file.uri,
         mimeType: file.mimeType || 'application/pdf',
@@ -5655,7 +5914,7 @@ function ScanBillScreen() {
       }
 
       if (showAlert) {
-        Alert.alert(tr('Bill saved'), isArchiveOnly ? tr('Saved as archived (already paid)') : (s ? tr('Bill created successfully') : tr('Saved locally (Not synced)')))
+        showSaveNotice(isArchiveOnly ? tr('Saved as archived (already paid)') : (s ? tr('Bill created successfully') : tr('Saved locally (Not synced)')))
       }
       clearExtraction()
       try { (navigation as any)?.navigate?.('Bills', { highlightBillId: savedId }) } catch {}
@@ -5671,7 +5930,7 @@ function ScanBillScreen() {
   const handleArchiveImmediate = async () => {
     setArchiveOnly(true)
     const ok = await handleSaveBill(true, { showAlert: false })
-    if (ok) Alert.alert(tr('Saved'), tr('Saved to archive'))
+    if (ok) showSaveNotice(tr('Saved to archive'))
   }
 
   if (spaceLoading || !space) {
@@ -5697,6 +5956,8 @@ function ScanBillScreen() {
               value={spacesCtx.current?.id || spaceId || ''}
               onChange={(id) => { spacesCtx.setCurrent(id) }}
               options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
+              activeBgColor={themeColors.primary}
+              activeTextColor="#FFFFFF"
               style={{ marginTop: themeSpacing.xs }}
             />
             <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>{tr('Bills you save are assigned to the active profile.')}</Text>
@@ -5708,6 +5969,10 @@ function ScanBillScreen() {
           iconName="scan-outline"
           message={tr('Scan or import a bill, review the draft below, then save.')}
         />
+
+        {saveNotice ? (
+          <InlineInfo tone="success" iconName="checkmark-circle-outline" message={saveNotice} />
+        ) : null}
 
         {!permission?.granted ? (
           <Surface elevated>
@@ -6114,6 +6379,7 @@ function ScanBillScreen() {
                   if (res.canceled) return
                   const asset = res.assets?.[0]
                   if (!asset?.uri) return
+                  resetInvoiceAndItemAutofillForNewAttachment()
                   setPendingAttachment({ uri: asset.uri, name: asset.fileName || 'photo.jpg', type: asset.type || 'image/jpeg' })
                 }}
               />
@@ -6126,6 +6392,7 @@ function ScanBillScreen() {
                   if (res.canceled) return
                   const file = res.assets?.[0]
                   if (!file?.uri) return
+                  resetInvoiceAndItemAutofillForNewAttachment()
                   setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
                 }}
               />
@@ -6198,7 +6465,7 @@ function ScanBillScreen() {
             <Text style={styles.screenHeaderTitle}>{tr('Category')}</Text>
             <Text style={[styles.bodyText, { marginTop: themeSpacing.xs }]}>{tr('Select category')}</Text>
             <View style={{ marginTop: themeSpacing.md, gap: themeSpacing.xs }}>
-              {CATEGORY_OPTIONS.map((opt) => (
+              {CATEGORY_OPTIONS_PICKER.map((opt) => (
                 <AppButton
                   key={opt.key}
                   label={tr(opt.labelKey)}
@@ -6810,6 +7077,8 @@ function BillsListScreen() {
 
   const [exportBusy, setExportBusy] = useState(false)
   const [exportBusyLabel, setExportBusyLabel] = useState('')
+  const [exportSelectVisible, setExportSelectVisible] = useState(false)
+  const [exportSelectedIds, setExportSelectedIds] = useState<Record<string, true>>({})
 
   const defaultExportScope: ExportPayerScope = spaceId === 'personal2' ? 'payer2' : 'payer1'
   const canUsePayer2 = Number(entitlements?.payerLimit || 1) >= 2
@@ -6874,6 +7143,35 @@ function BillsListScreen() {
   const [installmentEndMonth, setInstallmentEndMonth] = useState('')
   const [installmentSaving, setInstallmentSaving] = useState(false)
   const [installmentUpgradeVisible, setInstallmentUpgradeVisible] = useState(false)
+  const [installmentAttempted, setInstallmentAttempted] = useState(false)
+
+  const [toast, setToast] = useState<{ message: string; tone?: 'success' | 'info' | 'danger' } | null>(null)
+  const toastTimerRef = useRef<any>(null)
+  const showToast = useCallback((message: string, tone: 'success' | 'info' | 'danger' = 'success', durationMs = 2200) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToast({ message, tone })
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null)
+      toastTimerRef.current = null
+    }, Math.max(800, durationMs))
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    }
+  }, [])
+
+  const [dangerConfirm, setDangerConfirm] = useState<{
+    title: string
+    message: string
+    confirmLabel?: string
+    onConfirm: () => void | Promise<void>
+  } | null>(null)
+
+  const showDangerConfirm = useCallback((title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string) => {
+    setDangerConfirm({ title, message, onConfirm, confirmLabel })
+  }, [])
 
   const [installmentMonthPickerVisible, setInstallmentMonthPickerVisible] = useState(false)
   const [installmentMonthPickerField, setInstallmentMonthPickerField] = useState<'start' | 'end' | null>(null)
@@ -6904,9 +7202,12 @@ function BillsListScreen() {
     const startOk = /^\d{4}-\d{2}$/.test(nextStart.trim())
     if (!startOk) return
 
+    const monthsCount = Math.floor(Number(String(nextMonths).trim()))
+    const hasMonths = Number.isFinite(monthsCount) && monthsCount >= 1
+    const endOk = /^\d{4}-\d{2}$/.test(nextEnd.trim())
+
     if (lastInstallmentEditRef.current === 'months') {
-      const monthsCount = Math.floor(Number(String(nextMonths).trim()))
-      if (Number.isFinite(monthsCount) && monthsCount >= 1) {
+      if (hasMonths) {
         const computedEnd = addMonthsToYYYYMM(nextStart.trim(), monthsCount - 1)
         if (computedEnd !== nextEnd) setInstallmentEndMonth(computedEnd)
       }
@@ -6914,13 +7215,28 @@ function BillsListScreen() {
     }
 
     if (lastInstallmentEditRef.current === 'end') {
-      const endOk = /^\d{4}-\d{2}$/.test(nextEnd.trim())
       if (endOk) {
         const diff = diffMonthsInclusive(nextStart.trim(), nextEnd.trim())
         if (diff && diff >= 1) {
           const computedMonths = String(diff)
           if (computedMonths !== String(nextMonths || '')) setInstallmentMonths(computedMonths)
         }
+      }
+      return
+    }
+
+    // If the user edits the start month, keep the previously edited "duration" field stable,
+    // and recompute the other one.
+    if (hasMonths) {
+      const computedEnd = addMonthsToYYYYMM(nextStart.trim(), monthsCount - 1)
+      if (computedEnd !== nextEnd) setInstallmentEndMonth(computedEnd)
+      return
+    }
+    if (endOk) {
+      const diff = diffMonthsInclusive(nextStart.trim(), nextEnd.trim())
+      if (diff && diff >= 1) {
+        const computedMonths = String(diff)
+        if (computedMonths !== String(nextMonths || '')) setInstallmentMonths(computedMonths)
       }
     }
   }, [diffMonthsInclusive])
@@ -6937,7 +7253,6 @@ function BillsListScreen() {
           if (!selectedDate) return
           const ym = monthKeyFromDate(selectedDate)
           if (field === 'start') {
-            lastInstallmentEditRef.current = null
             setInstallmentStartMonth(ym)
             syncInstallmentDerived(ym, installmentMonths, installmentEndMonth)
           } else {
@@ -7108,8 +7423,94 @@ function BillsListScreen() {
     setInstallmentPurpose('')
     setInstallmentMonths('')
     setInstallmentEndMonth('')
+    setInstallmentAttempted(false)
+    lastInstallmentEditRef.current = null
     setInstallmentVisible(true)
   }, [])
+
+  const installmentValidation = useMemo(() => {
+    const title = installmentTitle.trim()
+    const currency = String(installmentCurrency || '').trim()
+    const startMonth = installmentStartMonth.trim()
+    const endMonth = installmentEndMonth.trim()
+    const monthsCount = Math.floor(Number(String(installmentMonths).trim()))
+    const day = Math.floor(Number(String(installmentDueDay).trim()))
+    const creditor = installmentCreditor.trim()
+    const ibanNorm = normalizeIban(installmentIban)
+    const model = normalizeReferenceModel(installmentReferenceModel)
+    const number = normalizeReferenceNumber(installmentReferenceNumber)
+    const purpose = installmentPurpose.trim()
+
+    const titleOk = Boolean(title)
+    const amt = Number(String(installmentAmount).replace(',', '.'))
+    const amountOk = Number.isFinite(amt) && amt > 0
+    const currencyOk = Boolean(currency)
+    const startOk = /^\d{4}-\d{2}$/.test(startMonth)
+    const endOk = /^\d{4}-\d{2}$/.test(endMonth)
+    const monthsOk = Number.isFinite(monthsCount) && monthsCount >= 1
+    const dayOk = Number.isFinite(day) && day >= 1 && day <= 31
+    const rangeOk = startOk && endOk && compareYYYYMM(endMonth, startMonth) >= 0
+    const diff = startOk && endOk ? diffMonthsInclusive(startMonth, endMonth) : null
+    const monthsMatchOk = monthsOk && diff != null && diff >= 1 && diff === monthsCount
+    const creditorOk = Boolean(creditor)
+    const ibanOk = Boolean(ibanNorm) && isValidIbanChecksum(ibanNorm || '')
+    const modelOk = Boolean(model)
+    const numberOk = Boolean(number)
+    const referenceOk = Boolean(model) && Boolean(number) && Boolean(buildReferenceFromModel(model, number))
+    const purposeOk = Boolean(purpose)
+
+    const complete =
+      titleOk &&
+      amountOk &&
+      currencyOk &&
+      startOk &&
+      endOk &&
+      monthsOk &&
+      dayOk &&
+      rangeOk &&
+      monthsMatchOk &&
+      creditorOk &&
+      ibanOk &&
+      modelOk &&
+      numberOk &&
+      referenceOk &&
+      purposeOk
+
+    return {
+      titleOk,
+      amountOk,
+      currencyOk,
+      startOk,
+      endOk,
+      monthsOk,
+      dayOk,
+      rangeOk,
+      monthsMatchOk,
+      creditorOk,
+      ibanOk,
+      modelOk,
+      numberOk,
+      referenceOk,
+      purposeOk,
+      complete,
+    }
+  }, [
+    diffMonthsInclusive,
+    installmentAmount,
+    installmentCreditor,
+    installmentCurrency,
+    installmentDueDay,
+    installmentEndMonth,
+    installmentIban,
+    installmentMonths,
+    installmentPurpose,
+    installmentReferenceModel,
+    installmentReferenceNumber,
+    installmentStartMonth,
+    installmentTitle,
+  ])
+
+  const installmentComplete = installmentValidation.complete
 
   useEffect(() => {
     const shouldOpen = Boolean((route as any)?.params?.openInstallment)
@@ -7135,66 +7536,35 @@ function BillsListScreen() {
       return
     }
 
+    // Require the form to be fully complete before saving.
+    setInstallmentAttempted(true)
+    if (!installmentComplete) {
+      Alert.alert(tr('Required field'), tr('Please fill all required fields.'))
+      return
+    }
+
     const title = installmentTitle.trim()
-    if (!title) {
-      Alert.alert(tr('Missing supplier'), tr('Please enter the supplier name.'))
-      return
-    }
     const amt = Number(String(installmentAmount).replace(',', '.'))
-    if (!Number.isFinite(amt) || amt <= 0) {
-      Alert.alert(tr('Invalid amount'), tr('Please enter a valid amount.'))
-      return
-    }
+    const currency = String(installmentCurrency || '').trim() || 'EUR'
+    const startMonth = installmentStartMonth.trim()
+    const endMonth = installmentEndMonth.trim()
+    const monthsCount = Math.floor(Number(String(installmentMonths).trim()))
+    void monthsCount
+    const day = Math.floor(Number(String(installmentDueDay).trim()))
 
     const creditor = installmentCreditor.trim()
-    const iban = installmentIban.trim()
-    const modelRaw = installmentReferenceModel.trim()
-    const numberRaw = installmentReferenceNumber.trim()
-    const reference = modelRaw ? buildReferenceFromModel(modelRaw, numberRaw) : normalizeReference(numberRaw)
+    const iban = normalizeIban(installmentIban) || ''
+    const model = normalizeReferenceModel(installmentReferenceModel)
+    const number = normalizeReferenceNumber(installmentReferenceNumber)
+    const reference = buildReferenceFromModel(model, number)
     const purpose = installmentPurpose.trim()
-    if (!creditor || !iban || !reference || !purpose) {
-      Alert.alert(tr('Missing payment details'), tr('Please fill creditor, IBAN, reference, and purpose.'))
-      return
-    }
-
-    const startMonth = installmentStartMonth.trim()
-    if (!/^\d{4}-\d{2}$/.test(startMonth)) {
-      Alert.alert(tr('Invalid month'), tr('Use YYYY-MM for the start month.'))
-      return
-    }
-
-    let endMonth: string | null = null
-    const endRaw = installmentEndMonth.trim()
-    if (endRaw) {
-      if (!/^\d{4}-\d{2}$/.test(endRaw)) {
-        Alert.alert(tr('Invalid month'), tr('Use YYYY-MM for the end month.'))
-        return
-      }
-      endMonth = endRaw
-    } else {
-      const monthsCount = Math.floor(Number(String(installmentMonths).trim()))
-      if (!Number.isFinite(monthsCount) || monthsCount < 1) {
-        Alert.alert(tr('Missing duration'), tr('Enter number of months or an end month.'))
-        return
-      }
-      endMonth = addMonthsToYYYYMM(startMonth, monthsCount - 1)
-    }
-    if (endMonth && compareYYYYMM(endMonth, startMonth) < 0) {
-      Alert.alert(tr('Invalid month'), tr('End month must be after start month.'))
-      return
-    }
-    const day = Math.floor(Number(String(installmentDueDay).trim()))
-    if (!Number.isFinite(day) || day < 1 || day > 31) {
-      Alert.alert(tr('Invalid day'), tr('Use a day number between 1 and 31.'))
-      return
-    }
 
     try {
       setInstallmentSaving(true)
       await addLocalInstallment(spaceId, {
         title,
         amount: amt,
-        currency: (installmentCurrency || 'EUR').trim() || 'EUR',
+        currency,
         start_month: startMonth,
         due_day: day,
         creditor_name: creditor,
@@ -7206,7 +7576,7 @@ function BillsListScreen() {
 
       await loadBills(true)
       setInstallmentVisible(false)
-      Alert.alert(tr('Saved'), tr('Installment obligation saved.'))
+      showToast(tr('Installment obligation saved.'), 'success')
     } catch (e: any) {
       Alert.alert(tr('Save failed'), e?.message || tr('Unable to save.'))
     } finally {
@@ -7214,6 +7584,7 @@ function BillsListScreen() {
     }
   }, [
     entitlements.plan,
+    installmentComplete,
     installmentAmount,
     installmentCreditor,
     installmentCurrency,
@@ -7225,6 +7596,8 @@ function BillsListScreen() {
     installmentSaving,
     installmentStartMonth,
     installmentTitle,
+    installmentMonths,
+    installmentEndMonth,
     loadBills,
     navigation,
     spaceId,
@@ -7830,55 +8203,244 @@ function BillsListScreen() {
     await downloadAndShare(res.url, res.filename, res.contentType)
   }
 
-  const chooseExportScopeThen = useCallback((doExport: (scope: ExportPayerScope) => void) => {
-    if (!supabase || !canUsePayer2) {
-      doExport(defaultExportScope)
-      return
-    }
+  const MAX_EXPORT_BILLS_PER_ZIP = 40
 
-    const currentLabel = defaultExportScope === 'payer2' ? 'Profil 2' : 'Profil 1'
-    Alert.alert(tr('Profile scope'), `${tr('Current')}: ${currentLabel}`, [
-      { text: 'Profil 1', onPress: () => doExport('payer1') },
-      { text: 'Profil 2', onPress: () => doExport('payer2') },
-      { text: 'Profil 1 + Profil 2', onPress: () => doExport('both') },
-      { text: tr('Cancel'), style: 'cancel' as const },
-    ])
-  }, [canUsePayer2, defaultExportScope, supabase])
-
-  const chooseExportFormat = useCallback(() => {
+  const openExportSelection = useCallback(() => {
     if (!entitlements.exportsEnabled) {
       Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
       showUpgradeAlert('export')
       return
     }
-    Alert.alert(tr('Export'), `${resultsLabel}\n${tr('Choose export format')}`, [
-      { text: tr('Export Accounting CSV'), onPress: () => { void exportAccountingCSVSelection() } },
-      { text: tr('Export CSV'), onPress: () => { void exportCSVSelection() } },
-      {
-        text: tr('Export PDF report'),
-        onPress: () => {
-          chooseExportScopeThen((scope) => { void exportPDFSelection(scope) })
+    if (!filteredBills.length) {
+      Alert.alert(tr('No bills match the current filters.'), tr('Adjust your filters or add a new bill.'))
+      return
+    }
+    const next: Record<string, true> = {}
+    for (const b of filteredBills) next[b.id] = true
+    setExportSelectedIds(next)
+    setExportSelectVisible(true)
+  }, [entitlements.exportsEnabled, entitlements.status, filteredBills])
+
+  const toggleExportSelection = useCallback((id: string) => {
+    setExportSelectedIds((prev) => {
+      const next = { ...prev }
+      if (next[id]) delete next[id]
+      else next[id] = true
+      return next
+    })
+  }, [])
+
+  const selectAllExport = useCallback(() => {
+    const next: Record<string, true> = {}
+    for (const b of filteredBills) next[b.id] = true
+    setExportSelectedIds(next)
+  }, [filteredBills])
+
+  const clearAllExport = useCallback(() => {
+    setExportSelectedIds({})
+  }, [])
+
+  const selectedBillIds = useMemo(() => Object.keys(exportSelectedIds || {}), [exportSelectedIds])
+  const selectedBills = useMemo(() => filteredBills.filter((b) => exportSelectedIds[b.id]), [exportSelectedIds, filteredBills])
+  const allExportSelected = useMemo(() => filteredBills.length > 0 && selectedBillIds.length === filteredBills.length, [filteredBills.length, selectedBillIds.length])
+
+  const exportAttachmentsZip = useCallback(async (fileType: 'pdf' | 'image' | 'all') => {
+    if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
+      showUpgradeAlert('export')
+      return
+    }
+    if (!selectedBillIds.length) {
+      Alert.alert(tr('Required field'), tr('Please select at least one bill.'))
+      return
+    }
+    if (!supabase) {
+      Alert.alert(t(lang, 'Export'), t(lang, 'Exports require an online account.'))
+      return
+    }
+
+    const total = selectedBillIds.length
+    const parts = Math.ceil(total / MAX_EXPORT_BILLS_PER_ZIP)
+    if (parts > 1) {
+      showToast(tr('Export will be split into {count} parts.', { count: parts }), 'info')
+    }
+
+    for (let i = 0; i < parts; i += 1) {
+      const slice = selectedBillIds.slice(i * MAX_EXPORT_BILLS_PER_ZIP, (i + 1) * MAX_EXPORT_BILLS_PER_ZIP)
+      const res = await callExportFunction(
+        'export-zip',
+        {
+          billIds: slice,
+          filters: {
+            dateMode,
+            dateFrom,
+            dateTo,
+            supplierQuery,
+            amountMin,
+            amountMax,
+            hasAttachmentsOnly,
+            status: statusFilter,
+            includeArchived,
+            overdueOnly,
+            unpaidOnly,
+          },
+          attachmentTypes: fileType === 'all' ? ['pdf', 'image'] : [fileType],
+          exportPart: parts > 1 ? { index: i + 1, count: parts } : null,
         },
-      },
-      {
-        text: tr('Export attachments'),
-        onPress: () => {
-          chooseExportScopeThen((scope) => { void exportZIPSelection(scope) })
-        },
-      },
-      { text: tr('Export JSON (backup)'), onPress: () => { void exportJSONSelection() } },
-      { text: tr('Cancel'), style: 'cancel' as const },
-    ])
+        fileType === 'pdf' ? tr('Preparing PDF attachments…') : fileType === 'image' ? tr('Preparing image attachments…') : tr('Preparing attachments…')
+      )
+      if (!res) return
+      await downloadAndShare(res.url, res.filename, res.contentType)
+    }
   }, [
-    chooseExportScopeThen,
+    amountMax,
+    amountMin,
+    dateFrom,
+    dateMode,
+    dateTo,
     entitlements.exportsEnabled,
-    exportAccountingCSVSelection,
-    exportCSVSelection,
-    exportJSONSelection,
-    exportPDFSelection,
-    exportZIPSelection,
-    resultsLabel,
+    entitlements.status,
+    hasAttachmentsOnly,
+    selectedBillIds,
+    showToast,
+    statusFilter,
+    supplierQuery,
+    supabase,
+    unpaidOnly,
+    overdueOnly,
+    includeArchived,
   ])
+
+  const exportAttachmentsCsv = useCallback(async () => {
+    if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
+      showUpgradeAlert('export')
+      return
+    }
+    if (!selectedBillIds.length) {
+      Alert.alert(tr('Required field'), tr('Please select at least one bill.'))
+      return
+    }
+
+    const rows: any[] = []
+    for (const b of selectedBills) {
+      let list: any[] = []
+      try {
+        list = supabase
+          ? await listRemoteAttachments(supabase!, 'bills', b.id, (b as any).__spaceId || spaceId)
+          : await listLocalAttachments((b as any).__spaceId || spaceId, 'bills', b.id)
+      } catch {
+        list = []
+      }
+      for (const a of list || []) {
+        rows.push([
+          b.id,
+          b.supplier,
+          b.due_date,
+          a.name,
+          a.path,
+        ])
+      }
+    }
+
+    if (!rows.length) {
+      Alert.alert(tr('Export'), tr('No attachments found for the selected bills.'))
+      return
+    }
+
+    function csvEscape(v: any) {
+      const s = v === null || v === undefined ? '' : String(v)
+      return `"${s.replace(/"/g, '""')}"`
+    }
+
+    const header = ['bill_id', 'supplier', 'due_date', 'attachment_name', 'attachment_path']
+    const csv = [header]
+      .concat(rows)
+      .map((r: any[]) => r.map(csvEscape).join(','))
+      .join('\n')
+    const file = `${FileSystem.cacheDirectory}billbox-attachments.csv`
+    await FileSystem.writeAsStringAsync(file, csv)
+    if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(file)
+    else Alert.alert(tr('CSV saved'), file)
+  }, [
+    entitlements.exportsEnabled,
+    entitlements.status,
+    selectedBillIds,
+    selectedBills,
+    showToast,
+    spaceId,
+    supabase,
+  ])
+
+  const openBillAttachmentsForBill = useCallback(async (bill: Bill & { __spaceId?: string }) => {
+    try {
+      const billSpaceId = (bill as any)?.__spaceId || spaceId
+      const list = supabase
+        ? await listRemoteAttachments(supabase!, 'bills', bill.id, billSpaceId)
+        : await listLocalAttachments(billSpaceId, 'bills', bill.id)
+      const atts = (list || []) as AttachmentItem[]
+
+      if (!atts.length) {
+        Alert.alert(tr('No attachments'), tr('No attachments found for this bill.'))
+        return
+      }
+
+      const open = async (att: AttachmentItem) => {
+        if (supabase) {
+          const url = await getSignedUrl(supabase!, att.path)
+          if (url) Linking.openURL(url)
+          else Alert.alert(tr('Open failed'), tr('Could not get URL'))
+          return
+        }
+        if (att?.uri) {
+          Linking.openURL(att.uri)
+          return
+        }
+        Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
+      }
+
+      if (atts.length === 1) {
+        await open(atts[0])
+        return
+      }
+
+      const buttons = atts.slice(0, 6).map((a) => ({
+        text: String(a?.name || a?.path || tr('Open')),
+        onPress: () => {
+          void open(a)
+        },
+      }))
+      buttons.push({ text: tr('Cancel'), style: 'cancel' as const })
+      Alert.alert(tr('Open'), undefined, buttons)
+    } catch {
+      Alert.alert(tr('Open failed'), tr('Unknown error'))
+    }
+  }, [spaceId, supabase, tr])
+
+  const openSelectedBillAttachments = useCallback(async () => {
+    if (!selectedBills.length) {
+      Alert.alert(tr('Required field'), tr('Please select at least one bill.'))
+      return
+    }
+
+    if (selectedBills.length === 1) {
+      await openBillAttachmentsForBill(selectedBills[0])
+      return
+    }
+
+    const buttons = selectedBills.slice(0, 6).map((b) => ({
+      text: String(b.supplier || tr('Untitled bill')),
+      onPress: () => {
+        void openBillAttachmentsForBill(b)
+      },
+    }))
+    buttons.push({ text: tr('Cancel'), style: 'cancel' as const })
+    Alert.alert(tr('Select bill to view attachments'), undefined, buttons)
+  }, [openBillAttachmentsForBill, selectedBills, tr])
+
+  const chooseExportFormat = useCallback(() => {
+    openExportSelection()
+  }, [openExportSelection])
 
   useEffect(() => {
     const shouldOpen = Boolean((route as any)?.params?.openExportChooser)
@@ -7901,12 +8463,12 @@ function BillsListScreen() {
     }
 
     const timeout = setTimeout(() => {
-      chooseExportFormat()
+      openExportSelection()
     }, 200)
 
     navigation.setParams?.({ openExportChooser: null, exportPreset: null })
     return () => clearTimeout(timeout)
-  }, [chooseExportFormat, handleStatusChange, handleUnpaidToggle, navigation, route])
+  }, [handleStatusChange, handleUnpaidToggle, navigation, openExportSelection, route])
 
   const formatAmount = useCallback((value: number, currency?: string | null) => {
     try {
@@ -8221,7 +8783,6 @@ function BillsListScreen() {
 
             <View style={styles.listMetaRow}>
               <Text style={styles.listMetaText}>{resultsLabel}</Text>
-              <Text style={styles.listMetaSecondary}>{tr('Tap "Filters" to adjust date, supplier, amount, status, and attachments.')}</Text>
             </View>
           </View>
         }
@@ -8258,6 +8819,92 @@ function BillsListScreen() {
         </View>
       )}
 
+      <Modal visible={exportSelectVisible} transparent animationType="fade" onRequestClose={() => setExportSelectVisible(false)}>
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={styles.exportPickerSheet}>
+            <View style={styles.exportPickerHeader}>
+              <Text style={styles.screenHeaderTitle}>{tr('Select bills to export')}</Text>
+              <AppButton label={tr('Close')} variant="ghost" onPress={() => setExportSelectVisible(false)} />
+            </View>
+            <Text style={styles.mutedText}>{tr('{count} selected', { count: selectedBillIds.length })}</Text>
+
+            <View style={styles.exportPickerActions}>
+              <AppButton
+                label={allExportSelected ? tr('Deselect all') : tr('Select all')}
+                variant="secondary"
+                onPress={() => (allExportSelected ? clearAllExport() : selectAllExport())}
+              />
+              <AppButton label={tr('Clear selection')} variant="ghost" onPress={clearAllExport} />
+            </View>
+
+            <View style={styles.exportPickerList}>
+              <FlatList
+                data={filteredBills}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => {
+                  const checked = !!exportSelectedIds[item.id]
+                  return (
+                    <Pressable
+                      onPress={() => toggleExportSelection(item.id)}
+                      style={[styles.exportPickerRow, checked && styles.exportPickerRowSelected]}
+                    >
+                      <Ionicons
+                        name={checked ? 'checkbox' : 'square-outline'}
+                        size={20}
+                        color={checked ? themeColors.primary : themeColors.textMuted}
+                      />
+                      <View style={styles.exportPickerRowBody}>
+                        <Text style={styles.exportPickerRowTitle} numberOfLines={1}>{item.supplier || tr('Untitled bill')}</Text>
+                        <Text style={styles.exportPickerRowMeta}>
+                          {formatDisplayDate(item.due_date)} • {formatAmount(item.amount, item.currency)}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  )
+                }}
+              />
+            </View>
+
+            <Divider style={{ marginTop: themeSpacing.sm, marginBottom: themeSpacing.sm }} />
+            <Text style={styles.formSectionTitle}>{tr('View attachments')}</Text>
+            <View style={styles.exportPickerActions}>
+              <AppButton
+                label={tr('View attachments')}
+                iconName="open-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={openSelectedBillAttachments}
+              />
+            </View>
+            <Divider style={{ marginTop: themeSpacing.sm, marginBottom: themeSpacing.sm }} />
+            <Text style={styles.formSectionTitle}>{tr('Export attachments')}</Text>
+            <View style={styles.exportPickerActions}>
+              <AppButton
+                label={tr('Export PDF attachments')}
+                iconName="document-text-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportAttachmentsZip('pdf')}
+              />
+              <AppButton
+                label={tr('Export image attachments')}
+                iconName="image-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportAttachmentsZip('image')}
+              />
+              <AppButton
+                label={tr('Export attachments CSV')}
+                iconName="download-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportAttachmentsCsv()}
+              />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
+
       <Modal visible={installmentVisible} transparent animationType="fade" onRequestClose={() => setInstallmentVisible(false)}>
         <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
           <Surface elevated padded={false} style={{ width: '100%', maxWidth: 520, alignSelf: 'center', maxHeight: '90%' }}>
@@ -8283,35 +8930,49 @@ function BillsListScreen() {
               <Divider style={{ marginTop: themeSpacing.sm }} />
 
               <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-                <AppInput placeholder={tr('Supplier')} value={installmentTitle} onChangeText={setInstallmentTitle} />
-              <View style={styles.filterRow}>
-                <AppInput
-                  placeholder={tr('Amount')}
-                  keyboardType="numeric"
-                  value={installmentAmount}
-                  onChangeText={setInstallmentAmount}
-                  style={styles.flex1}
-                />
-                <AppInput
-                  placeholder={tr('Currency')}
-                  value={installmentCurrency}
-                  onChangeText={setInstallmentCurrency}
-                  style={styles.flex1}
-                />
-              </View>
+                <View style={{ gap: themeSpacing.xs }}>
+                  <Text style={styles.formSectionTitle}>{tr('Supplier')} *</Text>
+                  <AppInput
+                    placeholder={tr('Supplier')}
+                    value={installmentTitle}
+                    onChangeText={setInstallmentTitle}
+                    style={installmentAttempted && !installmentValidation.titleOk ? styles.inputError : null}
+                  />
+                </View>
+
+                <View style={{ gap: themeSpacing.xs }}>
+                  <View style={[styles.filterRow, { alignItems: 'flex-end' }]}>
+                    <Text style={[styles.formSectionTitle, { flex: 1 }]}>{tr('Amount')} *</Text>
+                    <Text style={[styles.formSectionTitle, { flex: 1 }]}>{tr('Currency')} *</Text>
+                  </View>
+                  <View style={styles.filterRow}>
+                    <AppInput
+                      placeholder={tr('Amount')}
+                      keyboardType="numeric"
+                      value={installmentAmount}
+                      onChangeText={setInstallmentAmount}
+                      style={[styles.flex1, installmentAttempted && !installmentValidation.amountOk ? styles.inputError : null]}
+                    />
+                    <AppInput
+                      placeholder={tr('Currency')}
+                      value={installmentCurrency}
+                      onChangeText={setInstallmentCurrency}
+                      style={[styles.flex1, installmentAttempted && !installmentValidation.currencyOk ? styles.inputError : null]}
+                    />
+                  </View>
+                </View>
 
               <View style={{ gap: themeSpacing.xs }}>
-                <Text style={styles.formSectionTitle}>{tr('Start month (YYYY-MM)')}</Text>
+                <Text style={styles.formSectionTitle}>{tr('Start month (YYYY-MM)')} *</Text>
                 <View style={styles.filterRow}>
                   <AppInput
                     placeholder="YYYY-MM"
                     value={installmentStartMonth}
                     onChangeText={(v) => {
-                      lastInstallmentEditRef.current = null
                       setInstallmentStartMonth(v)
                       syncInstallmentDerived(v, installmentMonths, installmentEndMonth)
                     }}
-                    style={styles.flex1}
+                    style={[styles.flex1, installmentAttempted && !installmentValidation.startOk ? styles.inputError : null]}
                   />
                   <AppButton
                     label={tr('Pick date')}
@@ -8323,17 +8984,18 @@ function BillsListScreen() {
               </View>
 
               <View style={{ gap: themeSpacing.xs }}>
-                <Text style={styles.formSectionTitle}>{tr('Due day (1-31)')}</Text>
+                <Text style={styles.formSectionTitle}>{tr('Due day (1-31)')} *</Text>
                 <AppInput
                   placeholder={tr('Due day (1-31)')}
                   keyboardType="numeric"
                   value={installmentDueDay}
                   onChangeText={setInstallmentDueDay}
+                  style={installmentAttempted && !installmentValidation.dayOk ? styles.inputError : null}
                 />
               </View>
 
               <View style={{ gap: themeSpacing.xs }}>
-                <Text style={styles.formSectionTitle}>{tr('Number of months')}</Text>
+                <Text style={styles.formSectionTitle}>{tr('Number of months')} *</Text>
                 <AppInput
                   placeholder={tr('Number of months')}
                   keyboardType="numeric"
@@ -8343,11 +9005,12 @@ function BillsListScreen() {
                     setInstallmentMonths(v)
                     syncInstallmentDerived(installmentStartMonth, v, installmentEndMonth)
                   }}
+                  style={installmentAttempted && (!installmentValidation.monthsOk || !installmentValidation.monthsMatchOk) ? styles.inputError : null}
                 />
               </View>
 
               <View style={{ gap: themeSpacing.xs }}>
-                <Text style={styles.formSectionTitle}>{tr('End month (YYYY-MM)')}</Text>
+                <Text style={styles.formSectionTitle}>{tr('End month (YYYY-MM)')} *</Text>
                 <View style={styles.filterRow}>
                   <AppInput
                     placeholder="YYYY-MM"
@@ -8357,7 +9020,7 @@ function BillsListScreen() {
                       setInstallmentEndMonth(v)
                       syncInstallmentDerived(installmentStartMonth, installmentMonths, v)
                     }}
-                    style={styles.flex1}
+                    style={[styles.flex1, installmentAttempted && (!installmentValidation.endOk || !installmentValidation.rangeOk || !installmentValidation.monthsMatchOk) ? styles.inputError : null]}
                   />
                   <AppButton
                     label={tr('Pick date')}
@@ -8371,10 +9034,22 @@ function BillsListScreen() {
               <Text style={styles.mutedText}>{tr('Enter number of months or an end month.')}</Text>
 
               <Text style={styles.formSectionTitle}>{tr('Payment details')}</Text>
-              <AppInput placeholder={tr('Creditor')} value={installmentCreditor} onChangeText={setInstallmentCreditor} />
-              <AppInput placeholder={tr('IBAN')} value={installmentIban} onChangeText={setInstallmentIban} />
+              <Text style={styles.fieldLabel}>{tr('Creditor')} *</Text>
+              <AppInput
+                placeholder={tr('Creditor')}
+                value={installmentCreditor}
+                onChangeText={setInstallmentCreditor}
+                style={installmentAttempted && !installmentValidation.creditorOk ? styles.inputError : null}
+              />
+              <Text style={styles.fieldLabel}>{tr('IBAN')} *</Text>
+              <AppInput
+                placeholder={tr('IBAN')}
+                value={installmentIban}
+                onChangeText={setInstallmentIban}
+                style={installmentAttempted && !installmentValidation.ibanOk ? styles.inputError : null}
+              />
               <View style={{ gap: 6 }}>
-                <Text style={styles.fieldLabel}>{tr('Reference')}</Text>
+                <Text style={styles.fieldLabel}>{tr('Reference')} *</Text>
                 <View style={{ flexDirection: 'row', gap: 8 }}>
                   <View style={{ width: 90 }}>
                     <AppInput
@@ -8385,6 +9060,7 @@ function BillsListScreen() {
                       autoCorrect={false}
                       keyboardType="default"
                       maxLength={5}
+                      style={installmentAttempted && (!installmentValidation.modelOk || !installmentValidation.referenceOk) ? styles.inputError : null}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
@@ -8395,17 +9071,26 @@ function BillsListScreen() {
                       autoCapitalize="characters"
                       autoCorrect={false}
                       keyboardType="default"
+                      style={installmentAttempted && (!installmentValidation.numberOk || !installmentValidation.referenceOk) ? styles.inputError : null}
                     />
                   </View>
                 </View>
               </View>
-              <AppInput placeholder={tr('Purpose')} value={installmentPurpose} onChangeText={setInstallmentPurpose} multiline />
+              <Text style={styles.fieldLabel}>{tr('Purpose')} *</Text>
+              <AppInput
+                placeholder={tr('Purpose')}
+                value={installmentPurpose}
+                onChangeText={setInstallmentPurpose}
+                multiline
+                style={installmentAttempted && !installmentValidation.purposeOk ? styles.inputError : null}
+              />
 
               <AppButton
                 label={installmentSaving ? tr('Saving…') : tr('Save')}
                 iconName="save-outline"
                 onPress={saveInstallment}
                 loading={installmentSaving}
+                disabled={!installmentComplete || installmentSaving}
               />
               </View>
             </ScrollView>
@@ -8468,7 +9153,6 @@ function BillsListScreen() {
                   setInstallmentMonthPickerVisible(false)
                   setInstallmentMonthPickerField(null)
                   if (field === 'start') {
-                    lastInstallmentEditRef.current = null
                     setInstallmentStartMonth(ym)
                     syncInstallmentDerived(ym, installmentMonths, installmentEndMonth)
                   }
@@ -8483,6 +9167,40 @@ function BillsListScreen() {
           </Surface>
         </View>
       )}
+
+      {toast ? (
+        <View style={styles.toastWrap} pointerEvents="none">
+          <Surface
+            elevated
+            style={[
+              styles.toastCard,
+              toast.tone === 'danger'
+                ? styles.toastDanger
+                : toast.tone === 'info'
+                  ? styles.toastInfo
+                  : styles.toastSuccess,
+            ]}
+          >
+            <Ionicons
+              name={toast.tone === 'danger' ? 'alert-circle' : toast.tone === 'info' ? 'information-circle' : 'checkmark-circle'}
+              size={18}
+              color={toast.tone === 'danger' ? '#991B1B' : toast.tone === 'info' ? '#1D4ED8' : '#166534'}
+            />
+            <Text
+              style={[
+                styles.toastText,
+                toast.tone === 'danger'
+                  ? styles.toastTextDanger
+                  : toast.tone === 'info'
+                    ? styles.toastTextInfo
+                    : styles.toastTextSuccess,
+              ]}
+            >
+              {toast.message}
+            </Text>
+          </Surface>
+        </View>
+      ) : null}
     </Screen>
   )
 }
@@ -8809,15 +9527,6 @@ function HomeScreen() {
               >
                 <Ionicons name="language-outline" size={18} color={colors.text} />
               </TouchableOpacity>
-
-              {spacesCtx.spaces.length > 1 ? (
-                <AppButton
-                  label={tr('Switch space')}
-                  variant="secondary"
-                  iconName="swap-horizontal-outline"
-                  onPress={() => navigation.navigate('Settings')}
-                />
-              ) : null}
             </>
           }
         />
@@ -8939,6 +9648,8 @@ function HomeScreen() {
               value={spacesCtx.current?.id || spaceId || ''}
               onChange={(id) => { handlePayerChange(id) }}
               options={payerOptions}
+              activeBgColor={themeColors.primary}
+              activeTextColor="#FFFFFF"
               style={{ marginTop: themeSpacing.xs }}
             />
 
@@ -9818,6 +10529,8 @@ function WarrantiesScreen() {
                 value={spacesCtx.current?.id || spaceId || ''}
                 onChange={(id) => { spacesCtx.setCurrent(id) }}
                 options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
+                activeBgColor={themeColors.primary}
+                activeTextColor="#FFFFFF"
                 style={{ marginTop: themeSpacing.xs }}
               />
             </View>
@@ -10166,7 +10879,7 @@ function WarrantiesScreen() {
                       onPress={()=> navigation.navigate('Warranty Details', { warrantyId: item.id })}
                     />
                     <AppButton
-                      label={tr('Open')}
+                      label={tr('View attachment')}
                       variant="secondary"
                       iconName="open-outline"
                       onPress={() => openWarrantyAttachment(item)}
@@ -10464,6 +11177,7 @@ function ReportsScreen() {
   const [iosPickerVisible, setIosPickerVisible] = useState(false)
   const [iosPickerField, setIosPickerField] = useState<'start' | 'end' | null>(null)
   const [iosPickerValue, setIosPickerValue] = useState(new Date())
+  const [reportsChartSize, setReportsChartSize] = useState({ width: 0, height: 180 })
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
 
@@ -10718,6 +11432,18 @@ function ReportsScreen() {
     return { points, max }
   }, [dateMode, filtered, groupBy, isPro])
 
+  const linePoints = useMemo(() => {
+    const width = Math.max(0, reportsChartSize.width - 24)
+    const height = Math.max(0, reportsChartSize.height - 24)
+    const count = series.points.length
+    if (!count || width <= 0 || height <= 0) return []
+    return series.points.map((p, idx) => {
+      const x = 12 + (count === 1 ? width / 2 : (idx / (count - 1)) * width)
+      const y = 12 + (series.max > 0 ? (1 - p.value / series.max) * height : height)
+      return { ...p, x, y }
+    })
+  }, [reportsChartSize.height, reportsChartSize.width, series.max, series.points])
+
   const showBasicInsights = useCallback(() => {
     if (!filtered.length) {
       Alert.alert(tr('Reports'), tr('No bills in this range.'))
@@ -10783,10 +11509,8 @@ function ReportsScreen() {
       return
     }
 
-    Alert.alert(tr('Export'), tr('Choose export format'), [
+    Alert.alert(tr('Export'), tr('Export PDF report'), [
       { text: tr('Export PDF report'), onPress: exportReportPDF },
-      { text: tr('Export ZIP'), onPress: exportReportZIP },
-      { text: tr('Export JSON'), onPress: exportReportJSON },
       { text: tr('Cancel'), style: 'cancel' },
     ])
   }, [entitlements.exportsEnabled])
@@ -11102,19 +11826,50 @@ function ReportsScreen() {
           </View>
 
           {reportsView === 'chart' ? (
-            <View style={{ paddingVertical: themeSpacing.sm }}>
+            <View style={{ paddingVertical: themeSpacing.sm, gap: themeSpacing.sm }}>
               {series.points.length === 0 ? (
                 <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
               ) : (
-                series.points.map((p) => (
-                  <View key={p.key} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                    <Text style={{ width: 80 }}>{p.key}</Text>
-                    <View style={{ flex: 1, height: 12, borderRadius: 6, overflow: 'hidden', backgroundColor: '#E5E7EB' }}>
-                      <View style={{ height: '100%', width: `${Math.max(0, Math.min(100, p.pct))}%`, backgroundColor: themeColors.primary }} />
+                <>
+                  <View style={styles.reportChartCard}>
+                    <Text style={styles.reportChartTitle}>{tr('Bar chart')}</Text>
+                    <View style={styles.reportBarsRow}>
+                      {series.points.map((p) => (
+                        <View key={p.key} style={styles.reportBarItem}>
+                          <View style={styles.reportBarTrack}>
+                            <View style={[styles.reportBarFill, { height: `${Math.max(0, Math.min(100, p.pct))}%` }]} />
+                          </View>
+                          <Text style={styles.reportBarLabel}>{p.key}</Text>
+                        </View>
+                      ))}
                     </View>
-                    <Text style={{ marginLeft: 8 }}>EUR {p.value.toFixed(2)}</Text>
                   </View>
-                ))
+
+                  <View style={styles.reportChartCard}>
+                    <Text style={styles.reportChartTitle}>{tr('Line chart')}</Text>
+                    <View
+                      style={styles.reportLineChart}
+                      onLayout={(e) => {
+                        const { width, height } = e.nativeEvent.layout
+                        if (width && height && (width !== reportsChartSize.width || height !== reportsChartSize.height)) {
+                          setReportsChartSize({ width, height })
+                        }
+                      }}
+                    >
+                      {linePoints.map((p, idx) => {
+                        const next = linePoints[idx + 1]
+                        return (
+                          <React.Fragment key={p.key}>
+                            {next ? (
+                              <View style={[styles.reportLineSegment, { left: p.x, top: p.y, width: Math.max(2, next.x - p.x) }]} />
+                            ) : null}
+                            <View style={[styles.reportLineDot, { left: p.x - 4, top: p.y - 4 }]} />
+                          </React.Fragment>
+                        )
+                      })}
+                    </View>
+                  </View>
+                </>
               )}
             </View>
           ) : (
@@ -11122,15 +11877,18 @@ function ReportsScreen() {
               {series.points.length === 0 ? (
                 <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
               ) : (
-                <View style={{ gap: 8 }}>
+                <View style={{ gap: 10 }}>
                   <View style={styles.reportTableHeaderRow}>
                     <Text style={[styles.mutedText, { flex: 1 }]}>{tr('Period')}</Text>
                     <Text style={[styles.mutedText, { width: 120, textAlign: 'right' }]}>{tr('Amount (EUR)')}</Text>
                   </View>
                   {series.points.map((p) => (
-                    <View key={p.key} style={styles.reportTableRow}>
-                      <Text style={{ flex: 1 }}>{p.key}</Text>
-                      <Text style={{ width: 120, textAlign: 'right' }}>EUR {p.value.toFixed(2)}</Text>
+                    <View key={p.key} style={styles.reportTableRowCard}>
+                      <Text style={styles.reportRowTitle}>{p.key}</Text>
+                      <View style={styles.reportRowBarTrack}>
+                        <View style={[styles.reportRowBarFill, { width: `${Math.max(0, Math.min(100, p.pct))}%` }]} />
+                      </View>
+                      <Text style={styles.reportRowValue}>EUR {p.value.toFixed(2)}</Text>
                     </View>
                   ))}
                 </View>
@@ -11141,7 +11899,7 @@ function ReportsScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('Report exports')} />
-          <Text style={styles.mutedText}>{tr('Export this report as PDF, ZIP, or JSON.')}</Text>
+          <Text style={styles.mutedText}>{tr('Export this report as PDF.')}</Text>
           {exportBusy ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
               <ActivityIndicator size="small" color={themeColors.primary} />
@@ -11162,7 +11920,7 @@ function ReportsScreen() {
               <InlineInfo
                 tone="info"
                 iconName="sparkles-outline"
-                message={tr('Report exports are available on Več (PDF, ZIP, JSON).')}
+                message={tr('Report exports are available on Več (PDF).')}
               />
             </View>
           ) : null}
@@ -12636,8 +13394,8 @@ function MainTabs() {
   const bottomInset = Math.max(insets.bottom, 0)
   // Ensure icons/labels are never clipped by system navigation bars.
   // Keep a generous minimum padding on Android where insets can be reported as 0.
-  const bottomPadding = Math.max(bottomInset, 12)
-  const barHeight = 62 + bottomPadding
+  const bottomPadding = Math.max(bottomInset, 6)
+  const barHeight = 56 + bottomPadding
   const { lang } = useLangContext()
 
   return (
@@ -12665,7 +13423,7 @@ function MainTabs() {
             borderTopColor: 'transparent',
             borderTopWidth: 0,
             backgroundColor: themeColors.surface,
-            paddingTop: 8,
+            paddingTop: 4,
             paddingBottom: bottomPadding,
             height: barHeight,
           },
@@ -12676,7 +13434,7 @@ function MainTabs() {
             marginBottom: 0,
           },
           tabBarItemStyle: {
-            paddingVertical: 6,
+            paddingVertical: 4,
           },
           tabBarIconStyle: {
             marginTop: 0,
@@ -12691,7 +13449,7 @@ function MainTabs() {
             }
 
             const iconName = icons[route.name] ?? 'ellipse-outline'
-            const iconSize = route.name === 'Scan' ? 28 : 26
+            const iconSize = route.name === 'Scan' ? 26 : 24
             return (
               <Ionicons name={iconName} size={iconSize} color={color} />
             )
@@ -12863,18 +13621,24 @@ function SettingsScreen() {
 
             return (
               <View style={{ borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}>
-                <Text style={{ fontWeight: '600' }}>{p1Slot} {p1Active ? `• ${tr('Active')}` : ''}</Text>
-                <Text style={[styles.bodyText, { fontWeight: '800', marginTop: 2 }]}>{p1.name || '—'}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
+                  <Text style={{ fontWeight: '600' }}>{p1Slot}</Text>
+                  {p1Active ? <Badge label={tr('Active')} tone="success" /> : null}
+                </View>
+                <Pressable
+                  onPress={() => {
+                    if (p1Active) return
+                    spacesCtx.setCurrent(p1.id)
+                  }}
+                  style={({ pressed }) => [
+                    { marginTop: 2, opacity: pressed && !p1Active ? 0.85 : 1 },
+                  ]}
+                  hitSlop={8}
+                >
+                  <Text style={[styles.bodyText, { fontWeight: '800' }]}>{p1.name || '—'}</Text>
+                </Pressable>
 
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                  {!p1Active && (
-                    <AppButton
-                      label={tr('Switch')}
-                      variant="secondary"
-                      iconName="swap-horizontal-outline"
-                      onPress={() => spacesCtx.setCurrent(p1.id)}
-                    />
-                  )}
                   <AppButton
                     label={tr('Rename')}
                     variant="secondary"
@@ -12888,7 +13652,10 @@ function SettingsScreen() {
                 </View>
 
                 <View style={{ marginTop: themeSpacing.sm, paddingTop: themeSpacing.xs, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: themeColors.border }}>
-                  <Text style={{ fontWeight: '600' }}>{p2Slot} {p2Active ? `• ${tr('Active')}` : ''}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
+                    <Text style={{ fontWeight: '600' }}>{p2Slot}</Text>
+                    {p2Active ? <Badge label={tr('Active')} tone="success" /> : null}
+                  </View>
 
                   {!p2 ? (
                     <View style={{ marginTop: 4 }}>
@@ -12922,16 +13689,19 @@ function SettingsScreen() {
                     </View>
                   ) : (
                     <View style={{ marginTop: 4 }}>
-                      <Text style={[styles.bodyText, { fontWeight: '800' }]}>{p2.name || '—'}</Text>
+                      <Pressable
+                        onPress={() => {
+                          if (p2Active) return
+                          spacesCtx.setCurrent(p2.id)
+                        }}
+                        style={({ pressed }) => [
+                          { opacity: pressed && !p2Active ? 0.85 : 1 },
+                        ]}
+                        hitSlop={8}
+                      >
+                        <Text style={[styles.bodyText, { fontWeight: '800' }]}>{p2.name || '—'}</Text>
+                      </Pressable>
                       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                        {!p2Active && (
-                          <AppButton
-                            label={tr('Switch')}
-                            variant="secondary"
-                            iconName="swap-horizontal-outline"
-                            onPress={() => spacesCtx.setCurrent(p2.id)}
-                          />
-                        )}
                         <AppButton
                           label={tr('Rename')}
                           variant="secondary"
@@ -13593,9 +14363,9 @@ export default function App() {
     // iOS action buttons
     try {
       await (Notifications as any).setNotificationCategoryAsync?.('bill', [
-        { identifier: 'SNOOZE_1', buttonTitle: tr('Snooze 1 day'), options: { isDestructive: false, isAuthenticationRequired: false } },
-        { identifier: 'SNOOZE_3', buttonTitle: tr('Snooze 3 days'), options: { isDestructive: false, isAuthenticationRequired: false } },
-        { identifier: 'SNOOZE_7', buttonTitle: tr('Snooze 7 days'), options: { isDestructive: false, isAuthenticationRequired: false } },
+        { identifier: 'SNOOZE_1', buttonTitle: tr('Send in 1 day'), options: { isDestructive: false, isAuthenticationRequired: false } },
+        { identifier: 'SNOOZE_3', buttonTitle: tr('Send in 3 days'), options: { isDestructive: false, isAuthenticationRequired: false } },
+        { identifier: 'SNOOZE_7', buttonTitle: tr('Send in 7 days'), options: { isDestructive: false, isAuthenticationRequired: false } },
       ])
     } catch {}
     const sub = Notifications.addNotificationResponseReceivedListener(async (resp)=>{
@@ -13843,6 +14613,24 @@ const styles = StyleSheet.create({
   iosPickerOverlay: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.35)', justifyContent: 'flex-end', padding: themeLayout.screenPadding },
   iosPickerSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: themeSpacing.lg, gap: themeSpacing.md },
   iosPickerActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap },
+  exportPickerSheet: { width: '100%', maxWidth: 520, alignSelf: 'center', maxHeight: '90%', padding: themeSpacing.lg },
+  exportPickerHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: themeLayout.gap },
+  exportPickerActions: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
+  exportPickerList: { marginTop: themeSpacing.sm, maxHeight: 320 },
+  exportPickerRow: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm, paddingVertical: 10, paddingHorizontal: 8, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: '#FFFFFF', marginBottom: themeSpacing.xs },
+  exportPickerRowSelected: { borderColor: themeColors.primarySoft, backgroundColor: '#F0F7FF' },
+  exportPickerRowBody: { flex: 1 },
+  exportPickerRowTitle: { fontSize: 14, fontWeight: '700', color: '#111827' },
+  exportPickerRowMeta: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  toastWrap: { position: 'absolute', left: themeLayout.screenPadding, right: themeLayout.screenPadding, bottom: themeSpacing.xl, zIndex: 999 },
+  toastCard: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm, padding: themeSpacing.sm, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth },
+  toastSuccess: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
+  toastInfo: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
+  toastDanger: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
+  toastText: { fontSize: 13, fontWeight: '700' },
+  toastTextSuccess: { color: '#166534' },
+  toastTextInfo: { color: '#1D4ED8' },
+  toastTextDanger: { color: '#991B1B' },
   billRowCard: { marginBottom: themeSpacing.sm },
   billRowHighlighted: { borderWidth: 1, borderColor: '#22C55E' },
   billRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: themeLayout.gap, flexWrap: 'wrap' },
@@ -13855,6 +14643,21 @@ const styles = StyleSheet.create({
   reportViewToggleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
   reportTableHeaderRow: { flexDirection: 'row', alignItems: 'center', paddingBottom: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: themeColors.border },
   reportTableRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: themeColors.border },
+  reportChartCard: { padding: themeSpacing.sm, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
+  reportChartTitle: { fontSize: 12, fontWeight: '700', color: '#334155', marginBottom: themeSpacing.sm },
+  reportBarsRow: { flexDirection: 'row', alignItems: 'flex-end', gap: themeSpacing.xs },
+  reportBarItem: { flex: 1, alignItems: 'center', gap: 6 },
+  reportBarTrack: { width: '100%', height: 120, borderRadius: 8, backgroundColor: '#E2E8F0', overflow: 'hidden', justifyContent: 'flex-end' },
+  reportBarFill: { width: '100%', backgroundColor: themeColors.primary, borderRadius: 8 },
+  reportBarLabel: { fontSize: 11, color: '#64748B' },
+  reportLineChart: { height: 160, borderRadius: 12, backgroundColor: '#F8FAFC', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
+  reportLineSegment: { position: 'absolute', height: 2, backgroundColor: '#1D4ED8' },
+  reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: '#1D4ED8' },
+  reportTableRowCard: { padding: themeSpacing.sm, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
+  reportRowTitle: { fontSize: 13, fontWeight: '700', color: '#111827' },
+  reportRowBarTrack: { height: 8, borderRadius: 999, backgroundColor: '#E5E7EB', overflow: 'hidden', marginTop: 8 },
+  reportRowBarFill: { height: '100%', backgroundColor: themeColors.primary },
+  reportRowValue: { marginTop: 6, fontSize: 12, color: '#475569', textAlign: 'right' },
 
   // Add bill
   helperText: { fontSize: 12, color: '#6B7280', marginTop: themeSpacing.xs },
@@ -13887,6 +14690,9 @@ const styles = StyleSheet.create({
   attachmentButtons: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap },
   saveButton: { marginTop: themeSpacing.md },
   attachmentRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
+  attachmentCard: { padding: 0 },
+  attachmentCardContent: { padding: themeLayout.cardPadding, paddingBottom: themeSpacing.sm },
+  attachmentFileName: { marginTop: themeSpacing.sm, fontSize: 14, fontWeight: '700', color: '#111827' },
   attachmentPreview: { marginTop: themeSpacing.sm, gap: themeLayout.gap },
   attachmentImage: { width: 160, height: 120, borderRadius: 12 },
   attachmentPreviewCompact: { gap: themeSpacing.xs },

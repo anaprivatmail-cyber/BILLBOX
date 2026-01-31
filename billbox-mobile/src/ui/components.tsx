@@ -174,11 +174,15 @@ export function SegmentedControl({
   onChange,
   options,
   style,
+  activeBgColor,
+  activeTextColor,
 }: {
   value: string
   onChange: (value: string) => void
   options: SegmentedOption[]
   style?: StyleProp<ViewStyle>
+  activeBgColor?: string
+  activeTextColor?: string
 }) {
   const colors = useThemeColors()
   const styles = useMemo(() => makeStyles(colors), [colors])
@@ -189,10 +193,16 @@ export function SegmentedControl({
         return (
           <TouchableOpacity
             key={opt.value}
-            style={[styles.segmentItem, active && styles.segmentItemActive]}
+            style={[styles.segmentItem, active && (activeBgColor ? { backgroundColor: activeBgColor } : styles.segmentItemActive)]}
             onPress={() => onChange(opt.value)}
           >
-            <Text style={[styles.segmentLabel, active && styles.segmentLabelActive]} numberOfLines={1}>
+            <Text
+              style={[
+                styles.segmentLabel,
+                active && (activeTextColor ? { color: activeTextColor } : styles.segmentLabelActive),
+              ]}
+              numberOfLines={1}
+            >
               {tr(opt.label)}
             </Text>
           </TouchableOpacity>
