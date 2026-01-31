@@ -141,7 +141,17 @@ export async function handler(event) {
 
     const start = String(filters?.start || '')
     const end = String(filters?.end || '')
-    const status = String(filters?.status || 'all')
+    const statusListRaw = Array.isArray(filters?.statusList)
+      ? filters.statusList
+      : Array.isArray(filters?.statuses)
+        ? filters.statuses
+        : Array.isArray(filters?.status_list)
+          ? filters.status_list
+          : null
+    const statusList = statusListRaw
+      ? statusListRaw.map((v) => String(v || '').trim()).filter(Boolean)
+      : []
+    const statusLabel = statusList.length ? statusList.join(', ') : String(filters?.status || 'all')
 
     const pdfBuffer = await bufferFromPdf((doc) => {
       doc.fontSize(18).text('BillBox Export', { align: 'left' })
@@ -149,7 +159,7 @@ export async function handler(event) {
       doc.fontSize(10).fillColor('#444').text(`Generated: ${new Date().toISOString()}`)
       if (kind !== 'single') {
         doc.text(`Range: ${start || '—'} → ${end || '—'}`)
-        doc.text(`Status: ${status}`)
+        doc.text(`Status: ${statusLabel}`)
         doc.text(`Bills: ${bills.length}`)
       }
       doc.moveDown(1)

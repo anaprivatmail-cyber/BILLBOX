@@ -60,6 +60,16 @@ export async function addToInbox(input: {
   const createdAt = input.createdAt && typeof input.createdAt === 'string' ? input.createdAt : now
   const safeSpace = String(input.spaceId || 'default')
   const id = (input.id && String(input.id)) || `inbox_${Math.random().toString(36).slice(2, 10)}`
+  const existing = items.find((it) => String(it.id) === id)
+  if (existing) {
+    try {
+      const path = existing.localPath
+      if (path) {
+        const info = await FileSystem.getInfoAsync(path)
+        if (info?.exists) return existing
+      }
+    } catch {}
+  }
   const safeName = String(input.name || 'document').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'document'
   let localPath: string | undefined
   try {
@@ -68,13 +78,21 @@ export async function addToInbox(input: {
       const dir = `${base}inbox/${safeSpace}`
       try { await FileSystem.makeDirectoryAsync(dir, { intermediates: true }) } catch {}
       const dest = `${dir}/${id}_${safeName}`
+      try {
+        const info = await FileSystem.getInfoAsync(dest)
+        if (info?.exists) {
+          localPath = dest
+        }
+      } catch {}
       const from = String(input.uri || '')
-      if (/^https?:\/\//i.test(from)) {
-        const dl = await FileSystem.downloadAsync(from, dest)
-        localPath = dl?.uri || dest
-      } else {
-        await FileSystem.copyAsync({ from, to: dest })
-        localPath = dest
+      if (!localPath) {
+        if (/^https?:\/\//i.test(from)) {
+          const dl = await FileSystem.downloadAsync(from, dest)
+          localPath = dl?.uri || dest
+        } else {
+          await FileSystem.copyAsync({ from, to: dest })
+          localPath = dest
+        }
       }
     }
   } catch {

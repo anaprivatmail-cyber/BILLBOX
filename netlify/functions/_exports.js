@@ -231,6 +231,20 @@ export function buildBillQueryWithFilters({ supabase, userId, spaceId, spaceIds,
   const dateMode = String(f.dateMode || 'due')
   const supplierQuery = String(f.supplierQuery || '').trim()
   const status = String(f.status || 'all')
+  const statusListRaw = Array.isArray(f.statusList)
+    ? f.statusList
+    : Array.isArray(f.statuses)
+      ? f.statuses
+      : Array.isArray(f.status_list)
+        ? f.status_list
+        : null
+  const statusList = statusListRaw
+    ? statusListRaw
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+      .map((v) => (v === 'unpaid' ? 'pending' : v))
+    : []
+  const normalizedStatus = status === 'unpaid' ? 'pending' : status
   const hasAttachmentsOnly = Boolean(f.hasAttachmentsOnly)
 
   const amountMinRaw = f.amountMin
@@ -250,7 +264,8 @@ export function buildBillQueryWithFilters({ supabase, userId, spaceId, spaceIds,
   if (ids.length) q = q.in('space_id', ids)
   else if (spaceId) q = q.eq('space_id', spaceId)
 
-  if (status !== 'all') q = q.eq('status', status)
+  if (statusList.length) q = q.in('status', statusList)
+  else if (normalizedStatus !== 'all') q = q.eq('status', normalizedStatus)
   if (supplierQuery) {
     const term = supplierQuery.replace(/%/g, '')
     // Match app filter behavior: supplier substring match.

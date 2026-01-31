@@ -2542,6 +2542,9 @@ function BillDetailsScreen() {
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [invoiceSaving, setInvoiceSaving] = useState(false)
   const [defaultReminderInfo, setDefaultReminderInfo] = useState<string | null>(null)
+  const [reminderInfo, setReminderInfo] = useState<string | null>(null)
+  const [remindersEnabled, setRemindersEnabledState] = useState<boolean>(true)
+  const [selectedReminderDelayDays, setSelectedReminderDelayDays] = useState<number | null>(null)
   const [detailNotice, setDetailNotice] = useState<string | null>(null)
   const detailNoticeTimerRef = useRef<any>(null)
   const [dangerConfirm, setDangerConfirm] = useState<{
@@ -2576,7 +2579,35 @@ function BillDetailsScreen() {
   useEffect(() => {
     setInvoiceNumber(String((bill as any)?.invoice_number || ''))
     setDefaultReminderInfo(null)
+    setReminderInfo(null)
+    setSelectedReminderDelayDays(null)
   }, [bill?.id])
+
+  useEffect(() => {
+    ;(async () => {
+      setRemindersEnabledState(await getRemindersEnabled())
+    })()
+  }, [])
+
+  const formatReminderDateTime = useCallback((date: Date) => {
+    try {
+      return date.toLocaleString()
+    } catch {
+      return date.toISOString()
+    }
+  }, [])
+
+  const buildBillReminderInfo = useCallback((dueDate?: string | null) => {
+    if (!dueDate) return null
+    const parsed = parseDateValue(dueDate)
+    if (!parsed) return null
+    const dueAt = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 9, 0, 0, 0)
+    const threeDaysBefore = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate() - 3, 10, 0, 0, 0)
+    const upcoming = [threeDaysBefore, dueAt].filter((d) => d.getTime() > Date.now())
+    if (!upcoming.length) return tr('No upcoming reminders.')
+    const next = upcoming.sort((a, b) => a.getTime() - b.getTime())[0]
+    return tr('Next reminder: {date}', { date: formatReminderDateTime(next) })
+  }, [formatReminderDateTime, parseDateValue])
 
   useEffect(() => { (async ()=>{
     if (!bill || spaceLoading || !space) return
@@ -2629,27 +2660,47 @@ function BillDetailsScreen() {
   }
 
   async function openAttachment(path: string, uri?: string) {
+    async function openLocalUri(targetUri: string) {
+      const hasScheme = /^[a-z]+:/.test(targetUri)
+      const fileUri = hasScheme ? targetUri : `file://${targetUri}`
+      if (Platform.OS === 'android' && fileUri.startsWith('file://')) {
+        const contentUri = await FileSystem.getContentUriAsync(fileUri)
+        await Linking.openURL(contentUri)
+      } else {
+        await Linking.openURL(fileUri)
+      }
+    }
+
     if (supabase) {
       const url = await getSignedUrl(supabase!, path)
-      if (url) Linking.openURL(url)
-      else Alert.alert(tr('Open failed'), tr('Could not get URL'))
-    } else {
-      if (!uri) {
-        Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
+      if (!url) {
+        Alert.alert(tr('Open failed'), tr('Could not get URL'))
         return
       }
       try {
-        const hasScheme = /^[a-z]+:/.test(uri)
-        const fileUri = hasScheme ? uri : `file://${uri}`
-        if (Platform.OS === 'android' && fileUri.startsWith('file://')) {
-          const contentUri = await FileSystem.getContentUriAsync(fileUri)
-          await Linking.openURL(contentUri)
-        } else {
-          await Linking.openURL(fileUri)
-        }
+        await Linking.openURL(url)
       } catch {
-        Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+        try {
+          const fileName = path.split('/').pop() || `attachment-${Date.now()}`
+          const target = `${FileSystem.cacheDirectory}${fileName}`
+          const download = await FileSystem.downloadAsync(url, target)
+          if (download?.uri) await openLocalUri(download.uri)
+          else Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+        } catch {
+          Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+        }
       }
+      return
+    }
+
+    if (!uri) {
+      Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
+      return
+    }
+    try {
+      await openLocalUri(uri)
+    } catch {
+      Alert.alert(tr('Open failed'), tr('Could not open this file.'))
     }
   }
 
@@ -2803,6 +2854,7 @@ function BillDetailsScreen() {
                 }
                 await scheduleBillReminders({ ...bill, space_id: effectiveSpaceId } as any, undefined, effectiveSpaceId)
                 setDefaultReminderInfo(tr('Default reminders: 3 days before at 10:00 and on due date at 09:00.'))
+                setReminderInfo(buildBillReminderInfo(bill.due_date))
                 showDetailNotice(tr('Scheduled default reminders for this bill.'))
               }}
             />
@@ -2812,6 +2864,7 @@ function BillDetailsScreen() {
               iconName="notifications-off-outline"
               onPress={async ()=>{
                 await cancelBillReminders(bill.id, effectiveSpaceId)
+                setReminderInfo(null)
                 showDetailNotice(tr('Canceled for this bill.'))
               }}
             />
@@ -2824,24 +2877,55 @@ function BillDetailsScreen() {
               style={{ marginTop: themeSpacing.xs }}
             />
           ) : null}
+          {!remindersEnabled ? (
+            <InlineInfo
+              tone="warning"
+              iconName="alert-circle-outline"
+              message={tr('Reminders are disabled in Settings.')}
+              style={{ marginTop: themeSpacing.xs }}
+            />
+          ) : null}
+          {reminderInfo ? (
+            <InlineInfo
+              tone="info"
+              iconName="time-outline"
+              message={reminderInfo}
+              style={{ marginTop: themeSpacing.xs }}
+            />
+          ) : null}
           <View style={styles.billActionsRow}>
             <AppButton
               label={tr('Send in 1 day')}
-              variant="outline"
-              style={{ backgroundColor: '#FFFFFF' }}
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 1, effectiveSpaceId); showDetailNotice(tr('Next reminder in 1 day.')) }}
+              variant={selectedReminderDelayDays === 1 ? 'secondary' : 'outline'}
+              style={selectedReminderDelayDays === 1 ? undefined : { backgroundColor: '#FFFFFF' }}
+              onPress={async ()=>{
+                await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 1, effectiveSpaceId)
+                setSelectedReminderDelayDays(1)
+                setReminderInfo(tr('Next reminder: {date}', { date: formatReminderDateTime(new Date(Date.now() + 1 * 24 * 3600 * 1000)) }))
+                showDetailNotice(tr('Next reminder in 1 day.'))
+              }}
             />
             <AppButton
               label={tr('Send in 3 days')}
-              variant="outline"
-              style={{ backgroundColor: '#FFFFFF' }}
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 3, effectiveSpaceId); showDetailNotice(tr('Next reminder in 3 days.')) }}
+              variant={selectedReminderDelayDays === 3 ? 'secondary' : 'outline'}
+              style={selectedReminderDelayDays === 3 ? undefined : { backgroundColor: '#FFFFFF' }}
+              onPress={async ()=>{
+                await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 3, effectiveSpaceId)
+                setSelectedReminderDelayDays(3)
+                setReminderInfo(tr('Next reminder: {date}', { date: formatReminderDateTime(new Date(Date.now() + 3 * 24 * 3600 * 1000)) }))
+                showDetailNotice(tr('Next reminder in 3 days.'))
+              }}
             />
             <AppButton
               label={tr('Send in 7 days')}
-              variant="outline"
-              style={{ backgroundColor: '#FFFFFF' }}
-              onPress={async ()=>{ await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 7, effectiveSpaceId); showDetailNotice(tr('Next reminder in 7 days.')) }}
+              variant={selectedReminderDelayDays === 7 ? 'secondary' : 'outline'}
+              style={selectedReminderDelayDays === 7 ? undefined : { backgroundColor: '#FFFFFF' }}
+              onPress={async ()=>{
+                await snoozeBillReminder({ ...bill, space_id: effectiveSpaceId } as any, 7, effectiveSpaceId)
+                setSelectedReminderDelayDays(7)
+                setReminderInfo(tr('Next reminder: {date}', { date: formatReminderDateTime(new Date(Date.now() + 7 * 24 * 3600 * 1000)) }))
+                showDetailNotice(tr('Next reminder in 7 days.'))
+              }}
             />
           </View>
         </Surface>
@@ -2874,7 +2958,7 @@ function BillDetailsScreen() {
             <FlatList
               data={attachments}
               keyExtractor={(a)=>a.path}
-              contentContainerStyle={[styles.listContent, { paddingTop: themeSpacing.sm }]}
+              contentContainerStyle={{ paddingTop: themeSpacing.sm, paddingBottom: themeSpacing.sm }}
               renderItem={({ item }) => (
                 <Surface elevated padded={false} style={[styles.billRowCard, styles.attachmentCard]}>
                   <View style={styles.attachmentCardContent}>
@@ -4527,6 +4611,7 @@ function ScanBillScreen() {
       if (!v) return false
       if (edited) return false
       const cur = String(currentValue || '').trim()
+      if (key === 'currency' && cur === 'UNKNOWN') return true
       if (!cur) return true
       const prevRank = typeof fieldSourceRankRef.current[key] === 'number' ? fieldSourceRankRef.current[key] : 999
       return incomingRank < prevRank
@@ -4558,6 +4643,17 @@ function ScanBillScreen() {
     // Archive-only affects validation/required-ness, but should NOT prevent
     // prefilling payment fields from OCR/PDF (user may choose to pay later).
     const allowPaymentFields = true
+
+    // Currency: try to set early (even when amount isn't detected yet).
+    // QR (EPC) is always EUR, but OCR/AI may contain symbols/codes.
+    if (!editedRef.current.currency) {
+      const fromField = typeof fields?.currency === 'string' ? fields.currency.toUpperCase().trim() : ''
+      const detected = fromField || detectCurrencyFromText(rawText, rawIban || undefined)
+      if (detected && detected !== 'UNKNOWN' && canSetField('currency', detected, editedRef.current.currency, currency)) {
+        setCurrency(detected)
+        markFieldSource('currency')
+      }
+    }
 
     // Issuer (Dobavitelj/Prejemnik): invoice issuer. For non-QR sources, prefer header-block evidence.
     const creditorFromText = extractCreditorNameFromText(rawText)
@@ -6805,6 +6901,26 @@ function InboxScreen() {
     }
   }, [supabase, serverSpaceId, inboxSpaceKey, entitlements?.canUseOCR, entitlements.plan])
 
+  const updateServerInboxStatus = useCallback(async (id: string, status: 'new' | 'pending' | 'processed' | 'archived') => {
+    if (!supabase || !serverSpaceId) return false
+    const { error } = await supabase
+      .from('inbox_items')
+      .update({ status })
+      .eq('id', id)
+      .eq('space_id', serverSpaceId)
+    return !error
+  }, [supabase, serverSpaceId])
+
+  const deleteServerInboxItem = useCallback(async (id: string) => {
+    if (!supabase || !serverSpaceId) return false
+    const { error } = await supabase
+      .from('inbox_items')
+      .delete()
+      .eq('id', id)
+      .eq('space_id', serverSpaceId)
+    return !error
+  }, [supabase, serverSpaceId])
+
   const refresh = useCallback(async () => {
     if (spaceLoading || !space) return
     await syncServerInbox()
@@ -6866,8 +6982,18 @@ function InboxScreen() {
     } catch {}
 
     if (kind === 'other') {
-      Alert.alert(tr('Inbox'), tr('Not a bill or warranty'))
-      return
+      const proceed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          tr('Inbox'),
+          tr('This does not look like a bill, pro forma, offer, or warranty. Do you want to scan it anyway?'),
+          [
+            { text: tr('Cancel'), style: 'cancel', onPress: () => resolve(false) },
+            { text: tr('Scan anyway'), onPress: () => resolve(true) },
+          ],
+        )
+      })
+      if (!proceed) return
+      kind = 'bill'
     }
     try {
       setBusy(item.id)
@@ -6913,7 +7039,22 @@ function InboxScreen() {
         if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(item.id, inboxSpaceKey)
         else await scheduleInboxReviewReminder(item.id, item.name, inboxSpaceKey)
         await refresh()
-        Alert.alert(tr('Scan complete'), summary)
+
+        try {
+          const sourceUri = (item as any).localPath || item.uri
+          const cached = await ensureLocalReadableFile(sourceUri, item.name || 'document', item.mimeType, { allowBase64Fallback: true })
+          navigation.navigate('Scan', {
+            inboxPrefill: {
+              id: item.id,
+              fields: enriched,
+              attachmentPath: cached?.uri || sourceUri,
+              mimeType: item.mimeType,
+              inboxStatus: item.status,
+            },
+          })
+        } catch {
+          Alert.alert(tr('Scan complete'), summary)
+        }
       }
     } catch (e: any) {
       const msg = e?.message || tr('Could not read this document.')
@@ -6982,6 +7123,13 @@ function InboxScreen() {
   }
 
   async function archiveItem(item: InboxItem) {
+    if ((item as any)?.meta?.source === 'email') {
+      const ok = await updateServerInboxStatus(item.id, 'archived')
+      if (!ok) {
+        Alert.alert(tr('Archive failed'), tr('Unable to update the email inbox item.'))
+        return
+      }
+    }
     await updateInboxItem(inboxSpaceKey, item.id, { status: 'archived' })
     await cancelInboxReviewReminder(item.id, inboxSpaceKey)
     await refresh()
@@ -6990,7 +7138,18 @@ function InboxScreen() {
   async function removeItem(item: InboxItem) {
     Alert.alert(tr('Delete?'), tr('Remove this inbox item permanently?'), [
       { text: tr('Cancel'), style: 'cancel' },
-      { text: tr('Delete'), style: 'destructive', onPress: async () => { await cancelInboxReviewReminder(item.id, inboxSpaceKey); await removeInboxItem(inboxSpaceKey, item.id); await refresh() } },
+      { text: tr('Delete'), style: 'destructive', onPress: async () => {
+        if ((item as any)?.meta?.source === 'email') {
+          const ok = await deleteServerInboxItem(item.id)
+          if (!ok) {
+            Alert.alert(tr('Delete failed'), tr('Unable to delete the email inbox item.'))
+            return
+          }
+        }
+        await cancelInboxReviewReminder(item.id, inboxSpaceKey)
+        await removeInboxItem(inboxSpaceKey, item.id)
+        await refresh()
+      } },
     ])
   }
 
@@ -7053,11 +7212,38 @@ function InboxScreen() {
                   </View>
                 ) : null}
                 <View style={styles.inboxActionsRow}>
-                  <Button title={tr('Open')} onPress={()=>openItem(item)} />
-                  <Button title={busy===item.id ? tr('Processing…') : tr('Scan')} onPress={()=>runOcr(item)} disabled={busy===item.id} />
-                  <Button title={tr('Attach to bill')} onPress={()=>attachToBill(item)} />
-                  <Button title={tr('Archive')} onPress={()=>archiveItem(item)} />
-                  <Button title={tr('Delete')} color="#c53030" onPress={()=>removeItem(item)} />
+                  <AppButton
+                    label={tr('Open')}
+                    variant="secondary"
+                    iconName="open-outline"
+                    onPress={()=>openItem(item)}
+                  />
+                  <AppButton
+                    label={busy===item.id ? tr('Processing…') : tr('Scan')}
+                    variant="secondary"
+                    iconName="scan-outline"
+                    onPress={()=>runOcr(item)}
+                    disabled={busy===item.id}
+                  />
+                  <AppButton
+                    label={tr('Attach to bill')}
+                    variant="outline"
+                    iconName="link-outline"
+                    onPress={()=>attachToBill(item)}
+                  />
+                  <AppButton
+                    label={tr('Archive')}
+                    variant="ghost"
+                    iconName="archive-outline"
+                    onPress={()=>archiveItem(item)}
+                  />
+                  <AppButton
+                    label={tr('Delete')}
+                    variant="ghost"
+                    iconName="trash-outline"
+                    labelStyle={{ color: '#DC2626' }}
+                    onPress={()=>removeItem(item)}
+                  />
                 </View>
               </Surface>
             )}
@@ -7120,12 +7306,17 @@ function BillsListScreen() {
 
   const [filtersExpanded, setFiltersExpanded] = useState(true)
   const [supplierQuery, setSupplierQuery] = useState('')
+  const [supplierDropdownOpen, setSupplierDropdownOpen] = useState(false)
   const [amountMin, setAmountMin] = useState('')
   const [amountMax, setAmountMax] = useState('')
   const [dateMode, setDateMode] = useState<'due' | 'invoice' | 'created'>('due')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
-  const [statusFilter, setStatusFilter] = useState<'all' | 'paid' | 'unpaid' | 'archived'>('all')
+  const [statusSelections, setStatusSelections] = useState<{ unpaid: boolean; paid: boolean; archived: boolean }>(() => ({
+    unpaid: true,
+    paid: true,
+    archived: false,
+  }))
   const [unpaidOnly, setUnpaidOnly] = useState(false)
   const [overdueOnly, setOverdueOnly] = useState(false)
   const [hasAttachmentsOnly, setHasAttachmentsOnly] = useState(false)
@@ -7737,7 +7928,7 @@ function BillsListScreen() {
     setAmountMax('')
     setDateFrom('')
     setDateTo('')
-    setStatusFilter('all')
+    setStatusSelections({ unpaid: true, paid: true, archived: false })
     setUnpaidOnly(false)
     setOverdueOnly(false)
     setHasAttachmentsOnly(false)
@@ -7745,17 +7936,69 @@ function BillsListScreen() {
     setDateMode('due')
   }, [])
 
+  const selectedStatusList = useMemo(() => {
+    const list: Array<'unpaid' | 'paid' | 'archived'> = []
+    if (statusSelections.unpaid) list.push('unpaid')
+    if (statusSelections.paid) list.push('paid')
+    if (statusSelections.archived) list.push('archived')
+    if (list.length) return list
+    return ['unpaid', 'paid', 'archived'] as const
+  }, [statusSelections.archived, statusSelections.paid, statusSelections.unpaid])
+
+  const statusFilterCompat = useMemo(() => {
+    if (selectedStatusList.length === 1) return selectedStatusList[0]
+    return 'all'
+  }, [selectedStatusList])
+
+  const isStatusIncluded = useCallback((bill: Bill) => {
+    for (const s of selectedStatusList) {
+      if (s === 'unpaid' && isBillUnpaid(bill.status)) return true
+      if (s === 'paid' && bill.status === 'paid') return true
+      if (s === 'archived' && bill.status === 'archived') return true
+    }
+    return false
+  }, [selectedStatusList])
+
   const handleStatusChange = useCallback((value: string) => {
     const next = (value as 'all' | 'paid' | 'unpaid' | 'archived') || 'all'
-    setStatusFilter(next)
-    setUnpaidOnly(next === 'unpaid')
-    if (next === 'archived') setIncludeArchived(true)
-  }, [])
+    if (next === 'unpaid') {
+      setStatusSelections({ unpaid: true, paid: false, archived: false })
+      setUnpaidOnly(true)
+      setIncludeArchived(false)
+      return
+    }
+    if (next === 'paid') {
+      setStatusSelections({ unpaid: false, paid: true, archived: false })
+      setUnpaidOnly(false)
+      setIncludeArchived(false)
+      return
+    }
+    if (next === 'archived') {
+      setStatusSelections({ unpaid: false, paid: false, archived: true })
+      setUnpaidOnly(false)
+      setIncludeArchived(true)
+      return
+    }
+    setStatusSelections({ unpaid: true, paid: true, archived: includeArchived })
+    setUnpaidOnly(false)
+  }, [includeArchived])
 
   const handleUnpaidToggle = useCallback((value: boolean) => {
-    setUnpaidOnly(value)
-    setStatusFilter(value ? 'unpaid' : 'all')
-  }, [])
+    if (value) {
+      setStatusSelections({ unpaid: true, paid: false, archived: false })
+      setUnpaidOnly(true)
+      setIncludeArchived(false)
+    } else {
+      setStatusSelections({ unpaid: true, paid: true, archived: includeArchived })
+      setUnpaidOnly(false)
+    }
+  }, [includeArchived])
+
+  useEffect(() => {
+    const unpaidOnlyNext = statusSelections.unpaid && !statusSelections.paid && !statusSelections.archived
+    if (unpaidOnly !== unpaidOnlyNext) setUnpaidOnly(unpaidOnlyNext)
+    if (includeArchived !== statusSelections.archived) setIncludeArchived(statusSelections.archived)
+  }, [includeArchived, statusSelections.archived, statusSelections.paid, statusSelections.unpaid, unpaidOnly])
 
   useEffect(() => {
     const preset = (route as any)?.params?.filterPreset
@@ -7771,8 +8014,21 @@ function BillsListScreen() {
     if (typeof preset.includeArchived === 'boolean') setIncludeArchived(preset.includeArchived)
     if (typeof preset.overdueOnly === 'boolean') setOverdueOnly(preset.overdueOnly)
 
-    if (typeof preset.unpaidOnly === 'boolean') handleUnpaidToggle(preset.unpaidOnly)
-    if (typeof preset.statusFilter === 'string') handleStatusChange(preset.statusFilter)
+    if (Array.isArray((preset as any).statusList)) {
+      const raw = (preset as any).statusList as any[]
+      const set = new Set(raw.map((v) => String(v || '').trim()).filter(Boolean))
+      const next = {
+        unpaid: set.has('unpaid'),
+        paid: set.has('paid'),
+        archived: set.has('archived'),
+      }
+      setStatusSelections(next)
+      setIncludeArchived(next.archived)
+      setUnpaidOnly(next.unpaid && !next.paid && !next.archived)
+    } else {
+      if (typeof preset.unpaidOnly === 'boolean') handleUnpaidToggle(preset.unpaidOnly)
+      if (typeof preset.statusFilter === 'string') handleStatusChange(preset.statusFilter)
+    }
     if (typeof preset.filtersExpanded === 'boolean') setFiltersExpanded(preset.filtersExpanded)
     else setFiltersExpanded(false)
 
@@ -7829,15 +8085,12 @@ function BillsListScreen() {
     const msDay = 24 * 60 * 60 * 1000
 
     const list = bills.filter((bill) => {
-      if (!includeArchived && bill.status === 'archived') return false
       if (supplierTerm && !bill.supplier.toLowerCase().includes(supplierTerm)) return false
 
       if (minVal !== null && !Number.isNaN(minVal) && bill.amount < minVal) return false
       if (maxVal !== null && !Number.isNaN(maxVal) && bill.amount > maxVal) return false
 
-      if (statusFilter === 'paid' && bill.status !== 'paid') return false
-      if (statusFilter === 'unpaid' && !isBillUnpaid(bill.status)) return false
-      if (statusFilter === 'archived' && bill.status !== 'archived') return false
+      if (!isStatusIncluded(bill)) return false
       if (unpaidOnly && !isBillUnpaid(bill.status)) return false
 
       const dueDate = parseDateValue(bill.due_date)
@@ -7861,7 +8114,7 @@ function BillsListScreen() {
       if (aTime === bTime) return a.supplier.localeCompare(b.supplier)
       return aTime - bTime
     })
-  }, [amountMax, amountMin, attachmentCounts, bills, dateFrom, dateMode, dateTo, getBillDate, hasAttachmentsOnly, overdueOnly, parseDateValue, statusFilter, supplierQuery, today, unpaidOnly])
+  }, [amountMax, amountMin, attachmentCounts, bills, dateFrom, dateMode, dateTo, getBillDate, hasAttachmentsOnly, overdueOnly, parseDateValue, isStatusIncluded, supplierQuery, today, unpaidOnly, includeArchived])
 
   const totalCount = bills.length
   const resultsLabel = filteredBills.length === totalCount
@@ -8133,7 +8386,8 @@ function BillsListScreen() {
         supplierQuery,
         amountMin,
         amountMax,
-        statusFilter,
+        statusFilter: statusFilterCompat,
+        statusList: selectedStatusList,
         unpaidOnly,
         overdueOnly,
         hasAttachmentsOnly,
@@ -8215,7 +8469,8 @@ function BillsListScreen() {
           amountMin,
           amountMax,
           hasAttachmentsOnly,
-          status: statusFilter,
+          status: statusFilterCompat,
+          statusList: selectedStatusList,
           includeArchived,
           overdueOnly,
           unpaidOnly,
@@ -8261,7 +8516,8 @@ function BillsListScreen() {
           amountMin,
           amountMax,
           hasAttachmentsOnly,
-          status: statusFilter,
+          status: statusFilterCompat,
+          statusList: selectedStatusList,
           includeArchived,
           overdueOnly,
           unpaidOnly,
@@ -8349,7 +8605,8 @@ function BillsListScreen() {
             amountMin,
             amountMax,
             hasAttachmentsOnly,
-            status: statusFilter,
+            status: statusFilterCompat,
+            statusList: selectedStatusList,
             includeArchived,
             overdueOnly,
             unpaidOnly,
@@ -8373,7 +8630,8 @@ function BillsListScreen() {
     hasAttachmentsOnly,
     selectedBillIds,
     showToast,
-    statusFilter,
+    statusFilterCompat,
+    selectedStatusList,
     supplierQuery,
     supabase,
     unpaidOnly,
@@ -8527,8 +8785,21 @@ function BillsListScreen() {
       if (typeof preset.hasAttachmentsOnly === 'boolean') setHasAttachmentsOnly(preset.hasAttachmentsOnly)
       if (typeof preset.includeArchived === 'boolean') setIncludeArchived(preset.includeArchived)
       if (typeof preset.overdueOnly === 'boolean') setOverdueOnly(preset.overdueOnly)
-      if (typeof preset.unpaidOnly === 'boolean') handleUnpaidToggle(preset.unpaidOnly)
-      if (typeof preset.statusFilter === 'string') handleStatusChange(preset.statusFilter)
+      if (Array.isArray((preset as any).statusList)) {
+        const raw = (preset as any).statusList as any[]
+        const set = new Set(raw.map((v) => String(v || '').trim()).filter(Boolean))
+        const next = {
+          unpaid: set.has('unpaid'),
+          paid: set.has('paid'),
+          archived: set.has('archived'),
+        }
+        setStatusSelections(next)
+        setIncludeArchived(next.archived)
+        setUnpaidOnly(next.unpaid && !next.paid && !next.archived)
+      } else {
+        if (typeof preset.unpaidOnly === 'boolean') handleUnpaidToggle(preset.unpaidOnly)
+        if (typeof preset.statusFilter === 'string') handleStatusChange(preset.statusFilter)
+      }
       setFiltersExpanded(true)
     }
 
@@ -8601,7 +8872,7 @@ function BillsListScreen() {
     const trackedDate = getBillDate(item, dateMode)
     const isOverdue = dueDate ? isBillUnpaid(item.status) && dueDate.getTime() < today.getTime() : false
     const statusLabel = item.status === 'archived' ? 'Archived' : isOverdue ? 'Overdue' : item.status === 'paid' ? 'Paid' : 'Unpaid'
-    const statusTone: 'danger' | 'success' | 'info' | 'warning' = item.status === 'archived' ? 'info' : isOverdue ? 'warning' : item.status === 'paid' ? 'success' : 'info'
+    const statusTone: 'neutral' | 'danger' | 'success' | 'info' | 'warning' = item.status === 'archived' ? 'neutral' : isOverdue ? 'warning' : item.status === 'paid' ? 'success' : 'info'
     const attachments = attachmentCounts[item.id] || 0
 
     const billSpaceId = String((item as any)?.__spaceId || spaceId || '')
@@ -8793,7 +9064,10 @@ function BillsListScreen() {
                         {supplierOptions.map((name) => (
                           <Pressable
                             key={name}
-                            onPress={() => setSupplierQuery(name)}
+                            onPress={() => {
+                              setSupplierQuery(name)
+                              setSupplierDropdownOpen(false)
+                            }}
                             style={({ pressed }) => [styles.supplierSuggestItem, pressed ? { backgroundColor: '#EFF6FF' } : null]}
                           >
                             <Text style={styles.supplierSuggestText} numberOfLines={1}>{name}</Text>
@@ -8863,7 +9137,13 @@ function BillsListScreen() {
                       <Text style={styles.toggleLabel}>{tr('Has attachment')}</Text>
                     </View>
                     <View style={styles.filterToggle}>
-                      <Switch value={includeArchived} onValueChange={setIncludeArchived} />
+                      <Switch
+                        value={includeArchived}
+                        onValueChange={(value) => {
+                          setIncludeArchived(value)
+                          setStatusSelections((prev) => ({ ...prev, archived: value }))
+                        }}
+                      />
                       <Text style={styles.toggleLabel}>{tr('Include archived')}</Text>
                     </View>
                   </View>
@@ -8886,16 +9166,31 @@ function BillsListScreen() {
               )}
             </Surface>
 
-            <SegmentedControl
-              value={statusFilter}
-              onChange={handleStatusChange}
-              options={[
-                { value: 'all', label: tr('All') },
-                { value: 'unpaid', label: tr('Unpaid') },
-                { value: 'paid', label: tr('Paid') },
-                { value: 'archived', label: tr('Archived') },
-              ]}
-            />
+            <View style={{ marginTop: themeSpacing.sm }}>
+              <Text style={styles.filterLabel}>{tr('Status')}</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+                <AppButton
+                  label={tr('All')}
+                  variant={statusSelections.unpaid && statusSelections.paid && (!includeArchived || statusSelections.archived) ? 'secondary' : 'ghost'}
+                  onPress={() => setStatusSelections({ unpaid: true, paid: true, archived: includeArchived })}
+                />
+                <AppButton
+                  label={tr('Unpaid')}
+                  variant={statusSelections.unpaid ? 'secondary' : 'ghost'}
+                  onPress={() => setStatusSelections((prev) => ({ ...prev, unpaid: !prev.unpaid }))}
+                />
+                <AppButton
+                  label={tr('Paid')}
+                  variant={statusSelections.paid ? 'secondary' : 'ghost'}
+                  onPress={() => setStatusSelections((prev) => ({ ...prev, paid: !prev.paid }))}
+                />
+                <AppButton
+                  label={tr('Archived')}
+                  variant={statusSelections.archived ? 'secondary' : 'ghost'}
+                  onPress={() => setStatusSelections((prev) => ({ ...prev, archived: !prev.archived }))}
+                />
+              </View>
+            </View>
 
             <View style={styles.billsPrimaryActionsRow}>
               <View style={styles.flex1} />
@@ -9383,7 +9678,7 @@ function HomeScreen() {
   const { lang, setLang } = useLangContext()
   const insets = useSafeAreaInsets()
   const [summaries, setSummaries] = useState<
-    { spaceId: string; spaceName: string; totalUnpaid: number; overdueCount: number; nextDueDate: string | null }[]
+    { spaceId: string; spaceName: string; totalUnpaid: number; unpaidCount: number; overdueCount: number; overdueTotal: number; nextDueDate: string | null; nextDueTotal: number }[]
   >([])
 
   const dayKey = useDayKey()
@@ -9537,7 +9832,7 @@ function HomeScreen() {
           const sid = sp.id
           let bills: Bill[] = []
           if (supabase) {
-            const { data, error } = await listBills(supabase, sid)
+            const { data, error } = await listBills(supabase, sid, entitlements)
             if (error) throw error
             bills = data || []
           } else {
@@ -9554,19 +9849,21 @@ function HomeScreen() {
 
           for (const bill of bills) {
             if (!isBillUnpaid(bill.status)) continue
+            const amountRaw = Number((bill as any)?.amount ?? 0)
+            const amount = Number.isFinite(amountRaw) ? amountRaw : 0
             unpaidCount += 1
-            totalUnpaid += bill.amount || 0
+            totalUnpaid += amount
             if (!bill.due_date) continue
             const due = bill.due_date
             if (due < todayIso) {
               overdueCount += 1
-              overdueTotal += bill.amount || 0
+              overdueTotal += amount
             } else {
               if (!nextDue || due < nextDue) {
                 nextDue = due
-                nextDueTotal = bill.amount || 0
+                nextDueTotal = amount
               } else if (nextDue && due === nextDue) {
-                nextDueTotal += bill.amount || 0
+                nextDueTotal += amount
               }
             }
           }
@@ -9589,7 +9886,7 @@ function HomeScreen() {
         setSummaries([])
       }
     })()
-  }, [dayKey, loading, spacesCtx.spaces])
+  }, [dayKey, loading, spacesCtx.spaces, entitlements])
 
   if (loading || !space) {
     return (
@@ -9872,6 +10169,10 @@ function HomeScreen() {
                 if (tile.target === 'Warranties') {
                   safeNavigate(tile.target, params)
                   return
+                }
+                if (tile.target === 'Inbox' && entitlements.plan !== 'pro') {
+                  Alert.alert(tr('Inbox'), tr('Email inbox is available on Več.'))
+                  showUpgradeAlert('inbox')
                 }
                 navigation.navigate(tile.target, params)
               }}
@@ -10332,6 +10633,12 @@ function WarrantiesScreen() {
     return (bills || [])
       .filter((b) => !linkedBillIds.has(b.id))
       .filter((b) => (term ? String(b.supplier || '').toLowerCase().includes(term) : true))
+      .sort((a, b) => {
+        const aKey = String((a as any)?.created_at || a.due_date || '')
+        const bKey = String((b as any)?.created_at || b.due_date || '')
+        if (aKey === bKey) return String(b.id).localeCompare(String(a.id))
+        return bKey.localeCompare(aKey)
+      })
       .slice(0, 25)
   }, [billQuery, bills, linkedBillIds])
 
@@ -10542,7 +10849,6 @@ function WarrantiesScreen() {
 
       if (!supplier.trim() && supplierCandidate) setSupplier(String(supplierCandidate))
       if (!itemName.trim() && itemCandidate) setItemName(String(itemCandidate))
-      if (!itemName.trim() && !itemCandidate && supplierCandidate) setItemName(String(supplierCandidate))
       if (!purchaseDate.trim() && purchaseCandidate) setPurchaseDate(String(purchaseCandidate))
 
       if (!expiresAt.trim() && expiresCandidate) {
@@ -10613,7 +10919,6 @@ function WarrantiesScreen() {
 
       if (!supplier.trim() && supplierCandidate) setSupplier(String(supplierCandidate))
       if (!itemName.trim() && itemCandidate) setItemName(String(itemCandidate))
-      if (!itemName.trim() && !itemCandidate && supplierCandidate) setItemName(String(supplierCandidate))
       if (!purchaseDate.trim() && purchaseCandidate) setPurchaseDate(String(purchaseCandidate))
 
       if (!expiresAt.trim() && expiresCandidate) {
@@ -10691,7 +10996,6 @@ function WarrantiesScreen() {
 
       if (!supplier.trim() && supplierCandidate) setSupplier(String(supplierCandidate))
       if (!itemName.trim() && itemCandidate) setItemName(String(itemCandidate))
-      if (!itemName.trim() && !itemCandidate && supplierCandidate) setItemName(String(supplierCandidate))
       if (!purchaseDate.trim() && purchaseCandidate) setPurchaseDate(String(purchaseCandidate))
 
       if (!expiresAt.trim() && expiresCandidate) {
@@ -10802,8 +11106,7 @@ function WarrantiesScreen() {
                       onPress={() => {
                         setSelectedBillId(b.id)
                         if (!supplier) setSupplier(b.supplier)
-                        if (!itemName) setItemName(b.supplier)
-                        if (!purchaseDate) setPurchaseDate(b.due_date)
+                        setLinkedBillOpen(false)
                       }}
                       style={({ pressed }) => [styles.billCardPressable, pressed && styles.billCardPressed]}
                       hitSlop={8}
@@ -10838,64 +11141,32 @@ function WarrantiesScreen() {
             </View>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm }}>
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
-                <AppButton
-                  label={tr('Purchase')}
-                  variant="secondary"
-                  iconName="calendar-outline"
-                  onPress={() => openDatePicker('purchase')}
+                <AppInput
+                  placeholder="YYYY-MM-DD"
+                  value={purchaseDate}
+                  onChangeText={setPurchaseDate}
+                  hint={tr('Purchase date')}
                 />
-                <Text style={styles.mutedText}>{purchaseDate || tr('Pick date')}</Text>
               </View>
 
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
-                <AppButton
-                  label={tr('Expires')}
-                  variant="secondary"
-                  iconName="calendar-outline"
-                  disabled={Boolean(durationMonths.trim() && purchaseDate.trim())}
-                  onPress={() => openDatePicker('expires')}
+                <AppInput
+                  placeholder="YYYY-MM-DD"
+                  value={expiresAt}
+                  onChangeText={setExpiresAt}
+                  hint={tr('Expires')}
                 />
-                <Text style={styles.mutedText}>{computedExpiresAt || expiresAt || tr('Pick date')}</Text>
               </View>
 
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
-                {purchaseDate.trim() && expiresAt.trim() ? (
-                  <AppInput
-                    placeholder={tr('Duration (months)')}
-                    value={computedDurationMonths}
-                    editable={false}
-                  />
-                ) : (
-                  <AppInput
-                    placeholder={tr('Duration (months)')}
-                    value={durationMonths}
-                    onChangeText={(value) => {
-                      setDurationMonths(value)
-                      if (value.trim()) setExpiresAt('')
-                    }}
-                    keyboardType="numeric"
-                  />
-                )}
+                <AppInput
+                  placeholder={tr('Duration (months)')}
+                  value={durationMonths}
+                  onChangeText={setDurationMonths}
+                  keyboardType="numeric"
+                />
               </View>
             </View>
-
-            {Platform.OS !== 'android' && iosPickerVisible ? (
-              <View style={styles.datePickerContainer}>
-                <DateTimePicker
-                  mode="date"
-                  display="spinner"
-                  value={iosPickerValue}
-                  onChange={(_event, selectedDate) => {
-                    if (!selectedDate) return
-                    setIosPickerValue(selectedDate)
-                  }}
-                />
-                <View style={styles.datePickerActions}>
-                  <AppButton label={tr('Cancel')} variant="ghost" onPress={cancelIosPicker} />
-                  <AppButton label={tr('Done')} onPress={confirmIosPicker} />
-                </View>
-              </View>
-            ) : null}
           </View>
 
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
@@ -10910,11 +11181,7 @@ function WarrantiesScreen() {
           if (!asset?.uri) return
           const att = { uri: asset.uri, name: asset.fileName || 'photo.jpg', type: asset.type || 'image/jpeg' }
           setPendingAttachment(att)
-          if (!entitlements.canUseOCR) {
-            Alert.alert(tr('Attachment selected'), tr('Image will be attached on save.'))
-            return
-          }
-          await ocrPendingAttachment(att)
+          Alert.alert(tr('Attachment selected'), tr('Image will be attached on save.'))
         }}
             />
             <AppButton
@@ -10928,11 +11195,7 @@ function WarrantiesScreen() {
           if (!file?.uri) return
           const att = { uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' }
           setPendingAttachment(att)
-          if (!entitlements.canUseOCR) {
-            Alert.alert(tr('Attachment selected'), tr('PDF will be attached on save.'))
-            return
-          }
-          await ocrPendingAttachment(att)
+          Alert.alert(tr('Attachment selected'), tr('PDF will be attached on save.'))
         }}
             />
           </View>
@@ -10943,26 +11206,15 @@ function WarrantiesScreen() {
               {pendingAttachment.type?.startsWith('image/') ? (
                 <Image source={{ uri: pendingAttachment.uri }} style={{ width: 160, height: 120, borderRadius: 12, marginTop: themeSpacing.xs }} />
               ) : (
-                <Text style={styles.bodyText}>{pendingAttachment.name}</Text>
+                <View style={{ marginTop: themeSpacing.xs, flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs }}>
+                  <Ionicons name="document-text-outline" size={18} color={themeColors.primary} />
+                  <Text style={styles.bodyText}>{pendingAttachment.name}</Text>
+                </View>
               )}
             </View>
           )}
 
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
-            <AppButton
-              label={tr('OCR from photo')}
-              variant="secondary"
-              iconName="scan-outline"
-              onPress={ocrPhoto}
-              style={{ flexGrow: 1, flexBasis: 160, minWidth: 160 }}
-            />
-            <AppButton
-              label={tr('OCR from PDF')}
-              variant="secondary"
-              iconName="document-text-outline"
-              onPress={ocrPdf}
-              style={{ flexGrow: 1, flexBasis: 160, minWidth: 160 }}
-            />
             <AppButton
               label={tr('Save warranty')}
               iconName="save-outline"
@@ -11130,6 +11382,8 @@ function WarrantyDetailsScreen() {
   const [warranty, setWarranty] = useState<Warranty | null>(null)
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
   const [linkedBill, setLinkedBill] = useState<Bill | null>(null)
+  const [reminderInfo, setReminderInfo] = useState<string | null>(null)
+  const [remindersEnabled, setRemindersEnabledState] = useState<boolean>(true)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
 
   const parseDateValue = useCallback((value?: string | null): Date | null => {
@@ -11145,6 +11399,32 @@ function WarrantyDetailsScreen() {
     if ([y, m, d].some((p) => Number.isNaN(p))) return null
     return new Date(y, m - 1, d)
   }, [])
+
+  useEffect(() => {
+    ;(async () => {
+      setRemindersEnabledState(await getRemindersEnabled())
+    })()
+  }, [])
+
+  const formatReminderDateTime = useCallback((date: Date) => {
+    try {
+      return date.toLocaleString()
+    } catch {
+      return date.toISOString()
+    }
+  }, [])
+
+  const buildWarrantyReminderInfo = useCallback((expiresAt?: string | null) => {
+    if (!expiresAt) return null
+    const parsed = parseDateValue(expiresAt)
+    if (!parsed) return null
+    const thirtyDays = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate() - 30, 9, 0, 0, 0)
+    const sevenDays = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate() - 7, 9, 0, 0, 0)
+    const upcoming = [thirtyDays, sevenDays].filter((d) => d.getTime() > Date.now())
+    if (!upcoming.length) return tr('No upcoming reminders.')
+    const next = upcoming.sort((a, b) => a.getTime() - b.getTime())[0]
+    return tr('Next reminder: {date}', { date: formatReminderDateTime(next) })
+  }, [formatReminderDateTime, parseDateValue])
 
   const computedDurationMonths = useMemo(() => {
     const purchase = parseDateValue(String((warranty as any)?.purchase_date || '').trim())
@@ -11162,6 +11442,7 @@ function WarrantyDetailsScreen() {
       const { data } = await supabase!.from('warranties').select('*').eq('user_id', userId).eq('id', warrantyId).single()
       setWarranty((data as Warranty) || null)
       setAttachments(await listRemoteAttachments(supabase!, 'warranties', warrantyId, spaceId))
+      setReminderInfo(buildWarrantyReminderInfo((data as any)?.expires_at || null))
 
       try {
         const billId = (data as any)?.bill_id || null
@@ -11180,6 +11461,7 @@ function WarrantyDetailsScreen() {
       const w = locals.find(l=> l.id===warrantyId) || null
       setWarranty(w as any)
       setAttachments(await listLocalAttachments(spaceId, 'warranties', warrantyId))
+      setReminderInfo(buildWarrantyReminderInfo((w as any)?.expires_at || null))
 
       try {
         const billId = (w as any)?.bill_id || null
@@ -11290,6 +11572,22 @@ function WarrantyDetailsScreen() {
               message={tr('No expiry date — warranty reminders cannot be scheduled.')}
             />
           ) : null}
+          {!remindersEnabled ? (
+            <InlineInfo
+              tone="warning"
+              iconName="alert-circle-outline"
+              message={tr('Reminders are disabled in Settings.')}
+              style={{ marginTop: themeSpacing.xs }}
+            />
+          ) : null}
+          {reminderInfo ? (
+            <InlineInfo
+              tone="info"
+              iconName="time-outline"
+              message={reminderInfo}
+              style={{ marginTop: themeSpacing.xs }}
+            />
+          ) : null}
           <View style={styles.billActionsRow}>
             <AppButton
               label={tr('Schedule defaults')}
@@ -11304,6 +11602,7 @@ function WarrantyDetailsScreen() {
                   return
                 }
                 await scheduleWarrantyReminders({ id: warranty.id, item_name: warranty.item_name || tr('Warranty'), supplier: warranty.supplier || null, expires_at: warranty.expires_at, space_id: spaceId } as any, undefined, spaceId)
+                setReminderInfo(buildWarrantyReminderInfo(warranty.expires_at))
                 Alert.alert(tr('Reminders'), tr('Scheduled default warranty reminders.'))
               }}
             />
@@ -11313,6 +11612,7 @@ function WarrantyDetailsScreen() {
               iconName="notifications-off-outline"
               onPress={async ()=>{
                 await cancelWarrantyReminders(warranty.id, spaceId)
+                setReminderInfo(null)
                 Alert.alert(tr('Reminders'), tr('Canceled for this warranty.'))
               }}
             />
@@ -11624,24 +11924,15 @@ function ReportsScreen() {
     })
   }, [amountMax, amountMin, bills, dateMode, isPro, isStatusIncluded, range.end, range.start, supplierQuery])
 
-  const supplierQuickPicks = useMemo(() => {
-    const allowAdvanced = isPro
-    const modeForDate = allowAdvanced ? dateMode : 'due'
-    const supplierTotalsInRange: Record<string, number> = {}
-    for (const b of bills || []) {
-      const d = getBillDateForMode(b, modeForDate)
-      if (!d) continue
-      if (d < range.start || d > range.end) continue
-      if (!isStatusIncluded(b)) continue
-      const name = String(b.supplier || '').trim()
-      if (!name) continue
-      supplierTotalsInRange[name] = (supplierTotalsInRange[name] || 0) + (b.currency === 'EUR' ? b.amount : 0)
-    }
-    return Object.entries(supplierTotalsInRange)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([supplier]) => supplier)
-  }, [bills, dateMode, isPro, isStatusIncluded, range.end, range.start])
+  const supplierOptions = useMemo(() => {
+    const all = (bills || [])
+      .map((b) => String(b.supplier || '').trim())
+      .filter((v) => v.length > 0)
+    const unique = Array.from(new Set(all)).sort((a, b) => a.localeCompare(b))
+    const term = supplierQuery.trim().toLowerCase()
+    if (!term) return unique.slice(0, 10)
+    return unique.filter((name) => name.toLowerCase().includes(term)).slice(0, 10)
+  }, [bills, supplierQuery])
 
   const totals = useMemo(() => {
     const totalBillsInRange = filtered.length
@@ -11992,13 +12283,15 @@ function ReportsScreen() {
               <div class="row"><div class="k">${tr('Unpaid total (EUR)')}</div><div class="v">EUR ${totals.unpaidTotalEur.toFixed(2)}</div></div>
             </div>
             <div class="card">
-              ${reportsView === 'chart'
-                ? `
-                  <div class="k" style="margin-bottom:8px;">${groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')}</div>
-                  ${chartSvg || `<div class="k">${tr('No bills in this range.')}</div>`}
-                  ${lineSvg ? `<div style="margin-top:12px;">${lineSvg}</div>` : ''}
-                `
-                : `<div class="k" style="margin-bottom:8px;">${tr('Table')}</div><table><thead><tr><th>${tr('Supplier')}</th><th>${tr('Due')}</th><th style=\"text-align:right;\">${tr('Amount (EUR)')}</th></tr></thead><tbody>${tableHtml || ''}</tbody></table>`
+              <div class="k" style="margin-bottom:8px;">${groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')}</div>
+              ${chartSvg || `<div class="k">${tr('No bills in this range.')}</div>`}
+              ${lineSvg ? `<div style="margin-top:12px;">${lineSvg}</div>` : ''}
+            </div>
+            <div class="card">
+              <div class="k" style="margin-bottom:8px;">${tr('Table')}</div>
+              ${tableHtml
+                ? `<table><thead><tr><th>${tr('Supplier')}</th><th>${tr('Due')}</th><th style=\"text-align:right;\">${tr('Amount (EUR)')}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
+                : `<div class="k">${tr('No bills in this range.')}</div>`
               }
             </div>
           </body>
@@ -12167,23 +12460,29 @@ function ReportsScreen() {
             <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.sm }}>
               <View>
                 <Text style={styles.filterLabel}>{tr('Supplier')}</Text>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                  <AppButton
-                    label={tr('All')}
-                    variant={supplierQuery.trim() ? 'ghost' : 'secondary'}
-                    onPress={() => setSupplierQuery('')}
+                <View style={{ marginTop: themeSpacing.xs, position: 'relative', zIndex: 10 }}>
+                  <AppInput
+                    placeholder={tr('Supplier')}
+                    value={supplierQuery}
+                    onChangeText={setSupplierQuery}
+                    onFocus={() => setSupplierDropdownOpen(true)}
+                    onBlur={() => setTimeout(() => setSupplierDropdownOpen(false), 120)}
                   />
-                  {supplierQuickPicks.map((s) => (
-                    <AppButton
-                      key={s}
-                      label={s}
-                      variant={supplierQuery.trim() === s ? 'secondary' : 'ghost'}
-                      onPress={() => setSupplierQuery(s)}
-                    />
-                  ))}
-                </View>
-                <View style={{ marginTop: themeSpacing.xs }}>
-                  <AppInput placeholder={tr('Supplier')} value={supplierQuery} onChangeText={setSupplierQuery} />
+                  {supplierDropdownOpen && supplierOptions.length > 0 ? (
+                    <View style={[styles.supplierSuggestList, { top: 46, maxHeight: 220 }]}>
+                      <ScrollView keyboardShouldPersistTaps="handled">
+                        {supplierOptions.map((name) => (
+                          <Pressable
+                            key={name}
+                            onPress={() => setSupplierQuery(name)}
+                            style={({ pressed }) => [styles.supplierSuggestItem, pressed ? { backgroundColor: '#EFF6FF' } : null]}
+                          >
+                            <Text style={styles.supplierSuggestText} numberOfLines={1}>{name}</Text>
+                          </Pressable>
+                        ))}
+                      </ScrollView>
+                    </View>
+                  ) : null}
                 </View>
               </View>
 
@@ -13155,6 +13454,16 @@ function PayScreen() {
   const [payActionVisible, setPayActionVisible] = useState(false)
   const [iosPickerVisible, setIosPickerVisible] = useState(false)
   const [iosPickerValue, setIosPickerValue] = useState(new Date())
+  const [qrPayload, setQrPayload] = useState<string | null>(null)
+  const [qrBill, setQrBill] = useState<Bill | null>(null)
+  const [qrDataUri, setQrDataUri] = useState<string | null>(null)
+  const [qrBusy, setQrBusy] = useState(false)
+  const [qrThumbs, setQrThumbs] = useState<Record<string, string>>({})
+  const qrThumbInFlight = useRef<Record<string, boolean>>({})
+  const [bankConfigVisible, setBankConfigVisible] = useState(false)
+  const [debtorName, setDebtorName] = useState('')
+  const [debtorIban, setDebtorIban] = useState('')
+  const [debtorBic, setDebtorBic] = useState('')
   const [permissionExplained, setPermissionExplained] = useState(false)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
@@ -13228,6 +13537,20 @@ function PayScreen() {
     if (p1) return [p1]
     return spaceId ? [spaceId] : []
   }, [entitlements?.payerLimit, payerSpaces, spaceId])
+
+  useEffect(() => {
+    ;(async () => {
+      const sid = spaceId || 'default'
+      try {
+        const raw = await AsyncStorage.getItem(`billbox.pay.debtor.${sid}`)
+        if (!raw) return
+        const parsed = JSON.parse(raw)
+        if (parsed?.name) setDebtorName(String(parsed.name))
+        if (parsed?.iban) setDebtorIban(String(parsed.iban))
+        if (parsed?.bic) setDebtorBic(String(parsed.bic))
+      } catch {}
+    })()
+  }, [spaceId])
 
   useEffect(() => { (async ()=>{
     if (!permissionExplained) {
@@ -13316,6 +13639,392 @@ function PayScreen() {
       return `${Number(value || 0).toFixed(2)} ${currency || 'EUR'}`
     }
   }, [])
+
+  async function makeQrDataUri(payload: string, opts: { width: number; margin?: number }) {
+    const QRCode = (await import('qrcode')) as any
+    const uri = await QRCode.toDataURL(payload, { width: opts.width, margin: opts.margin ?? 1 })
+    return String(uri)
+  }
+
+  function buildPaymentCopyParts(bill: Bill) {
+    const creditor = String(bill.creditor_name || bill.supplier || '').trim()
+    const iban = String(normalizeIban(bill.iban || '') || bill.iban || '').trim()
+    const reference = String([bill.reference_model, bill.reference].filter(Boolean).join(' ').trim())
+    const purpose = String(bill.purpose || '').trim()
+    const amountNum = Number(bill.amount || 0)
+    const currency = String(bill.currency || '').toUpperCase()
+    const amount = Number.isFinite(amountNum) ? amountNum.toFixed(2) : ''
+
+    const all = [
+      creditor ? `${tr('Supplier')}: ${creditor}` : '',
+      iban ? `IBAN: ${iban}` : '',
+      amount ? `${tr('Amount')}: ${amount} ${currency || ''}`.trim() : '',
+      reference ? `${tr('Reference')}: ${reference}` : '',
+      purpose ? `${tr('Purpose')}: ${purpose}` : '',
+    ].filter(Boolean).join('\n')
+
+    return { creditor, iban, reference, purpose, amount, currency, all }
+  }
+
+  async function copyTextOrWarn(text: string, warnKey: string) {
+    const v = String(text || '').trim()
+    if (!v) {
+      Alert.alert(tr('Error'), tr(warnKey))
+      return
+    }
+    try {
+      await Clipboard.setStringAsync(v)
+      Alert.alert(tr('Copied'))
+    } catch {
+      Alert.alert(tr('Error'), tr('Could not copy.'))
+    }
+  }
+
+  const escapeXml = useCallback((input: string) => {
+    return String(input || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
+  }, [])
+
+  function normalizeBic(input: string): string {
+    const v = String(input || '').replace(/\s+/g, '').toUpperCase()
+    return v
+  }
+
+  function buildPain001Xml(args: {
+    msgId: string
+    createdAtIso: string
+    executionDate: string
+    debtorName: string
+    debtorIban: string
+    debtorBic?: string
+    bills: Bill[]
+  }): string {
+    const txs = args.bills
+    const ctrlSum = txs.reduce((sum, b) => sum + Number(b.amount || 0), 0)
+    const nb = txs.length
+
+    const debtorNm = escapeXml(args.debtorName)
+    const debtorIbanNorm = normalizeIban(args.debtorIban) || ''
+    const debtorBicNorm = args.debtorBic ? normalizeBic(args.debtorBic) : ''
+
+    const header = `<?xml version="1.0" encoding="UTF-8"?>\n` +
+      `<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n` +
+      `  <CstmrCdtTrfInitn>\n` +
+      `    <GrpHdr>\n` +
+      `      <MsgId>${escapeXml(args.msgId)}</MsgId>\n` +
+      `      <CreDtTm>${escapeXml(args.createdAtIso)}</CreDtTm>\n` +
+      `      <NbOfTxs>${nb}</NbOfTxs>\n` +
+      `      <CtrlSum>${ctrlSum.toFixed(2)}</CtrlSum>\n` +
+      `      <InitgPty>\n` +
+      `        <Nm>${debtorNm}</Nm>\n` +
+      `      </InitgPty>\n` +
+      `    </GrpHdr>\n`
+
+    const pmtInf = `    <PmtInf>\n` +
+      `      <PmtInfId>${escapeXml(args.msgId)}-P1</PmtInfId>\n` +
+      `      <PmtMtd>TRF</PmtMtd>\n` +
+      `      <NbOfTxs>${nb}</NbOfTxs>\n` +
+      `      <CtrlSum>${ctrlSum.toFixed(2)}</CtrlSum>\n` +
+      `      <PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf>\n` +
+      `      <ReqdExctnDt>${escapeXml(args.executionDate)}</ReqdExctnDt>\n` +
+      `      <Dbtr><Nm>${debtorNm}</Nm></Dbtr>\n` +
+      `      <DbtrAcct><Id><IBAN>${escapeXml(debtorIbanNorm)}</IBAN></Id></DbtrAcct>\n` +
+      (debtorBicNorm ? `      <DbtrAgt><FinInstnId><BIC>${escapeXml(debtorBicNorm)}</BIC></FinInstnId></DbtrAgt>\n` : '') +
+      `      <ChrgBr>SLEV</ChrgBr>\n`
+
+    const txXml = txs.map((b) => {
+      const creditor = escapeXml(String(b.creditor_name || b.supplier || ''))
+      const creditorIban = escapeXml(String(normalizeIban(b.iban || '') || ''))
+      const endToEnd = escapeXml(String(b.invoice_number || b.id).slice(0, 35))
+      const ref = String([b.reference_model, b.reference].filter(Boolean).join(' ').trim())
+      const memoRaw = String(ref || b.purpose || b.supplier || '').trim()
+      const memo = escapeXml(memoRaw.slice(0, 140))
+      return (
+        `      <CdtTrfTxInf>\n` +
+        `        <PmtId><EndToEndId>${endToEnd || 'NOTPROVIDED'}</EndToEndId></PmtId>\n` +
+        `        <Amt><InstdAmt Ccy="EUR">${Number(b.amount || 0).toFixed(2)}</InstdAmt></Amt>\n` +
+        `        <Cdtr><Nm>${creditor || 'UNKNOWN'}</Nm></Cdtr>\n` +
+        `        <CdtrAcct><Id><IBAN>${creditorIban}</IBAN></Id></CdtrAcct>\n` +
+        (memo ? `        <RmtInf><Ustrd>${memo}</Ustrd></RmtInf>\n` : '') +
+        `      </CdtTrfTxInf>\n`
+      )
+    }).join('')
+
+    const footer = `    </PmtInf>\n` +
+      `  </CstmrCdtTrfInitn>\n` +
+      `</Document>\n`
+
+    return header + pmtInf + txXml + footer
+  }
+
+  const saveDebtorConfig = useCallback(async () => {
+    const sid = spaceId || 'default'
+    const name = String(debtorName || '').trim()
+    const ibanNorm = normalizeIban(debtorIban || '')
+    const bicNorm = debtorBic ? normalizeBic(debtorBic) : ''
+
+    if (!name || !ibanNorm || !isValidIbanChecksum(ibanNorm)) {
+      Alert.alert(tr('Missing bank details'), tr('Please set your IBAN (and BIC if required by your bank).'))
+      return
+    }
+    try {
+      await AsyncStorage.setItem(`billbox.pay.debtor.${sid}`, JSON.stringify({ name, iban: ibanNorm, bic: bicNorm }))
+      setDebtorName(name)
+      setDebtorIban(ibanNorm)
+      setDebtorBic(bicNorm)
+      setBankConfigVisible(false)
+      Alert.alert(tr('Saved'))
+    } catch {
+      Alert.alert(tr('Unable to save.'))
+    }
+  }, [debtorBic, debtorIban, debtorName, spaceId])
+
+  const exportSepaXmlSelected = useCallback(async () => {
+    const picked = upcoming.filter((b) => selected[b.id])
+    if (!picked.length) {
+      Alert.alert(tr('Select bills'), tr('Select one or more bills.'))
+      return
+    }
+
+    const name = String(debtorName || '').trim()
+    const ibanNorm = normalizeIban(debtorIban || '')
+    const bicNorm = debtorBic ? normalizeBic(debtorBic) : ''
+
+    if (!name || !ibanNorm || !isValidIbanChecksum(ibanNorm)) {
+      Alert.alert(tr('Missing bank details'), tr('Please set your IBAN (and BIC if required by your bank).'))
+      setBankConfigVisible(true)
+      return
+    }
+
+    const nonEur = picked.find((b) => String(b.currency || '').toUpperCase() !== 'EUR')
+    if (nonEur) {
+      Alert.alert(tr('Export SEPA XML'), tr('Only EUR bills can be exported.'))
+      return
+    }
+    const missingIban = picked.find((b) => !normalizeIban(b.iban || '') || !isValidIbanChecksum(String(normalizeIban(b.iban || '') || '')))
+    if (missingIban) {
+      Alert.alert(tr('Export SEPA XML'), tr('Some selected bills are missing IBAN.'))
+      return
+    }
+
+    try {
+      const now = new Date()
+      const msgId = `BILLBOX-${now.toISOString().replace(/[-:.TZ]/g, '')}`
+      const createdAtIso = now.toISOString().slice(0, 19)
+      const xml = buildPain001Xml({
+        msgId,
+        createdAtIso,
+        executionDate: String(planningDate || new Date().toISOString().slice(0, 10)),
+        debtorName: name,
+        debtorIban: ibanNorm,
+        debtorBic: bicNorm || undefined,
+        bills: picked,
+      })
+
+      const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || ''
+      const file = `${baseDir}billbox_sepa_${Date.now()}.xml`
+      await FileSystem.writeAsStringAsync(file, xml, { encoding: FileSystem.EncodingType.UTF8 })
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(file, { mimeType: 'application/xml', dialogTitle: tr('Share export') })
+      } else {
+        Alert.alert(tr('Saved'), file)
+      }
+    } catch (e: any) {
+      Alert.alert(tr('Export failed'), e?.message || tr('Unable to export'))
+    } finally {
+      setPayActionVisible(false)
+    }
+  }, [buildPain001Xml, debtorBic, debtorIban, debtorName, planningDate, selected, upcoming])
+
+  const exportCsvSelected = useCallback(async () => {
+    const picked = upcoming.filter((b) => selected[b.id])
+    if (!picked.length) {
+      Alert.alert(tr('Select bills'), tr('Select one or more bills.'))
+      return
+    }
+    try {
+      const header = ['supplier', 'amount', 'currency', 'iban', 'reference', 'purpose', 'due_date', 'pay_date']
+      const rows = picked.map((b) => {
+        const supplier = String(b.supplier || '').replace(/\s+/g, ' ').trim()
+        const amount = Number(b.amount || 0)
+        const currency = String(b.currency || '').toUpperCase()
+        const iban = String(normalizeIban(b.iban || '') || b.iban || '').trim()
+        const reference = String([b.reference_model, b.reference].filter(Boolean).join(' ').trim())
+        const purpose = String(b.purpose || '').replace(/\s+/g, ' ').trim()
+        const due = String(b.due_date || '')
+        const pay = String((b as any).pay_date || '')
+        const cols = [
+          supplier,
+          Number.isFinite(amount) ? amount.toFixed(2) : '',
+          currency,
+          iban,
+          reference,
+          purpose,
+          due,
+          pay,
+        ]
+        return cols.map((v) => {
+          const s = String(v ?? '')
+          if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+          return s
+        }).join(',')
+      })
+      const csv = [header.join(','), ...rows].join('\n') + '\n'
+
+      const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || ''
+      const file = `${baseDir}billbox_payments_${Date.now()}.csv`
+      await FileSystem.writeAsStringAsync(file, csv, { encoding: FileSystem.EncodingType.UTF8 })
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(file, { mimeType: 'text/csv', dialogTitle: tr('Share export') })
+      } else {
+        Alert.alert(tr('Saved'), file)
+      }
+    } catch (e: any) {
+      Alert.alert(tr('Export failed'), e?.message || tr('Unable to export'))
+    } finally {
+      setPayActionVisible(false)
+    }
+  }, [selected, upcoming])
+
+  useEffect(() => {
+    let cancelled = false
+    const first = upcoming.slice(0, 12)
+    if (!first.length) return
+
+    ;(async () => {
+      for (const b of first) {
+        if (cancelled) return
+        if (qrThumbs[b.id]) continue
+        if (qrThumbInFlight.current[b.id]) continue
+        const payload = buildPaymentQrPayload(b)
+        if (!payload) continue
+        qrThumbInFlight.current[b.id] = true
+        try {
+          const uri = await makeQrDataUri(payload, { width: 96, margin: 1 })
+          if (cancelled) return
+          setQrThumbs((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: uri }))
+        } catch {
+        } finally {
+          qrThumbInFlight.current[b.id] = false
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [qrThumbs, upcoming])
+
+  function buildPaymentQrPayload(bill: Bill): string | null {
+    const iban = normalizeIban(bill.iban || '')
+    if (!iban) return null
+    const amount = Number(bill.amount || 0)
+    if (!amount || Number.isNaN(amount)) return null
+    const currency = String(bill.currency || 'EUR').toUpperCase()
+    if (currency !== 'EUR') return null
+    const creditor = String(bill.creditor_name || bill.supplier || '').trim()
+    if (!creditor) return null
+    const reference = String([bill.reference_model, bill.reference].filter(Boolean).join(' ').trim())
+    const purpose = String(bill.purpose || '').trim()
+    const remittance = (reference || purpose).slice(0, 140)
+    const info = reference && purpose ? purpose.slice(0, 140) : ''
+    const lines = [
+      'BCD',
+      '002',
+      '1',
+      'SCT',
+      '',
+      creditor.slice(0, 70),
+      iban,
+      `EUR${amount.toFixed(2)}`,
+      '',
+      remittance,
+      info,
+    ]
+    return lines.join('\n')
+  }
+
+  function openPaymentQr(bill: Bill) {
+    const payload = buildPaymentQrPayload(bill)
+    if (!payload) {
+      const currency = String(bill.currency || 'EUR').toUpperCase()
+      if (currency !== 'EUR') {
+        Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
+        return
+      }
+      Alert.alert(tr('QR unavailable'), tr('Missing IBAN or amount.'))
+      return
+    }
+    setQrBill(bill)
+    setQrPayload(payload)
+    setQrDataUri(null)
+    setQrBusy(true)
+
+    ;(async () => {
+      try {
+        const uri = await makeQrDataUri(payload, { width: 240, margin: 1 })
+        setQrDataUri(uri)
+      } catch (e) {
+        Alert.alert(tr('QR unavailable'), tr('Could not generate QR.'))
+        setQrPayload(null)
+        setQrBill(null)
+        setQrDataUri(null)
+      } finally {
+        setQrBusy(false)
+      }
+    })()
+  }
+
+  async function shareQrForCurrent() {
+    if (!qrDataUri || !qrBill) return
+    const match = String(qrDataUri).match(/^data:image\/png;base64,(.+)$/)
+    if (!match) {
+      Alert.alert(tr('Error'), tr('QR unavailable'))
+      return
+    }
+    try {
+      const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || ''
+      const file = `${baseDir}billbox_qr_${qrBill.id}_${Date.now()}.png`
+      await FileSystem.writeAsStringAsync(file, match[1], { encoding: FileSystem.EncodingType.Base64 })
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(file, { mimeType: 'image/png', dialogTitle: tr('Share QR') })
+      } else {
+        Alert.alert(tr('Saved'), file)
+      }
+    } catch (e: any) {
+      Alert.alert(tr('Error'), e?.message || tr('QR unavailable'))
+    }
+  }
+
+  async function saveQrForCurrent() {
+    if (!qrDataUri || !qrBill) return
+    const match = String(qrDataUri).match(/^data:image\/png;base64,(.+)$/)
+    if (!match) {
+      Alert.alert(tr('Error'), tr('QR unavailable'))
+      return
+    }
+    try {
+      const MediaLibrary = await import('expo-media-library')
+      const perm = await MediaLibrary.requestPermissionsAsync()
+      if (!perm?.granted) {
+        Alert.alert(tr('Permission required'), tr('Please allow photo library access to save QR.'))
+        return
+      }
+      const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || ''
+      const file = `${baseDir}billbox_qr_${qrBill.id}_${Date.now()}.png`
+      await FileSystem.writeAsStringAsync(file, match[1], { encoding: FileSystem.EncodingType.Base64 })
+      await MediaLibrary.createAssetAsync(file)
+      Alert.alert(tr('Saved'))
+    } catch (e: any) {
+      Alert.alert(tr('Error'), e?.message || tr('Unable to save.'))
+    }
+  }
   async function markPaid(b: Bill, paidDate?: string) {
     const nextStatus: BillStatus = isInstallmentBill(b) ? 'archived' : 'paid'
     if (supabase) {
@@ -13465,6 +14174,8 @@ function PayScreen() {
                 const dueDate = parseDateValue(item.due_date)
                 const todayDate = parseDateValue(today)
                 const isOverdue = dueDate && todayDate ? dueDate.getTime() < todayDate.getTime() : false
+                const canQr = !!buildPaymentQrPayload(item)
+                const parts = buildPaymentCopyParts(item)
                 return (
                 <Surface elevated style={styles.billRowCard}>
                   <View style={styles.billRowHeader}>
@@ -13475,6 +14186,33 @@ function PayScreen() {
                         {(item as any).pay_date ? ` • ${tr('Planned')}: ${(item as any).pay_date}` : ''}
                       </Text>
                     </View>
+                    <View style={styles.payAmountWrap}>
+                      <Text style={styles.payAmountText}>{formatMoney(item.amount, item.currency)}</Text>
+                      <Text style={styles.payAmountCaption}>{tr('To pay')}</Text>
+                    </View>
+
+                    <Pressable
+                      onPress={() => {
+                        if (!canQr) {
+                          const currency = String(item.currency || 'EUR').toUpperCase()
+                          if (currency !== 'EUR') Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
+                          else Alert.alert(tr('QR unavailable'), tr('Missing IBAN or amount.'))
+                          return
+                        }
+                        openPaymentQr(item)
+                      }}
+                      style={({ pressed }) => [styles.payQrThumbWrap, pressed ? { opacity: 0.92 } : null]}
+                      hitSlop={6}
+                    >
+                      {canQr && qrThumbs[item.id] ? (
+                        <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrThumb} />
+                      ) : (
+                        <View style={styles.payQrThumbPlaceholder}>
+                          <Ionicons name="qr-code-outline" size={18} color={themeColors.textMuted} />
+                        </View>
+                      )}
+                    </Pressable>
+
                     <Pressable onPress={()=>toggleSel(item.id)}>
                       <Ionicons
                         name={selected[item.id] ? 'checkbox-outline' : 'square-outline'}
@@ -13489,15 +14227,48 @@ function PayScreen() {
                       tone={isOverdue ? 'warning' : 'neutral'}
                     />
                     <AppButton
+                      label={tr('Pay (copy details)')}
+                      variant="primary"
+                      iconName="copy-outline"
+                      onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
+                    />
+                    <View style={styles.payCopyMiniRow}>
+                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
+                        <Text style={styles.payCopyMiniText}>{tr('Reference')}</Text>
+                      </Pressable>
+                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.iban, 'IBAN not found.') }>
+                        <Text style={styles.payCopyMiniText}>IBAN</Text>
+                      </Pressable>
+                      <Pressable
+                        style={styles.payCopyMiniBtn}
+                        onPress={() => copyTextOrWarn(parts.amount ? `${parts.amount} ${parts.currency || ''}`.trim() : '', 'Amount not found.')}
+                      >
+                        <Text style={styles.payCopyMiniText}>{tr('Amount')}</Text>
+                      </Pressable>
+                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.') }>
+                        <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
+                      </Pressable>
+                    </View>
+                    <AppButton
+                      label={tr('Show QR')}
+                      variant="secondary"
+                      iconName="qr-code-outline"
+                      onPress={()=>openPaymentQr(item)}
+                    />
+                    <AppButton
                       label={tr('Mark as paid')}
                       variant="primary"
                       iconName="checkmark-circle-outline"
                       style={{ backgroundColor: '#16A34A', borderColor: '#16A34A' }}
                       onPress={()=>markPaid(item, today)}
                     />
+                  </View>
+                  <View style={styles.payAdjustRow}>
                     <AppButton label={tr('+1d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 1)} />
                     <AppButton label={tr('+2d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 2)} />
                     <AppButton label={tr('+7d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 7)} />
+                  </View>
+                  <View style={styles.payDueRow}>
                     <AppButton
                       label={`${tr('Due')} ${tr('+1d')}`}
                       variant="ghost"
@@ -13571,9 +14342,58 @@ function PayScreen() {
             <SectionHeader title={tr('Pay')} />
             <Text style={styles.bodyText}>{tr('Choose what to do with the selected bills:')}</Text>
             <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
+              <AppButton label={tr('Export SEPA XML')} iconName="download-outline" onPress={exportSepaXmlSelected} />
+              <AppButton label={tr('Export CSV')} variant="secondary" iconName="download-outline" onPress={exportCsvSelected} />
+              <AppButton label={tr('Bank details')} variant="secondary" iconName="settings-outline" onPress={() => setBankConfigVisible(true)} />
               <AppButton label={tr('Pay selected')} iconName="card-outline" onPress={paySelected} />
               <AppButton label={tr('Reschedule selected')} variant="secondary" iconName="calendar-outline" onPress={rescheduleSelected} />
               <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setPayActionVisible(false)} />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
+
+      <Modal visible={bankConfigVisible} transparent animationType="fade" onRequestClose={() => setBankConfigVisible(false)}>
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={styles.iosPickerSheet}>
+            <SectionHeader title={tr('Bank details')} />
+            <Text style={styles.mutedText}>{tr('Used for SEPA XML export into your bank / e-banking.')}</Text>
+            <View style={{ gap: themeSpacing.sm }}>
+              <AppInput placeholder={tr('Account holder name')} value={debtorName} onChangeText={setDebtorName} />
+              <AppInput placeholder={tr('Your IBAN')} value={debtorIban} onChangeText={setDebtorIban} autoCapitalize="characters" />
+              <AppInput placeholder={tr('Your BIC (optional)')} value={debtorBic} onChangeText={setDebtorBic} autoCapitalize="characters" />
+            </View>
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
+              <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setBankConfigVisible(false)} />
+              <AppButton label={tr('Save')} onPress={saveDebtorConfig} />
+            </View>
+          </Surface>
+        </View>
+      </Modal>
+
+      <Modal visible={!!qrPayload} transparent animationType="fade" onRequestClose={() => { setQrPayload(null); setQrBill(null) }}>
+        <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
+          <Surface elevated style={styles.qrModalCard}>
+            <SectionHeader title={tr('Payment QR')} />
+            {qrBill ? (
+              <Text style={styles.bodyText}>{qrBill.supplier} • {formatMoney(qrBill.amount, qrBill.currency)}</Text>
+            ) : null}
+            {qrBusy ? (
+              <View style={{ alignItems: 'center', justifyContent: 'center', height: 240 }}>
+                <ActivityIndicator size="large" color={themeColors.primary} />
+              </View>
+            ) : qrDataUri ? (
+              <Image source={{ uri: qrDataUri }} style={styles.qrImage} />
+            ) : null}
+            <Text style={styles.mutedText}>{tr('Generated from bill payment fields.')}</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
+              {qrDataUri ? (
+                <>
+                  <AppButton label={tr('Save QR')} variant="secondary" iconName="download-outline" onPress={saveQrForCurrent} />
+                  <AppButton label={tr('Share QR')} variant="secondary" iconName="share-outline" onPress={shareQrForCurrent} />
+                </>
+              ) : null}
+              <AppButton label={tr('Close')} variant="ghost" onPress={() => { setQrPayload(null); setQrBill(null); setQrDataUri(null) }} />
             </View>
           </Surface>
         </View>
@@ -14226,29 +15046,40 @@ function SettingsScreen() {
           })()}
         </Surface>
 
-        <Surface elevated>
-          <SectionHeader title={tr('Subscription')} />
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-            <Text style={styles.bodyText}>{tr('Active')}: {tr(planLabel(entitlements.plan))}</Text>
-            <Badge label={tr(planLabel(entitlements.plan))} tone="success" />
-          </View>
-          {entitlements.plan !== 'pro' ? (
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, alignItems: 'center', marginTop: themeSpacing.xs }}>
-              <AppButton
-                label={tr('Upgrade package')}
-                variant="secondary"
-                iconName="arrow-up-circle-outline"
-                onPress={() => {
-                  if (IS_EXPO_GO) {
-                    Alert.alert(tr('Subscription'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.'))
-                    return
-                  }
-                  navigation.navigate('Payments')
-                }}
-              />
+        <Pressable
+          onPress={() => {
+            if (IS_EXPO_GO) {
+              Alert.alert(tr('Subscription'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to manage plans.'))
+              return
+            }
+            navigation.navigate('Payments')
+          }}
+          style={({ pressed }) => pressed ? { opacity: 0.96 } : null}
+        >
+          <Surface elevated>
+            <SectionHeader title={tr('Subscription')} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+              <Text style={styles.bodyText}>{tr('Active')}: {tr(planLabel(entitlements.plan))}</Text>
+              <Badge label={tr(planLabel(entitlements.plan))} tone="success" />
             </View>
-          ) : null}
-        </Surface>
+            {entitlements.plan !== 'pro' ? (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, alignItems: 'center', marginTop: themeSpacing.xs }}>
+                <AppButton
+                  label={tr('Upgrade package')}
+                  variant="secondary"
+                  iconName="arrow-up-circle-outline"
+                  onPress={() => {
+                    if (IS_EXPO_GO) {
+                      Alert.alert(tr('Subscription'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.'))
+                      return
+                    }
+                    navigation.navigate('Payments')
+                  }}
+                />
+              </View>
+            ) : null}
+          </Surface>
+        </Pressable>
 
         <Pressable onPress={() => navigation.navigate('Inbox')} style={({ pressed }) => pressed ? { opacity: 0.96 } : null}>
           <Surface elevated>
@@ -15124,9 +15955,22 @@ const styles = StyleSheet.create({
   billRowHighlighted: { borderWidth: 1, borderColor: '#22C55E' },
   billRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: themeLayout.gap, flexWrap: 'wrap' },
   billActionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.xs, marginTop: themeSpacing.xs },
+  payAdjustRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 },
+  payDueRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6 },
   payBillMeta: { fontSize: 13, color: '#374151' },
-  payDueText: { fontWeight: '700', color: themeColors.primary },
-  payDueOverdue: { fontWeight: '700', color: '#92400E' },
+  payDueText: { fontWeight: '700', color: '#DC2626' },
+  payDueOverdue: { fontWeight: '700', color: '#B91C1C' },
+  payAmountWrap: { alignItems: 'flex-end', gap: 2 },
+  payAmountText: { fontSize: 15, fontWeight: '800', color: themeColors.primary },
+  payAmountCaption: { fontSize: 11, color: '#6B7280' },
+  payQrThumbWrap: { width: 44, height: 44, borderRadius: 10, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
+  payQrThumb: { width: 44, height: 44 },
+  payQrThumbPlaceholder: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  payCopyMiniRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
+  payCopyMiniBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
+  payCopyMiniText: { fontSize: 12, fontWeight: '700', color: '#334155' },
+  qrModalCard: { width: '100%', maxWidth: 420, alignSelf: 'center', padding: themeSpacing.lg, gap: themeSpacing.sm },
+  qrImage: { width: 240, height: 240, alignSelf: 'center', borderRadius: 12, backgroundColor: '#FFFFFF' },
   reportStatLabel: { fontSize: 13, color: '#4B5563' },
   reportStatValue: { fontSize: 15, fontWeight: '700', color: themeColors.text },
   reportViewToggleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
