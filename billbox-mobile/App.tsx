@@ -9931,6 +9931,24 @@ function WarrantiesScreen() {
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
 
+  const payerSpaces = useMemo(() => {
+    return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
+  }, [spacesCtx.spaces])
+
+  const billSpaceIds = useMemo(() => {
+    const ids = payerSpaces.map((s) => s.id)
+    const p1 = ids.includes('personal') ? 'personal' : (ids[0] || null)
+    const p2 = ids.includes('personal2') ? 'personal2' : null
+    const canUsePayer2 = Number(entitlements?.payerLimit || 1) >= 2
+
+    if (isPayerSpaceId(spaceId)) {
+      if (spaceId === 'personal2' && (!canUsePayer2 || !p2)) return p1 ? [p1] : []
+      return [spaceId]
+    }
+    if (p1) return [p1]
+    return spaceId ? [spaceId] : []
+  }, [entitlements?.payerLimit, payerSpaces, spaceId])
+
   const today = useMemo(() => {
     const base = new Date()
     return new Date(base.getFullYear(), base.getMonth(), base.getDate())
@@ -10103,19 +10121,24 @@ function WarrantiesScreen() {
   }, [])
   useEffect(() => { (async ()=>{
     if (spaceLoading || !space) return
+    const billIds = billSpaceIds.length ? billSpaceIds : (spaceId ? [spaceId] : [])
     if (supabase) {
       const { data } = await listWarranties(supabase, spaceId)
       setItems(data)
-      const { data: b } = await listBills(supabase, spaceId)
+      const { data: b } = await listBills(supabase, billIds.length > 1 ? billIds : (billIds[0] || spaceId), entitlements)
       setBills(b || [])
     }
     else {
       const locals = await loadLocalWarranties(spaceId)
       setItems(locals as any)
-      const bLocals = await loadLocalBills(spaceId)
-      setBills((bLocals as any) || [])
+      const collected: Bill[] = []
+      for (const sid of billIds) {
+        const bLocals = await loadLocalBills(sid)
+        for (const b of (bLocals as any) || []) collected.push(b as any)
+      }
+      setBills(collected)
     }
-  })() }, [supabase, spaceLoading, space, spaceId])
+  })() }, [supabase, spaceLoading, space, spaceId, billSpaceIds, entitlements])
 
   const linkedBillIds = useMemo(() => {
     const set = new Set<string>()
