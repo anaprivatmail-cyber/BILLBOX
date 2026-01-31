@@ -13464,6 +13464,10 @@ function PayScreen() {
   const [debtorName, setDebtorName] = useState('')
   const [debtorIban, setDebtorIban] = useState('')
   const [debtorBic, setDebtorBic] = useState('')
+  const [debtorStreet, setDebtorStreet] = useState('')
+  const [debtorPostalCode, setDebtorPostalCode] = useState('')
+  const [debtorCity, setDebtorCity] = useState('')
+  const [debtorCountry, setDebtorCountry] = useState('SI')
   const [permissionExplained, setPermissionExplained] = useState(false)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
@@ -13548,6 +13552,10 @@ function PayScreen() {
         if (parsed?.name) setDebtorName(String(parsed.name))
         if (parsed?.iban) setDebtorIban(String(parsed.iban))
         if (parsed?.bic) setDebtorBic(String(parsed.bic))
+        if (parsed?.street) setDebtorStreet(String(parsed.street))
+        if (parsed?.postalCode) setDebtorPostalCode(String(parsed.postalCode))
+        if (parsed?.city) setDebtorCity(String(parsed.city))
+        if (parsed?.country) setDebtorCountry(String(parsed.country))
       } catch {}
     })()
   }, [spaceId])
@@ -13701,6 +13709,10 @@ function PayScreen() {
     debtorName: string
     debtorIban: string
     debtorBic?: string
+    debtorStreet?: string
+    debtorPostalCode?: string
+    debtorCity?: string
+    debtorCountry?: string
     bills: Bill[]
   }): string {
     const txs = args.bills
@@ -13710,6 +13722,22 @@ function PayScreen() {
     const debtorNm = escapeXml(args.debtorName)
     const debtorIbanNorm = normalizeIban(args.debtorIban) || ''
     const debtorBicNorm = args.debtorBic ? normalizeBic(args.debtorBic) : ''
+
+    const street = String(args.debtorStreet || '').trim()
+    const postalCode = String(args.debtorPostalCode || '').trim()
+    const city = String(args.debtorCity || '').trim()
+    const country = String(args.debtorCountry || '').trim().toUpperCase()
+    const hasPostal = !!(street || postalCode || city || country)
+    const postalXml = hasPostal
+      ? (
+        `        <PstlAdr>\n` +
+        (street ? `          <AdrLine>${escapeXml(street.slice(0, 70))}</AdrLine>\n` : '') +
+        (postalCode ? `          <PstCd>${escapeXml(postalCode.slice(0, 16))}</PstCd>\n` : '') +
+        (city ? `          <TwnNm>${escapeXml(city.slice(0, 35))}</TwnNm>\n` : '') +
+        (country && /^[A-Z]{2}$/.test(country) ? `          <Ctry>${escapeXml(country)}</Ctry>\n` : '') +
+        `        </PstlAdr>\n`
+      )
+      : ''
 
     const header = `<?xml version="1.0" encoding="UTF-8"?>\n` +
       `<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n` +
@@ -13721,6 +13749,7 @@ function PayScreen() {
       `      <CtrlSum>${ctrlSum.toFixed(2)}</CtrlSum>\n` +
       `      <InitgPty>\n` +
       `        <Nm>${debtorNm}</Nm>\n` +
+      (postalXml ? postalXml : '') +
       `      </InitgPty>\n` +
       `    </GrpHdr>\n`
 
@@ -13731,7 +13760,10 @@ function PayScreen() {
       `      <CtrlSum>${ctrlSum.toFixed(2)}</CtrlSum>\n` +
       `      <PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf>\n` +
       `      <ReqdExctnDt>${escapeXml(args.executionDate)}</ReqdExctnDt>\n` +
-      `      <Dbtr><Nm>${debtorNm}</Nm></Dbtr>\n` +
+      `      <Dbtr>\n` +
+      `        <Nm>${debtorNm}</Nm>\n` +
+      (postalXml ? postalXml : '') +
+      `      </Dbtr>\n` +
       `      <DbtrAcct><Id><IBAN>${escapeXml(debtorIbanNorm)}</IBAN></Id></DbtrAcct>\n` +
       (debtorBicNorm ? `      <DbtrAgt><FinInstnId><BIC>${escapeXml(debtorBicNorm)}</BIC></FinInstnId></DbtrAgt>\n` : '') +
       `      <ChrgBr>SLEV</ChrgBr>\n`
@@ -13767,21 +13799,38 @@ function PayScreen() {
     const ibanNorm = normalizeIban(debtorIban || '')
     const bicNorm = debtorBic ? normalizeBic(debtorBic) : ''
 
+    const street = String(debtorStreet || '').trim()
+    const postalCode = String(debtorPostalCode || '').trim()
+    const city = String(debtorCity || '').trim()
+    const country = String(debtorCountry || '').trim().toUpperCase()
+
     if (!name || !ibanNorm || !isValidIbanChecksum(ibanNorm)) {
       Alert.alert(tr('Missing bank details'), tr('Please set your IBAN (and BIC if required by your bank).'))
       return
     }
+
+    if (!street || !postalCode || !city || !/^[A-Z]{2}$/.test(country || '')) {
+      Alert.alert(tr('Missing bank details'), tr('Please set your address for SEPA export.'))
+      return
+    }
     try {
-      await AsyncStorage.setItem(`billbox.pay.debtor.${sid}`, JSON.stringify({ name, iban: ibanNorm, bic: bicNorm }))
+      await AsyncStorage.setItem(
+        `billbox.pay.debtor.${sid}`,
+        JSON.stringify({ name, iban: ibanNorm, bic: bicNorm, street, postalCode, city, country })
+      )
       setDebtorName(name)
       setDebtorIban(ibanNorm)
       setDebtorBic(bicNorm)
+      setDebtorStreet(street)
+      setDebtorPostalCode(postalCode)
+      setDebtorCity(city)
+      setDebtorCountry(country)
       setBankConfigVisible(false)
       Alert.alert(tr('Saved'))
     } catch {
       Alert.alert(tr('Unable to save.'))
     }
-  }, [debtorBic, debtorIban, debtorName, spaceId])
+  }, [debtorBic, debtorCity, debtorCountry, debtorIban, debtorName, debtorPostalCode, debtorStreet, spaceId])
 
   const exportSepaXmlSelected = useCallback(async () => {
     const picked = upcoming.filter((b) => selected[b.id])
@@ -13794,8 +13843,19 @@ function PayScreen() {
     const ibanNorm = normalizeIban(debtorIban || '')
     const bicNorm = debtorBic ? normalizeBic(debtorBic) : ''
 
+    const street = String(debtorStreet || '').trim()
+    const postalCode = String(debtorPostalCode || '').trim()
+    const city = String(debtorCity || '').trim()
+    const country = String(debtorCountry || '').trim().toUpperCase()
+
     if (!name || !ibanNorm || !isValidIbanChecksum(ibanNorm)) {
       Alert.alert(tr('Missing bank details'), tr('Please set your IBAN (and BIC if required by your bank).'))
+      setBankConfigVisible(true)
+      return
+    }
+
+    if (!street || !postalCode || !city || !/^[A-Z]{2}$/.test(country || '')) {
+      Alert.alert(tr('Missing bank details'), tr('Please set your address for SEPA export.'))
       setBankConfigVisible(true)
       return
     }
@@ -13822,6 +13882,10 @@ function PayScreen() {
         debtorName: name,
         debtorIban: ibanNorm,
         debtorBic: bicNorm || undefined,
+        debtorStreet: street,
+        debtorPostalCode: postalCode,
+        debtorCity: city,
+        debtorCountry: country,
         bills: picked,
       })
 
@@ -13839,7 +13903,7 @@ function PayScreen() {
     } finally {
       setPayActionVisible(false)
     }
-  }, [buildPain001Xml, debtorBic, debtorIban, debtorName, planningDate, selected, upcoming])
+  }, [buildPain001Xml, debtorBic, debtorCity, debtorCountry, debtorIban, debtorName, debtorPostalCode, debtorStreet, planningDate, selected, upcoming])
 
   const exportCsvSelected = useCallback(async () => {
     const picked = upcoming.filter((b) => selected[b.id])
@@ -14362,6 +14426,17 @@ function PayScreen() {
               <AppInput placeholder={tr('Account holder name')} value={debtorName} onChangeText={setDebtorName} />
               <AppInput placeholder={tr('Your IBAN')} value={debtorIban} onChangeText={setDebtorIban} autoCapitalize="characters" />
               <AppInput placeholder={tr('Your BIC (optional)')} value={debtorBic} onChangeText={setDebtorBic} autoCapitalize="characters" />
+              <AppInput placeholder={tr('Street')} value={debtorStreet} onChangeText={setDebtorStreet} />
+              <View style={{ flexDirection: 'row', gap: themeLayout.gap }}>
+                <AppInput placeholder={tr('Postal code')} value={debtorPostalCode} onChangeText={setDebtorPostalCode} style={{ flex: 1 }} />
+                <AppInput placeholder={tr('City')} value={debtorCity} onChangeText={setDebtorCity} style={{ flex: 1 }} />
+              </View>
+              <AppInput
+                placeholder={tr('Country (2-letter)')}
+                value={debtorCountry}
+                onChangeText={(v) => setDebtorCountry(String(v || '').toUpperCase())}
+                autoCapitalize="characters"
+              />
             </View>
             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
               <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setBankConfigVisible(false)} />
