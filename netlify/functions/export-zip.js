@@ -39,6 +39,39 @@ async function downloadAttachment(supabase, path) {
   return Buffer.from(ab)
 }
 
+function detectBinaryKind(buf) {
+  try {
+    if (!buf || buf.length < 4) return 'other'
+    // %PDF-
+    if (buf.length >= 5 && buf.slice(0, 5).toString('ascii') === '%PDF-') return 'pdf'
+    // PNG
+    if (buf.length >= 8 && buf.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'png'
+    // JPEG
+    if (buf.length >= 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'jpg'
+    // WEBP: RIFF....WEBP
+    if (
+      buf.length >= 12 &&
+      buf.slice(0, 4).toString('ascii') === 'RIFF' &&
+      buf.slice(8, 12).toString('ascii') === 'WEBP'
+    ) return 'webp'
+    return 'other'
+  } catch {
+    return 'other'
+  }
+}
+
+function normalizeExportName(originalName, detectedKind) {
+  const raw = String(originalName || '').trim() || 'attachment'
+  const safe = sanitizeFilename(raw, 'attachment')
+  const hasExt = /\.[a-z0-9]{1,8}$/i.test(safe)
+  if (hasExt) return safe
+  if (detectedKind === 'pdf') return `${safe}.pdf`
+  if (detectedKind === 'png') return `${safe}.png`
+  if (detectedKind === 'jpg') return `${safe}.jpg`
+  if (detectedKind === 'webp') return `${safe}.webp`
+  return safe
+}
+
 function ensureUniqueName(seen, name) {
   if (!seen.has(name)) {
     seen.add(name)
@@ -193,13 +226,20 @@ export async function handler(event) {
 
     const seenNames = new Set()
 
+    const manifestRows = [
+      ['bill_id', 'space_id', 'supplier', 'creditor_name', 'invoice_number', 'due_date', 'status', 'amount', 'currency', 'iban', 'reference', 'purpose', 'created_at', 'attachment_kind', 'source_path', 'zip_path'],
+    ]
+    const errorLines = []
+
     const isPdfName = (name) => /\.pdf$/i.test(String(name || ''))
     const isImageName = (name) => /\.(png|jpe?g|webp)$/i.test(String(name || ''))
-    const includeAttachment = (name) => {
+    const wantsPdf = attachmentTypes.includes('pdf')
+    const wantsImage = attachmentTypes.includes('image')
+
+    function isAllowedByDetectedKind(detectedKind) {
       if (!attachmentTypes.length) return true
-      const n = String(name || '')
-      if (attachmentTypes.includes('pdf') && isPdfName(n)) return true
-      if (attachmentTypes.includes('image') && isImageName(n)) return true
+      if (wantsPdf && detectedKind === 'pdf') return true
+      if (wantsImage && (detectedKind === 'png' || detectedKind === 'jpg' || detectedKind === 'webp')) return true
       return false
     }
 
@@ -212,13 +252,46 @@ export async function handler(event) {
 
       const billAtt = await listAttachments(supabase, userId, 'bills', bill.id)
       for (const a of billAtt) {
-        if (!includeAttachment(a.name)) continue
         try {
           const buf = await downloadAttachment(supabase, a.path)
-          const entryName = ensureUniqueName(seenNames, `${baseDir}/${sanitizeFilename(a.name, 'attachment')}`)
+          const detectedKind = (() => {
+            if (!attachmentTypes.length) return detectBinaryKind(buf)
+            const n = String(a.name || '')
+            if (wantsPdf && isPdfName(n)) return 'pdf'
+            if (wantsImage && isImageName(n)) {
+              const lower = n.toLowerCase()
+              if (lower.endsWith('.png')) return 'png'
+              if (lower.endsWith('.webp')) return 'webp'
+              return 'jpg'
+            }
+            return detectBinaryKind(buf)
+          })()
+
+          if (!isAllowedByDetectedKind(detectedKind)) continue
+
+          const finalName = normalizeExportName(a.name, detectedKind)
+          const entryName = ensureUniqueName(seenNames, `${baseDir}/${finalName}`)
           archive.append(buf, { name: entryName })
+          manifestRows.push([
+            String(bill.id),
+            String(bill.space_id || ''),
+            String(bill.supplier || ''),
+            String(bill.creditor_name || ''),
+            String(bill.invoice_number || ''),
+            String(bill.due_date || ''),
+            String(bill.status || ''),
+            String(bill.amount ?? ''),
+            String(bill.currency ?? ''),
+            String(bill.iban || ''),
+            String(bill.reference || ''),
+            String(bill.purpose || ''),
+            String(bill.created_at || ''),
+            'bill',
+            String(a.path),
+            String(entryName),
+          ])
         } catch {
-          // Skip failed files; ZIP still returns.
+          errorLines.push(`bill:${bill.id} ${a.path}`)
         }
       }
 
@@ -226,16 +299,67 @@ export async function handler(event) {
       if (w?.id) {
         const wAtt = await listAttachments(supabase, userId, 'warranties', w.id)
         for (const a of wAtt) {
-          if (!includeAttachment(a.name)) continue
           try {
             const buf = await downloadAttachment(supabase, a.path)
-            const entryName = ensureUniqueName(seenNames, `${baseDir}/warranty/${sanitizeFilename(a.name, 'attachment')}`)
+
+            const detectedKind = (() => {
+              if (!attachmentTypes.length) return detectBinaryKind(buf)
+              const n = String(a.name || '')
+              if (wantsPdf && isPdfName(n)) return 'pdf'
+              if (wantsImage && isImageName(n)) {
+                const lower = n.toLowerCase()
+                if (lower.endsWith('.png')) return 'png'
+                if (lower.endsWith('.webp')) return 'webp'
+                return 'jpg'
+              }
+              return detectBinaryKind(buf)
+            })()
+
+            if (!isAllowedByDetectedKind(detectedKind)) continue
+
+            const finalName = normalizeExportName(a.name, detectedKind)
+            const entryName = ensureUniqueName(seenNames, `${baseDir}/warranty/${finalName}`)
             archive.append(buf, { name: entryName })
+            manifestRows.push([
+              String(bill.id),
+              String(bill.space_id || ''),
+              String(bill.supplier || ''),
+              String(bill.creditor_name || ''),
+              String(bill.invoice_number || ''),
+              String(bill.due_date || ''),
+              String(bill.status || ''),
+              String(bill.amount ?? ''),
+              String(bill.currency ?? ''),
+              String(bill.iban || ''),
+              String(bill.reference || ''),
+              String(bill.purpose || ''),
+              String(bill.created_at || ''),
+              'warranty',
+              String(a.path),
+              String(entryName),
+            ])
           } catch {
-            // Skip failed files
+            errorLines.push(`warranty:${w.id} bill:${bill.id} ${a.path}`)
           }
         }
       }
+    }
+
+    // Always include a manifest for accounting/debugging.
+    const csvEscape = (v) => {
+      const s = v === null || v === undefined ? '' : String(v)
+      return `"${s.replace(/"/g, '""')}"`
+    }
+    const manifestCsv = manifestRows.map((r) => r.map(csvEscape).join(',')).join('\n')
+    archive.append(Buffer.from(manifestCsv, 'utf8'), { name: 'manifest.csv' })
+    if (errorLines.length) {
+      archive.append(Buffer.from(errorLines.join('\n'), 'utf8'), { name: 'errors.txt' })
+    }
+    if (manifestRows.length === 1) {
+      const note = attachmentTypes.length
+        ? `No attachments matched the requested types (${attachmentTypes.join(', ')}).\n\nTry exporting with type=all.`
+        : 'No attachments were found for the selected bills/range.'
+      archive.append(Buffer.from(note, 'utf8'), { name: 'README.txt' })
     }
 
     await archive.finalize()

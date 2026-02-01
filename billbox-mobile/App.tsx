@@ -1132,6 +1132,107 @@ type Bill = {
   space_id?: string | null
 }
 
+function toISODateOnly(input: any): string {
+  try {
+    if (!input) return ''
+    if (input instanceof Date) {
+      if (Number.isNaN(input.getTime())) return ''
+      const y = input.getFullYear()
+      const m = String(input.getMonth() + 1).padStart(2, '0')
+      const d = String(input.getDate()).padStart(2, '0')
+      return `${y}-${m}-${d}`
+    }
+    if (typeof input === 'string') {
+      const s = input.trim()
+      if (!s) return ''
+      if (s.includes('T')) {
+        const parsed = new Date(s)
+        if (Number.isNaN(parsed.getTime())) return ''
+        const y = parsed.getFullYear()
+        const m = String(parsed.getMonth() + 1).padStart(2, '0')
+        const d = String(parsed.getDate()).padStart(2, '0')
+        return `${y}-${m}-${d}`
+      }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+      const parsed = new Date(s)
+      if (Number.isNaN(parsed.getTime())) return ''
+      const y = parsed.getFullYear()
+      const m = String(parsed.getMonth() + 1).padStart(2, '0')
+      const d = String(parsed.getDate()).padStart(2, '0')
+      return `${y}-${m}-${d}`
+    }
+    if (typeof input === 'number') {
+      const parsed = new Date(input)
+      if (Number.isNaN(parsed.getTime())) return ''
+      const y = parsed.getFullYear()
+      const m = String(parsed.getMonth() + 1).padStart(2, '0')
+      const d = String(parsed.getDate()).padStart(2, '0')
+      return `${y}-${m}-${d}`
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+function coerceMoneyNumber(input: any): number {
+  if (typeof input === 'number') return Number.isFinite(input) ? input : 0
+  const s = String(input ?? '').trim()
+  if (!s) return 0
+  const normalized = s.replace(/\s+/g, '').replace(',', '.')
+  const n = Number(normalized)
+  return Number.isFinite(n) ? n : 0
+}
+
+function sanitizeCurrency(input: any): string {
+  const raw = String(input ?? '').trim().toUpperCase()
+  if (!raw) return 'EUR'
+  if (/^[A-Z]{3}$/.test(raw)) return raw
+  return 'EUR'
+}
+
+function sanitizeBillForRoute(input: any): Bill | null {
+  try {
+    if (!input) return null
+    const id = String((input as any)?.id || '').trim()
+    if (!id) return null
+
+    const supplier = String((input as any)?.supplier ?? '').trim()
+    const amount = coerceMoneyNumber((input as any)?.amount)
+    const currency = sanitizeCurrency((input as any)?.currency)
+    const due_date = toISODateOnly((input as any)?.due_date)
+    const created_at = typeof (input as any)?.created_at === 'string' && (input as any).created_at.trim()
+      ? String((input as any).created_at)
+      : new Date().toISOString()
+
+    const statusRaw = String((input as any)?.status || 'pending')
+    const status: BillStatus = statusRaw === 'paid' || statusRaw === 'archived' || statusRaw === 'unpaid' || statusRaw === 'pending'
+      ? (statusRaw as any)
+      : 'pending'
+
+    return {
+      id,
+      user_id: String((input as any)?.user_id ?? ''),
+      supplier,
+      amount,
+      currency,
+      due_date,
+      status,
+      created_at,
+      creditor_name: (input as any)?.creditor_name ?? null,
+      iban: (input as any)?.iban ?? null,
+      reference: (input as any)?.reference ?? null,
+      reference_model: (input as any)?.reference_model ?? null,
+      purpose: (input as any)?.purpose ?? null,
+      invoice_number: (input as any)?.invoice_number ?? null,
+      category: (input as any)?.category ?? null,
+      space_id: (input as any)?.space_id ?? null,
+    }
+  } catch {
+    return null
+  }
+}
+
 type CreateBillInput = {
   supplier: string
   amount: number
@@ -2535,7 +2636,7 @@ function BillDetailsScreen() {
   const route = useRoute<any>()
   const navigation = useNavigation<any>()
   const supabase = useMemo(() => getSupabase(), [])
-  const bill = (route.params?.bill || null) as Bill | null
+  const bill = useMemo(() => sanitizeBillForRoute(route.params?.bill), [route.params?.bill])
   const spaceIdOverride = typeof route.params?.spaceIdOverride === 'string' ? String(route.params.spaceIdOverride) : null
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
@@ -2599,7 +2700,7 @@ function BillDetailsScreen() {
 
   const buildBillReminderInfo = useCallback((dueDate?: string | null) => {
     if (!dueDate) return null
-    const parsed = parseDateValue(dueDate)
+    const parsed = parseDateValue(String(dueDate))
     if (!parsed) return null
     const dueAt = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 9, 0, 0, 0)
     const threeDaysBefore = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate() - 3, 10, 0, 0, 0)
@@ -3489,6 +3590,20 @@ function ScanBillScreen() {
   const { snapshot: entitlements } = useEntitlements()
   const effectiveSpaceId = spaceId || space?.id || 'default'
 
+  const payerSpaces = useMemo(() => {
+    return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
+  }, [spacesCtx.spaces])
+
+  const scrollRef = useRef<ScrollView | null>(null)
+  const billDraftYOffsetRef = useRef(0)
+  const pendingScrollToDraftRef = useRef(false)
+
+  const scrollToBillDraft = useCallback((animated = true) => {
+    const y = Number(billDraftYOffsetRef.current || 0)
+    if (!Number.isFinite(y) || y <= 0) return
+    scrollRef.current?.scrollTo({ y: Math.max(0, y - 6), animated })
+  }, [])
+
   const isIOS = Platform.OS === 'ios'
 
   const formatResetDate = useCallback((iso: string | null | undefined) => {
@@ -3595,8 +3710,46 @@ function ScanBillScreen() {
   const [permission, requestPermission] = useCameraPermissions()
   const [pendingAttachment, setPendingAttachment] = useState<{ uri: string; name: string; type?: string } | null>(null)
   const [inboxSourceId, setInboxSourceId] = useState<string | null>(null)
+  const [openedFromInboxPrefill, setOpenedFromInboxPrefill] = useState(false)
   const [cameraVisible, setCameraVisible] = useState(true)
   const [missingManualVisible, setMissingManualVisible] = useState(false)
+
+  useEffect(() => {
+    // The Scan tab stays mounted; reset Inbox-prefill mode once the draft is cleared.
+    const hasDraft = Boolean(
+      pendingAttachment?.uri ||
+      rawText ||
+      manual ||
+      supplier ||
+      purchaseItem ||
+      invoiceNumber ||
+      amountStr ||
+      creditorName ||
+      iban ||
+      reference ||
+      purpose ||
+      paymentDetails
+    )
+    const hasPendingPrefill = Boolean(route?.params?.inboxPrefill)
+    if (!hasPendingPrefill && !inboxSourceId && !hasDraft) {
+      setOpenedFromInboxPrefill(false)
+    }
+  }, [
+    amountStr,
+    creditorName,
+    iban,
+    inboxSourceId,
+    invoiceNumber,
+    manual,
+    paymentDetails,
+    pendingAttachment?.uri,
+    purchaseItem,
+    purpose,
+    rawText,
+    reference,
+    route?.params?.inboxPrefill,
+    supplier,
+  ])
 
   useEffect(() => {
     loadCategoryOverrides()
@@ -5271,6 +5424,8 @@ function ScanBillScreen() {
   useEffect(() => {
     const payload = route.params?.inboxPrefill
     if (payload && payload.fields) {
+      setOpenedFromInboxPrefill(true)
+      pendingScrollToDraftRef.current = true
       const f = payload.fields as ExtractedFields
       const raw = String((f as any)?.rawText || '')
       const classification = (f as any)?._classification || null
@@ -5310,8 +5465,18 @@ function ScanBillScreen() {
       setTorch('off')
       if (payload.id) setInboxSourceId(payload.id)
       if (navigation?.setParams) navigation.setParams({ inboxPrefill: null })
+
+      // Jump to the first part of the Add bill form (bill draft summary).
+      // Delay slightly so layout has time to measure offsets.
+      setTimeout(() => {
+        if (!pendingScrollToDraftRef.current) return
+        const y = Number(billDraftYOffsetRef.current || 0)
+        if (!Number.isFinite(y) || y <= 0) return
+        scrollToBillDraft(true)
+        pendingScrollToDraftRef.current = false
+      }, 60)
     }
-  }, [route, navigation])
+  }, [route, navigation, scrollToBillDraft])
   useEffect(() => { (async ()=>{ if (!permission?.granted) await requestPermission() })() }, [permission])
   async function pickImage() {
     if (!entitlements.canUseOCR) {
@@ -6075,6 +6240,14 @@ function ScanBillScreen() {
     if (ok) showSaveNotice(tr('Saved to archive'))
   }
 
+  const initialsFromName = useCallback((name: string) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+    const first = parts[0]?.[0] || ''
+    const second = parts.length > 1 ? (parts[1]?.[0] || '') : (parts[0]?.[1] || '')
+    const out = (first + second).toUpperCase()
+    return out || '•'
+  }, [])
+
   if (spaceLoading || !space) {
     return (
       <Screen scroll={false}>
@@ -6087,36 +6260,66 @@ function ScanBillScreen() {
   }
 
   return (
-    <Screen>
+    <Screen scrollRef={scrollRef}>
       <View style={styles.pageStack}>
         <TabTopBar titleKey="Add bill" />
 
-        {spacesCtx.spaces.length > 1 ? (
-          <Surface elevated>
-            <SectionHeader title="Profile" />
-            <SegmentedControl
-              value={spacesCtx.current?.id || spaceId || ''}
-              onChange={(id) => { spacesCtx.setCurrent(id) }}
-              options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
-              activeBgColor={themeColors.primary}
-              activeTextColor="#FFFFFF"
-              style={{ marginTop: themeSpacing.xs }}
-            />
-            <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>{tr('Bills you save are assigned to the active profile.')}</Text>
+        {payerSpaces.length > 1 ? (
+          <Surface elevated padded={false} style={[styles.card, styles.addBillProfileCard]}>
+            <View style={{ gap: themeSpacing.sm }}>
+              <Text style={styles.formSectionTitle}>{tr('Profile')}</Text>
+              <View style={styles.homeProfilesRow}>
+                {payerSpaces.slice(0, 2).map((s) => {
+                  const sid = String(s.id || '').trim()
+                  const name = String(s.name || '').trim() || tr(payerLabelFromSpaceId(sid))
+                  const isActive = sid === String(spacesCtx.current?.id || spaceId || '').trim()
+                  return (
+                    <Pressable
+                      key={sid}
+                      onPress={() => { void spacesCtx.setCurrent(sid) }}
+                      style={({ pressed }) => [
+                        styles.homeProfileChip,
+                        isActive && styles.homeProfileChipActive,
+                        pressed && { opacity: 0.92 },
+                      ]}
+                      hitSlop={8}
+                    >
+                      <View style={styles.homeProfileAvatarWrap}>
+                        <View style={styles.homeProfileAvatarFallback}>
+                          <Text style={styles.homeProfileAvatarInitials}>{initialsFromName(name)}</Text>
+                        </View>
+                      </View>
+
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.homeProfileName} numberOfLines={1}>{name}</Text>
+                      </View>
+
+                      {isActive ? (
+                        <View style={styles.homeProfileActiveDot} />
+                      ) : (
+                        <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
+                      )}
+                    </Pressable>
+                  )
+                })}
+              </View>
+            </View>
           </Surface>
         ) : null}
 
-        <InlineInfo
-          tone="info"
-          iconName="scan-outline"
-          message={tr('Scan or import a bill, review the draft below, then save.')}
-        />
+        {!openedFromInboxPrefill ? (
+          <InlineInfo
+            tone="info"
+            iconName="scan-outline"
+            message={tr('Scan or import a bill, review the draft below, then save.')}
+          />
+        ) : null}
 
         {saveNotice ? (
           <InlineInfo tone="success" iconName="checkmark-circle-outline" message={saveNotice} />
         ) : null}
 
-        {!permission?.granted ? (
+        {!openedFromInboxPrefill && !permission?.granted ? (
           <Surface elevated>
             <SectionHeader title={tr('Capture bill')} />
             <Text style={styles.mutedText}>{tr('Scan a QR code or import a bill image/PDF to start a draft.')}</Text>
@@ -6126,7 +6329,7 @@ function ScanBillScreen() {
               <AppButton label={(ocrBusy && ocrBusyAction === 'pdf') ? tr('Extracting…') : tr('Import PDF')} variant="secondary" iconName="document-text-outline" onPress={pickPdfForOCR} loading={ocrBusy && ocrBusyAction === 'pdf'} style={styles.addBillActionButton} />
             </View>
           </Surface>
-        ) : (
+        ) : (!openedFromInboxPrefill ? (
           <Surface elevated style={[styles.cameraCard, styles.captureCard]}>
             {cameraVisible ? (
               <>
@@ -6209,7 +6412,7 @@ function ScanBillScreen() {
               </View>
             )}
           </Surface>
-        )}
+        ) : null)}
 
         {ocrError && (
           <InlineInfo iconName="alert-circle-outline" tone="danger" message={ocrError} />
@@ -6232,6 +6435,21 @@ function ScanBillScreen() {
           </View>
         </Surface>
 
+        <View
+          onLayout={(e) => {
+            const y = e?.nativeEvent?.layout?.y
+            if (typeof y === 'number' && !Number.isNaN(y)) {
+              billDraftYOffsetRef.current = y
+            }
+
+            if (pendingScrollToDraftRef.current) {
+              pendingScrollToDraftRef.current = false
+              setTimeout(() => {
+                try { scrollToBillDraft() } catch {}
+              }, 0)
+            }
+          }}
+        >
         <Surface elevated style={styles.formCard}>
           <SectionHeader title={tr('Bill draft')} actionLabel={tr('Clear')} onActionPress={clearExtraction} />
           <Text style={styles.formIntro}>{tr('Double-check every field before saving.')}</Text>
@@ -6560,6 +6778,7 @@ function ScanBillScreen() {
             />
           )}
         </Surface>
+        </View>
       </View>
 
 
@@ -8090,10 +8309,11 @@ function BillsListScreen() {
     const msDay = 24 * 60 * 60 * 1000
 
     const list = bills.filter((bill) => {
-      if (supplierTerm && !bill.supplier.toLowerCase().includes(supplierTerm)) return false
+      if (supplierTerm && !String((bill as any)?.supplier || '').toLowerCase().includes(supplierTerm)) return false
 
-      if (minVal !== null && !Number.isNaN(minVal) && bill.amount < minVal) return false
-      if (maxVal !== null && !Number.isNaN(maxVal) && bill.amount > maxVal) return false
+      const billAmount = coerceMoneyNumber((bill as any)?.amount)
+      if (minVal !== null && !Number.isNaN(minVal) && billAmount < minVal) return false
+      if (maxVal !== null && !Number.isNaN(maxVal) && billAmount > maxVal) return false
 
       if (!isStatusIncluded(bill)) return false
       if (unpaidOnly && !isBillUnpaid(bill.status)) return false
@@ -8116,7 +8336,7 @@ function BillsListScreen() {
       const bDate = parseDateValue(getBillDate(b, dateMode))
       const aTime = aDate ? aDate.getTime() : 0
       const bTime = bDate ? bDate.getTime() : 0
-      if (aTime === bTime) return a.supplier.localeCompare(b.supplier)
+      if (aTime === bTime) return String((a as any)?.supplier || '').localeCompare(String((b as any)?.supplier || ''))
       return aTime - bTime
     })
   }, [amountMax, amountMin, attachmentCounts, bills, dateFrom, dateMode, dateTo, getBillDate, hasAttachmentsOnly, overdueOnly, parseDateValue, isStatusIncluded, supplierQuery, today, unpaidOnly, includeArchived])
@@ -8320,7 +8540,9 @@ function BillsListScreen() {
             text: tr('Open first missing bill'),
             onPress: () => {
               try {
-                navigation.navigate('Bill Details', { bill: first })
+                const safe = sanitizeBillForRoute(first)
+                if (safe) navigation.navigate('Bill Details', { bill: safe })
+                else Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
               } catch {}
             },
           },
@@ -8598,6 +8820,13 @@ function BillsListScreen() {
 
     for (let i = 0; i < parts; i += 1) {
       const slice = selectedBillIds.slice(i * MAX_EXPORT_BILLS_PER_ZIP, (i + 1) * MAX_EXPORT_BILLS_PER_ZIP)
+
+      const attachmentTypesPayload = fileType === 'pdf'
+        ? ['pdf']
+        : fileType === 'image'
+          ? ['image']
+          : []
+
       const res = await callExportFunction(
         'export-zip',
         {
@@ -8616,7 +8845,7 @@ function BillsListScreen() {
             overdueOnly,
             unpaidOnly,
           },
-          attachmentTypes: fileType === 'all' ? ['pdf', 'image'] : [fileType],
+          attachmentTypes: attachmentTypesPayload,
           exportPart: parts > 1 ? { index: i + 1, count: parts } : null,
         },
         fileType === 'pdf' ? tr('Preparing PDF attachments…') : fileType === 'image' ? tr('Preparing image attachments…') : tr('Preparing attachments…')
@@ -8704,6 +8933,137 @@ function BillsListScreen() {
     spaceId,
     supabase,
   ])
+
+  const exportBillsCsvSelected = useCallback(async () => {
+    if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
+      showUpgradeAlert('export')
+      return
+    }
+    if (!selectedBillIds.length) {
+      Alert.alert(tr('Required field'), tr('Please select at least one bill.'))
+      return
+    }
+
+    function csvEscape(v: any) {
+      const s = v === null || v === undefined ? '' : String(v)
+      return `"${s.replace(/"/g, '""')}"`
+    }
+
+    const header = [
+      'bill_id',
+      'supplier',
+      'creditor_name',
+      'invoice_number',
+      'amount',
+      'currency',
+      'due_date',
+      'status',
+      'iban',
+      'reference',
+      'purpose',
+      'created_at',
+      'space_id',
+    ]
+
+    const rows = [header].concat(
+      selectedBills.map((b: any) => [
+        b.id,
+        b.supplier,
+        b.creditor_name,
+        b.invoice_number,
+        b.amount,
+        b.currency,
+        b.due_date,
+        b.status,
+        b.iban,
+        b.reference,
+        b.purpose,
+        b.created_at,
+        b.space_id,
+      ]),
+    )
+
+    const csv = rows.map((r: any[]) => r.map(csvEscape).join(',')).join('\n')
+    const file = `${FileSystem.cacheDirectory}billbox-bills.csv`
+    await FileSystem.writeAsStringAsync(file, csv)
+    if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(file)
+    else Alert.alert(tr('CSV saved'), file)
+  }, [entitlements.exportsEnabled, entitlements.status, selectedBillIds.length, selectedBills, tr])
+
+  const exportBillsCsvPerBillZipSelected = useCallback(async () => {
+    if (!entitlements.exportsEnabled) {
+      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
+      showUpgradeAlert('export')
+      return
+    }
+    if (!selectedBillIds.length) {
+      Alert.alert(tr('Required field'), tr('Please select at least one bill.'))
+      return
+    }
+
+    function csvEscape(v: any) {
+      const s = v === null || v === undefined ? '' : String(v)
+      return `"${s.replace(/"/g, '""')}"`
+    }
+
+    function safeFilePart(v: any, maxLen = 48) {
+      const s = String(v || '')
+        .trim()
+        .replace(/[^a-z0-9._-]/gi, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '')
+      return (s || 'item').slice(0, maxLen)
+    }
+
+    const header = [
+      'bill_id',
+      'supplier',
+      'creditor_name',
+      'invoice_number',
+      'amount',
+      'currency',
+      'due_date',
+      'status',
+      'iban',
+      'reference',
+      'purpose',
+      'created_at',
+      'space_id',
+    ]
+
+    const zip = new JSZip()
+    for (const b of selectedBills as any[]) {
+      const row = [
+        b.id,
+        b.supplier,
+        b.creditor_name,
+        b.invoice_number,
+        b.amount,
+        b.currency,
+        b.due_date,
+        b.status,
+        b.iban,
+        b.reference,
+        b.purpose,
+        b.created_at,
+        b.space_id,
+      ]
+      const csv = [header, row].map((r) => r.map(csvEscape).join(',')).join('\n')
+
+      const due = safeFilePart(String(b?.due_date || ''), 12)
+      const supplier = safeFilePart(String(b?.supplier || ''), 36)
+      const id = safeFilePart(String(b?.id || ''), 14)
+      const filename = `${due || 'no-date'}_${supplier || 'bill'}_${id}.csv`
+      zip.file(filename, csv)
+    }
+
+    const base64 = await zip.generateAsync({ type: 'base64' })
+    const file = `${FileSystem.cacheDirectory}billbox-bills-csv-per-bill.zip`
+    await FileSystem.writeAsStringAsync(file, base64, { encoding: FileSystem.EncodingType.Base64 })
+    if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(file)
+    else Alert.alert(tr('Export ready'), file)
+  }, [entitlements.exportsEnabled, entitlements.status, selectedBillIds.length, selectedBills, tr])
 
   const openBillAttachmentsForBill = useCallback(async (bill: Bill & { __spaceId?: string }) => {
     try {
@@ -8816,11 +9176,13 @@ function BillsListScreen() {
     return () => clearTimeout(timeout)
   }, [handleStatusChange, handleUnpaidToggle, navigation, openExportSelection, route])
 
-  const formatAmount = useCallback((value: number, currency?: string | null) => {
+  const formatAmount = useCallback((value: any, currency?: string | null) => {
+    const num = coerceMoneyNumber(value)
+    const cur = sanitizeCurrency(currency)
     try {
-      return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'EUR' }).format(value)
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: cur }).format(num)
     } catch {
-      return `${value.toFixed(2)} ${currency || 'EUR'}`
+      return `${num.toFixed(2)} ${cur}`
     }
   }, [])
 
@@ -8895,7 +9257,14 @@ function BillsListScreen() {
         ]}
       >
         <Pressable
-          onPress={() => navigation.navigate('Bill Details', { bill: item, spaceIdOverride: billSpaceId })}
+          onPress={() => {
+            const safe = sanitizeBillForRoute(item)
+            if (!safe) {
+              Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
+              return
+            }
+            navigation.navigate('Bill Details', { bill: safe, spaceIdOverride: billSpaceId })
+          }}
           style={({ pressed }) => [styles.billCardPressable, pressed && styles.billCardPressed]}
           hitSlop={8}
         >
@@ -9348,6 +9717,27 @@ function BillsListScreen() {
             <Divider style={{ marginTop: themeSpacing.sm, marginBottom: themeSpacing.sm }} />
             <Text style={styles.formSectionTitle}>{tr('Export attachments')}</Text>
             <View style={styles.exportPickerActions}>
+              <AppButton
+                label={tr('Export all attachments')}
+                iconName="archive-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportAttachmentsZip('all')}
+              />
+              <AppButton
+                label={tr('Export bills CSV')}
+                iconName="download-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportBillsCsvSelected()}
+              />
+              <AppButton
+                label={tr('Export bills CSV (per bill)')}
+                iconName="archive-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportBillsCsvPerBillZipSelected()}
+              />
               <AppButton
                 label={tr('Export PDF attachments')}
                 iconName="document-text-outline"
@@ -10252,11 +10642,11 @@ function HomeScreen() {
 
             {creatingPayer2 ? (
               <View style={{ gap: themeSpacing.sm }}>
-                <Text style={styles.bodyText}>Ustvari Profil 2 (Več)</Text>
-                <AppInput placeholder="Ime profila" value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
+                <Text style={styles.bodyText}>{tr('Create profile 2 (Več)')}</Text>
+                <AppInput placeholder={tr('Profile name')} value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
                 <View style={{ flexDirection: 'row', gap: themeLayout.gap }}>
                   <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setCreatingPayer2(false)} />
-                  <AppButton label="Ustvari" iconName="add-outline" onPress={savePayer2} />
+                  <AppButton label={tr('Create')} iconName="add-outline" onPress={savePayer2} />
                 </View>
               </View>
             ) : null}
@@ -10752,6 +11142,35 @@ function WarrantiesScreen() {
     if ([y, m, d].some((part) => Number.isNaN(part))) return null
     return new Date(y, m - 1, d)
   }, [])
+
+  const expiringSoon30 = useMemo(() => {
+    const out: Warranty[] = []
+    for (const w of items || []) {
+      const expires = parseDateValue((w as any)?.expires_at)
+      if (!expires) continue
+      const days = Math.floor((expires.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+      if (days < 0 || days > 30) continue
+      out.push(w)
+    }
+    return out.sort((a: any, b: any) => {
+      const aExp = parseDateValue(a?.expires_at)
+      const bExp = parseDateValue(b?.expires_at)
+      const aTime = aExp ? aExp.getTime() : Number.POSITIVE_INFINITY
+      const bTime = bExp ? bExp.getTime() : Number.POSITIVE_INFINITY
+      if (aTime === bTime) return String(a?.item_name || '').localeCompare(String(b?.item_name || ''))
+      return aTime - bTime
+    })
+  }, [items, parseDateValue, today])
+
+  const expiringSoonNames = useMemo(() => {
+    const top = (expiringSoon30 || [])
+      .slice(0, 3)
+      .map((w: any) => String(w?.item_name || w?.supplier || '').trim())
+      .filter(Boolean)
+    if (!top.length) return ''
+    const remaining = Math.max(0, expiringSoon30.length - top.length)
+    return top.join(' • ') + (remaining ? ` +${remaining}` : '')
+  }, [expiringSoon30])
 
   const getWarrantyStatus = useCallback((w: Warranty): 'active' | 'expiring' | 'expired' | 'no_expiry' => {
     const expires = parseDateValue((w as any)?.expires_at)
@@ -11300,8 +11719,39 @@ function WarrantiesScreen() {
   return (
     <Screen scroll={false}>
       <ScrollView ref={scrollRef} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: themeLayout.screenPadding }}>
-      <View style={styles.pageStack}>
+      <View style={[styles.pageStack, { gap: themeSpacing.sm }]}>
         <TabTopBar titleKey="Warranties" />
+
+        <Surface elevated padded={false}>
+          <Pressable
+            onPress={() => {
+              setWarrantyStatusFilter(expiringSoon30.length ? 'expiring' : 'active')
+              setLinkedBillOpen(false)
+            }}
+            style={({ pressed }) => [
+              styles.homeSummaryRow,
+              expiringSoon30.length ? styles.homeSummaryRowWarn : styles.homeSummaryRowNeutral,
+              pressed && { opacity: 0.92 },
+            ]}
+          >
+            <Ionicons
+              name={expiringSoon30.length ? 'time-outline' : 'shield-checkmark-outline'}
+              size={18}
+              color={expiringSoon30.length ? '#92400E' : '#166534'}
+            />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.homeSummaryRowTitle} numberOfLines={1}>
+                {expiringSoon30.length
+                  ? tr('{count} warranties expiring soon', { count: expiringSoon30.length })
+                  : tr('No warranties expiring soon')}
+              </Text>
+              {expiringSoonNames ? (
+                <Text style={styles.mutedText} numberOfLines={1}>{expiringSoonNames}</Text>
+              ) : null}
+            </View>
+            <Ionicons name="chevron-forward" size={16} color="#6B7280" />
+          </Pressable>
+        </Surface>
 
         <Surface elevated>
           <SectionHeader title={tr('New warranty')} />
@@ -11347,7 +11797,7 @@ function WarrantiesScreen() {
                     supplier: selectedBill.supplier,
                     dueDate: selectedBill.due_date,
                     currency: selectedBill.currency,
-                    amount: selectedBill.amount.toFixed(2),
+                    amount: coerceMoneyNumber((selectedBill as any)?.amount).toFixed(2),
                   })}
                   translate={false}
                 />
@@ -11808,12 +12258,21 @@ function WarrantyDetailsScreen() {
             <SectionHeader title={tr('Linked bill')} />
             {linkedBill ? (
               <>
-                <Text style={styles.bodyText}>{linkedBill.supplier} • {linkedBill.currency} {linkedBill.amount.toFixed(2)} • {tr('Due')} {linkedBill.due_date}</Text>
+                <Text style={styles.bodyText}>
+                  {String((linkedBill as any)?.supplier || '—')} • {sanitizeCurrency((linkedBill as any)?.currency)} {coerceMoneyNumber((linkedBill as any)?.amount).toFixed(2)} • {tr('Due')} {String((linkedBill as any)?.due_date || '')}
+                </Text>
                 <AppButton
                   label={tr('Open bill')}
                   variant="secondary"
                   iconName="open-outline"
-                  onPress={() => navigation.navigate('Bill Details', { bill: linkedBill })}
+                  onPress={() => {
+                    const safe = sanitizeBillForRoute(linkedBill)
+                    if (!safe) {
+                      Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
+                      return
+                    }
+                    navigation.navigate('Bill Details', { bill: safe })
+                  }}
                 />
               </>
             ) : (
@@ -12176,8 +12635,11 @@ function ReportsScreen() {
       if (supplierTerm && !String(b.supplier || '').toLowerCase().includes(supplierTerm)) return false
 
       if (allowAdvanced) {
-        if (minVal !== null && !Number.isNaN(minVal) && b.amount < minVal) return false
-        if (maxVal !== null && !Number.isNaN(maxVal) && b.amount > maxVal) return false
+        const rawAmt = (b as any)?.amount
+        const amt = Number(String(rawAmt ?? '').replace(',', '.'))
+        const amtNum = Number.isFinite(amt) ? amt : 0
+        if (minVal !== null && !Number.isNaN(minVal) && amtNum < minVal) return false
+        if (maxVal !== null && !Number.isNaN(maxVal) && amtNum > maxVal) return false
       }
 
       return true
@@ -12188,6 +12650,50 @@ function ReportsScreen() {
     const n = Number((bill as any)?.amount)
     return Number.isFinite(n) ? n : 0
   }, [])
+
+  const billCurrency = useCallback((bill: Bill): string => {
+    const raw = (bill as any)?.currency
+    return String(raw || 'EUR').toUpperCase()
+  }, [])
+
+  const eurOnlyNote = useMemo(() => {
+    const nonEurCount = filtered.reduce((c, b) => c + (billCurrency(b) === 'EUR' ? 0 : 1), 0)
+    if (!nonEurCount) return ''
+    return tr('Note: totals and charts include only EUR bills ({count} excluded).', { count: nonEurCount })
+  }, [billCurrency, filtered, tr])
+
+  const formatEurCompact = useCallback((value: number): string => {
+    const v = Number.isFinite(value) ? value : 0
+    const abs = Math.abs(v)
+    if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
+    if (abs >= 1_000) return `${(v / 1_000).toFixed(1)}k`
+    return v.toFixed(0)
+  }, [])
+
+  const formatPeriodLabel = useCallback((key: string): string => {
+    const k = String(key || '')
+    if (groupBy === 'month' && /^\d{4}-\d{2}$/.test(k)) {
+      // YYYY-MM -> MM/YY (compact label)
+      return `${k.slice(5, 7)}/${k.slice(2, 4)}`
+    }
+    return k
+  }, [groupBy])
+
+  const barLabelStep = useMemo(() => {
+    const n = series.points.length
+    if (n <= 8) return 1
+    return Math.max(1, Math.ceil(n / 6))
+  }, [series.points.length])
+
+  const shouldShowBarValueLabels = useMemo(() => {
+    return series.points.length > 0 && series.points.length <= 6
+  }, [series.points.length])
+
+  const lineLabelStep = useMemo(() => {
+    const n = lineSeries[0]?.points.length || 0
+    if (n <= 8) return 1
+    return Math.max(1, Math.ceil(n / 6))
+  }, [lineSeries])
 
   const supplierOptions = useMemo(() => {
     const all = (bills || [])
@@ -12201,13 +12707,13 @@ function ReportsScreen() {
 
   const totals = useMemo(() => {
     const totalBillsInRange = filtered.length
-    const totalAmountEur = filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? getAmountNumber(b) : 0), 0)
+    const totalAmountEur = filtered.reduce((sum, b) => sum + (billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0), 0)
     const unpaidTotalEur = filtered.reduce((sum, b) => {
       if (!isBillUnpaid(b.status)) return sum
-      return sum + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
+      return sum + (billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0)
     }, 0)
     return { totalBillsInRange, totalAmountEur, unpaidTotalEur }
-  }, [filtered, getAmountNumber])
+  }, [billCurrency, filtered, getAmountNumber])
 
   const series = useMemo(() => {
     const keyFn = groupBy === 'year' ? yyyyKey : yyyymmKey
@@ -12216,13 +12722,13 @@ function ReportsScreen() {
     for (const b of filtered) {
       const iso = getBillDateForMode(b, modeForDate)
       const key = keyFn(iso) || '—'
-      grouped[key] = (grouped[key] || 0) + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
+      grouped[key] = (grouped[key] || 0) + (billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0)
     }
     const keys = Object.keys(grouped).sort()
     const max = keys.reduce((m, k) => Math.max(m, grouped[k] || 0), 0)
     const points = keys.map((k) => ({ key: k, value: grouped[k] || 0, pct: max > 0 ? (grouped[k] / max) * 100 : 0 }))
     return { points, max }
-  }, [dateMode, filtered, getAmountNumber, groupBy, isPro])
+  }, [billCurrency, dateMode, filtered, getAmountNumber, groupBy, isPro])
 
   const reportPalette = ['#2563EB', '#F97316', '#10B981', '#A855F7', '#0EA5E9', '#E11D48']
 
@@ -12237,7 +12743,7 @@ function ReportsScreen() {
       const statusKey = isBillUnpaid(b.status) ? 'unpaid' : b.status === 'paid' ? 'paid' : b.status === 'archived' ? 'archived' : null
       if (!statusKey || !statuses.includes(statusKey)) continue
       grouped[key] = grouped[key] || {}
-      grouped[key][statusKey] = (grouped[key][statusKey] || 0) + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
+      grouped[key][statusKey] = (grouped[key][statusKey] || 0) + (billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0)
     }
     const keys = Object.keys(grouped).sort()
     const series = statuses.map((status) => {
@@ -12246,7 +12752,7 @@ function ReportsScreen() {
     })
     const max = series.reduce((m, s) => Math.max(m, ...(s.points.map((p) => p.value))), 0)
     return { keys, series, max }
-  }, [dateMode, filtered, getAmountNumber, getBillDateForMode, groupBy, isPro, selectedStatusList])
+  }, [billCurrency, dateMode, filtered, getAmountNumber, getBillDateForMode, groupBy, isPro, selectedStatusList])
 
   const tableRows = useMemo(() => {
     const modeForDate = isPro ? dateMode : 'due'
@@ -12260,9 +12766,9 @@ function ReportsScreen() {
         id: b.id,
         supplier: String(b.supplier || '').trim() || tr('Unknown'),
         date: getBillDateForMode(b, modeForDate),
-        amount: b.currency === 'EUR' ? `EUR ${getAmountNumber(b).toFixed(2)}` : `${getAmountNumber(b).toFixed(2)} ${b.currency || ''}`,
+        amount: billCurrency(b) === 'EUR' ? `EUR ${getAmountNumber(b).toFixed(2)}` : `${getAmountNumber(b).toFixed(2)} ${billCurrency(b)}`,
       }))
-  }, [dateMode, filtered, getAmountNumber, getBillDateForMode, isPro, tr])
+  }, [billCurrency, dateMode, filtered, getAmountNumber, getBillDateForMode, isPro, tr])
 
   const lineSeries = useMemo(() => {
     if (isPro && selectedStatusList.length > 1) {
@@ -12307,8 +12813,8 @@ function ReportsScreen() {
 
     for (const b of filtered) {
       const supplier = String((b as any)?.supplier || '').trim() || tr('Unknown')
-      supplierTotals[supplier] = (supplierTotals[supplier] || 0) + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
-      if (!maxBill || (b.currency === 'EUR' ? getAmountNumber(b) : 0) > ((maxBill.currency === 'EUR' ? getAmountNumber(maxBill) : 0) || 0)) {
+      supplierTotals[supplier] = (supplierTotals[supplier] || 0) + (billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0)
+      if (!maxBill || (billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0) > ((billCurrency(maxBill) === 'EUR' ? getAmountNumber(maxBill) : 0) || 0)) {
         maxBill = b
       }
     }
@@ -12321,11 +12827,11 @@ function ReportsScreen() {
     const lines = [
       `${tr('Bills in range')}: ${filtered.length}`,
       topSuppliers.length ? `${tr('Supplier')}:\n${topSuppliers.join('\n')}` : '',
-      maxBill ? `${tr('Total amount (EUR)')}: EUR ${(filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? getAmountNumber(b) : 0), 0)).toFixed(2)}` : '',
+      maxBill ? `${tr('Total amount (EUR)')}: EUR ${(filtered.reduce((sum, b) => sum + (billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0), 0)).toFixed(2)}` : '',
     ].filter(Boolean)
 
     Alert.alert(tr('Reports'), lines.join('\n\n'))
-  }, [filtered, getAmountNumber, tr])
+  }, [billCurrency, filtered, getAmountNumber, tr])
 
   const reportPayload = useMemo(() => {
     const isAdvanced = isPro
@@ -12426,6 +12932,7 @@ function ReportsScreen() {
     setExportBusyLabel(tr('Preparing PDF…'))
     try {
       const profileLabel = selectedPayerIds.map((id) => payerLabelFromSpaceId(id)).join(' + ')
+      const selectedView = reportsView
       const chartSvg = (() => {
         const points = series.points
         if (!points.length) return ''
@@ -12438,19 +12945,40 @@ function ReportsScreen() {
         const plotW = w - padL - padR
         const plotH = h - padT - padB
         const max = series.max || 1
-        const barW = plotW / points.length
-        const bars = points.map((p, i) => {
-          const valH = Math.max(2, (p.value / max) * plotH)
-          const x = padL + i * barW + 6
-          const y = padT + (plotH - valH)
-          const bw = Math.max(6, barW - 12)
-          const color = reportPalette[i % reportPalette.length]
-          return `<rect x="${x}" y="${y}" width="${bw}" height="${valH}" rx="4" fill="${color}" />`
-        }).join('')
-        const xLabels = points.map((p, i) => {
-          const x = padL + i * barW + barW / 2
-          return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${p.key}</text>`
-        }).join('')
+
+        const bars = (() => {
+          if (points.length === 1) {
+            const p = points[0]
+            const valH = Math.max(2, (p.value / max) * plotH)
+            const bw = Math.min(160, plotW * 0.55)
+            const x = padL + (plotW - bw) / 2
+            const y = padT + (plotH - valH)
+            const color = reportPalette[0]
+            return `<rect x="${x}" y="${y}" width="${bw}" height="${valH}" rx="10" fill="${color}" />`
+          }
+
+          const barW = plotW / points.length
+          return points.map((p, i) => {
+            const valH = Math.max(2, (p.value / max) * plotH)
+            const x = padL + i * barW + 8
+            const y = padT + (plotH - valH)
+            const bw = Math.max(10, barW - 16)
+            const color = reportPalette[i % reportPalette.length]
+            return `<rect x="${x}" y="${y}" width="${bw}" height="${valH}" rx="10" fill="${color}" />`
+          }).join('')
+        })()
+
+        const xLabels = (() => {
+          if (points.length === 1) {
+            const x = padL + plotW / 2
+            return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${points[0].key}</text>`
+          }
+          const barW = plotW / points.length
+          return points.map((p, i) => {
+            const x = padL + i * barW + barW / 2
+            return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${p.key}</text>`
+          }).join('')
+        })()
         return `
           <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
             <rect x="0" y="0" width="${w}" height="${h}" fill="#fff" />
@@ -12484,7 +13012,7 @@ function ReportsScreen() {
           return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${p.key}</text>`
         }).join('')
         const lines = seriesItems.map((s) => {
-          const points = s.points.map((p, i) => {
+          const pointsStr = s.points.map((p, i) => {
             const x = padL + i * (plotW / Math.max(1, count - 1))
             const y = padT + (max > 0 ? (1 - p.value / max) * plotH : plotH)
             return `${x},${y}`
@@ -12494,7 +13022,15 @@ function ReportsScreen() {
             const y = padT + (max > 0 ? (1 - p.value / max) * plotH : plotH)
             return `<circle cx="${x}" cy="${y}" r="3" fill="${s.color}" />`
           }).join('')
-          return `<polyline fill="none" stroke="${s.color}" stroke-width="2" points="${points}" />${dots}`
+
+          const firstX = padL
+          const lastX = padL + (count - 1) * (plotW / Math.max(1, count - 1))
+          const baseY = padT + plotH
+          const areaPoints = `${pointsStr} ${lastX},${baseY} ${firstX},${baseY}`
+
+          return `<polygon points="${areaPoints}" fill="${s.color}" opacity="0.08" />` +
+            `<polyline fill="none" stroke="${s.color}" stroke-width="2.5" points="${pointsStr}" />` +
+            `${dots}`
         }).join('')
         return `
           <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
@@ -12518,6 +13054,34 @@ function ReportsScreen() {
           <td style="text-align:right;">${r.amount}</td>
         </tr>
       `).join('')
+
+      const billsListHtml = tableRows.map((r) => `<li><b>${r.supplier}</b> — ${r.date || '—'} — ${r.amount}</li>`).join('')
+
+      const viewSectionHtml = (() => {
+        if (selectedView === 'table') {
+          return `
+            <div class="card">
+              <div class="k" style="margin-bottom:8px;">${tr('Table')}</div>
+              ${tableHtml
+                ? `<table><thead><tr><th>${tr('Supplier')}</th><th>${tr('Due')}</th><th style=\"text-align:right;\">${tr('Amount')}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
+                : `<div class="k">${tr('No bills in this range.')}</div>`
+              }
+            </div>
+          `
+        }
+
+        return `
+          <div class="card">
+            <div class="k" style="margin-bottom:8px;">${groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')}</div>
+            ${chartSvg || `<div class="k">${tr('No bills in this range.')}</div>`}
+            ${lineSvg ? `<div style="margin-top:12px;">${lineSvg}</div>` : ''}
+          </div>
+          <div class="card">
+            <div class="k" style="margin-bottom:8px;">${tr('Bills in range')}</div>
+            ${billsListHtml ? `<ul style="margin:0; padding-left: 18px;">${billsListHtml}</ul>` : `<div class="k">${tr('No bills in this range.')}</div>`}
+          </div>
+        `
+      })()
       const html = `
         <html>
           <head>
@@ -12547,18 +13111,7 @@ function ReportsScreen() {
               <div class="row"><div class="k">${tr('Total amount (EUR)')}</div><div class="v">EUR ${totals.totalAmountEur.toFixed(2)}</div></div>
               <div class="row"><div class="k">${tr('Unpaid total (EUR)')}</div><div class="v">EUR ${totals.unpaidTotalEur.toFixed(2)}</div></div>
             </div>
-            <div class="card">
-              <div class="k" style="margin-bottom:8px;">${groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')}</div>
-              ${chartSvg || `<div class="k">${tr('No bills in this range.')}</div>`}
-              ${lineSvg ? `<div style="margin-top:12px;">${lineSvg}</div>` : ''}
-            </div>
-            <div class="card">
-              <div class="k" style="margin-bottom:8px;">${tr('Table')}</div>
-              ${tableHtml
-                ? `<table><thead><tr><th>${tr('Supplier')}</th><th>${tr('Due')}</th><th style=\"text-align:right;\">${tr('Amount (EUR)')}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
-                : `<div class="k">${tr('No bills in this range.')}</div>`
-              }
-            </div>
+            ${viewSectionHtml}
           </body>
         </html>
       `
@@ -12621,8 +13174,8 @@ function ReportsScreen() {
               message={tr('Basic analytics is available on Moje and Več. Upgrade to Več for advanced analytics.')}
             />
           ) : null}
-          <View style={styles.filtersBody}>
-            <View style={{ marginTop: themeSpacing.sm }}>
+          <View style={styles.reportsFiltersBody}>
+            <View>
               <Text style={styles.filterLabel}>{tr('Profiles')}</Text>
               <View style={styles.filterToggleRow}>
                 {(['personal', 'personal2'] as const).map((id) => {
@@ -12685,7 +13238,7 @@ function ReportsScreen() {
               <Text style={styles.helperText}>{tr('Reports use the selected date field between Start and End.')}</Text>
             </View>
 
-            <View style={{ marginTop: themeSpacing.sm }}>
+            <View>
               <Text style={styles.filterLabel}>{tr('Status')}</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
                 <AppButton
@@ -12713,7 +13266,7 @@ function ReportsScreen() {
               </View>
             </View>
 
-            <View style={{ marginTop: themeSpacing.sm }}>
+            <View>
               <Text style={styles.filterLabel}>{tr('Group by')}</Text>
               <SegmentedControl
                 value={groupBy}
@@ -12722,7 +13275,7 @@ function ReportsScreen() {
               />
             </View>
 
-            <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.sm }}>
+            <View style={{ gap: themeSpacing.xs }}>
               <View>
                 <Text style={styles.filterLabel}>{tr('Supplier')}</Text>
                 <View style={{ marginTop: themeSpacing.xs, position: 'relative', zIndex: 10 }}>
@@ -12764,7 +13317,7 @@ function ReportsScreen() {
         <Pressable onPress={showBasicInsights} hitSlop={8}>
           <Surface elevated>
             <SectionHeader title={tr('Totals in range')} />
-            <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.xs }}>
+            <View style={{ marginTop: themeSpacing.xs, gap: themeSpacing.xs }}>
               <Text style={styles.reportStatLabel}>
                 {tr('Bills in range')}: <Text style={styles.reportStatValue}>{totals.totalBillsInRange}</Text>
               </Text>
@@ -12774,6 +13327,7 @@ function ReportsScreen() {
               <Text style={styles.reportStatLabel}>
                 {tr('Unpaid total (EUR)')}: <Text style={styles.reportStatValue}>EUR {totals.unpaidTotalEur.toFixed(2)}</Text>
               </Text>
+              {eurOnlyNote ? <Text style={styles.helperText}>{eurOnlyNote}</Text> : null}
             </View>
           </Surface>
         </Pressable>
@@ -12802,11 +13356,12 @@ function ReportsScreen() {
                 <>
                   <View style={styles.reportChartCard}>
                     <Text style={styles.reportChartTitle}>{tr('Bar chart')}</Text>
+                    {eurOnlyNote ? <Text style={styles.reportChartSubtitle}>{eurOnlyNote}</Text> : null}
                     <View style={styles.reportChartFrame}>
                       <View style={styles.reportAxisRow}>
                         <View style={styles.reportYAxis}>
-                          <Text style={styles.reportYAxisLabel}>EUR {series.max.toFixed(0)}</Text>
-                          <Text style={styles.reportYAxisLabel}>EUR {(series.max * 0.5).toFixed(0)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR {formatEurCompact(series.max)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR {formatEurCompact(series.max * 0.5)}</Text>
                           <Text style={styles.reportYAxisLabel}>EUR 0</Text>
                         </View>
                         <View style={{ flex: 1 }}>
@@ -12814,9 +13369,14 @@ function ReportsScreen() {
                             <View style={[styles.reportGridLine, { top: 0 }]} />
                             <View style={[styles.reportGridLine, { top: 70 }]} />
                             <View style={[styles.reportGridLine, { bottom: 0 }]} />
-                            <View style={styles.reportBarsRow}>
+                            <View style={[styles.reportBarsRow, series.points.length === 1 ? { justifyContent: 'center' } : null]}>
                               {series.points.map((p, idx) => (
-                                <View key={p.key} style={styles.reportBarItem}>
+                                <View key={p.key} style={[styles.reportBarItem, series.points.length === 1 ? { flex: 0, width: 140 } : null]}>
+                                  {shouldShowBarValueLabels ? (
+                                    <Text style={styles.reportBarValueLabel}>EUR {formatEurCompact(p.value)}</Text>
+                                  ) : (
+                                    <View style={{ height: 14 }} />
+                                  )}
                                   <View style={styles.reportBarTrack}>
                                     <View
                                       style={[
@@ -12828,7 +13388,9 @@ function ReportsScreen() {
                                       ]}
                                     />
                                   </View>
-                                  <Text style={styles.reportBarLabel}>{p.key}</Text>
+                                  <Text style={styles.reportBarLabel} numberOfLines={1}>
+                                    {idx % barLabelStep === 0 || idx === series.points.length - 1 ? formatPeriodLabel(p.key) : ''}
+                                  </Text>
                                 </View>
                               ))}
                             </View>
@@ -12841,6 +13403,7 @@ function ReportsScreen() {
 
                   <View style={styles.reportChartCard}>
                     <Text style={styles.reportChartTitle}>{tr('Line chart')}</Text>
+                    {eurOnlyNote ? <Text style={styles.reportChartSubtitle}>{eurOnlyNote}</Text> : null}
                     {linePoints.length > 1 ? (
                       <View style={styles.reportLegendRow}>
                         {linePoints.map((s) => (
@@ -12854,8 +13417,8 @@ function ReportsScreen() {
                     <View style={styles.reportChartFrame}>
                       <View style={styles.reportAxisRow}>
                         <View style={[styles.reportYAxis, { height: 160 }]}>
-                          <Text style={styles.reportYAxisLabel}>EUR {lineMax.toFixed(0)}</Text>
-                          <Text style={styles.reportYAxisLabel}>EUR {(lineMax * 0.5).toFixed(0)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR {formatEurCompact(lineMax)}</Text>
+                          <Text style={styles.reportYAxisLabel}>EUR {formatEurCompact(lineMax * 0.5)}</Text>
                           <Text style={styles.reportYAxisLabel}>EUR 0</Text>
                         </View>
                         <View style={{ flex: 1 }}>
@@ -12875,13 +13438,28 @@ function ReportsScreen() {
                               <React.Fragment key={seriesItem.id}>
                                 {seriesItem.points.map((p, idx) => {
                                   const next = seriesItem.points[idx + 1]
+                                  const lineThickness = 3
+                                  const dx = next ? next.x - p.x : 0
+                                  const dy = next ? next.y - p.y : 0
+                                  const len = next ? Math.max(2, Math.sqrt(dx * dx + dy * dy)) : 0
+                                  const angle = next ? Math.atan2(dy, dx) : 0
                                   return (
                                     <React.Fragment key={`${seriesItem.id}-${p.key}`}>
                                       {next ? (
                                         <View
                                           style={[
                                             styles.reportLineSegment,
-                                            { left: p.x, top: p.y, width: Math.max(2, next.x - p.x), backgroundColor: seriesItem.color },
+                                            {
+                                              left: p.x,
+                                              top: p.y - lineThickness / 2,
+                                              width: len,
+                                              backgroundColor: seriesItem.color,
+                                              transform: [
+                                                { translateX: -len / 2 },
+                                                { rotateZ: `${angle}rad` },
+                                                { translateX: len / 2 },
+                                              ],
+                                            },
                                           ]}
                                         />
                                       ) : null}
@@ -12893,6 +13471,15 @@ function ReportsScreen() {
                             ))}
                           </View>
                           <View style={styles.reportXAxis} />
+                          <View style={styles.reportXLabelsRow}>
+                            {(lineSeries[0]?.points || []).map((p, idx) => (
+                              <View key={p.key} style={styles.reportXLabelCell}>
+                                <Text style={styles.reportXLabelText} numberOfLines={1}>
+                                  {idx % lineLabelStep === 0 || idx === (lineSeries[0]?.points.length || 1) - 1 ? formatPeriodLabel(p.key) : ''}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
                         </View>
                       </View>
                     </View>
@@ -12909,13 +13496,13 @@ function ReportsScreen() {
                   <View style={styles.reportTableHeaderRow}>
                     <Text style={[styles.mutedText, { flex: 1 }]}>{tr('Supplier')}</Text>
                     <Text style={[styles.mutedText, { width: 96 }]}>{tr('Due')}</Text>
-                    <Text style={[styles.mutedText, { width: 110, textAlign: 'right' }]}>{tr('Amount (EUR)')}</Text>
+                    <Text style={[styles.mutedText, { width: 120, textAlign: 'right' }]}>{tr('Amount')}</Text>
                   </View>
                   {tableRows.map((row) => (
-                    <View key={row.id} style={styles.reportTableRow}>
+                    <View key={row.id} style={[styles.reportTableRow, idx % 2 === 1 ? styles.reportTableRowAlt : null]}>
                       <Text style={[styles.bodyText, { flex: 1 }]} numberOfLines={1}>{row.supplier}</Text>
                       <Text style={[styles.mutedText, { width: 96 }]}>{row.date || '—'}</Text>
-                      <Text style={[styles.bodyText, { width: 110, textAlign: 'right', fontWeight: '700' }]}>{row.amount}</Text>
+                      <Text style={[styles.bodyText, { width: 120, textAlign: 'right', fontWeight: '700' }]}>{row.amount}</Text>
                     </View>
                   ))}
                 </View>
@@ -13638,7 +14225,9 @@ function ExportsScreen() {
                   <View style={styles.billRowHeader}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.cardTitle} numberOfLines={1}>{item.supplier}</Text>
-                      <Text style={styles.mutedText}>{item.currency} {item.amount.toFixed(2)} • {tr('Due')}: {item.due_date} • {item.status}</Text>
+                      <Text style={styles.mutedText}>
+                        {sanitizeCurrency((item as any)?.currency)} {coerceMoneyNumber((item as any)?.amount).toFixed(2)} • {tr('Due')}: {String((item as any)?.due_date || '')} • {String((item as any)?.status || '')}
+                      </Text>
                     </View>
                   </View>
                   <View style={styles.billActionsRow}>
@@ -13646,7 +14235,14 @@ function ExportsScreen() {
                       label={tr('Open bill')}
                       variant="ghost"
                       iconName="open-outline"
-                      onPress={() => navigation.navigate('Bill Details', { bill: item })}
+                      onPress={() => {
+                        const safe = sanitizeBillForRoute(item)
+                        if (!safe) {
+                          Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
+                          return
+                        }
+                        navigation.navigate('Bill Details', { bill: safe })
+                      }}
                     />
                     <AppButton label={tr('Export PDF')} variant="secondary" iconName="print-outline" onPress={() => exportPDFSingle(item)} disabled={exportBusy} />
                   </View>
@@ -13872,11 +14468,20 @@ function PayScreen() {
       setItems(next)
     }
   })() }, [dayKey, supabase, permissionExplained, spaceLoading, space, spaceId, entitlements, billSpaceIds])
-  const upcoming = items.filter(b=> b.status==='unpaid').sort((a,b)=> (a.pay_date||a.due_date).localeCompare(b.pay_date||b.due_date))
-  const today = dayKey
+  const billTargetDate = useCallback((b: Bill) => toISODateOnly((b as any).pay_date || b.due_date), [])
+  const unpaidSorted = useMemo(() => {
+    return items
+      .filter((b) => b.status === 'unpaid')
+      .slice()
+      .sort((a, b) => billTargetDate(a).localeCompare(billTargetDate(b)))
+  }, [billTargetDate, items])
+  const today = toISODateOnly(dayKey) || dayKey
   const thisWeekEnd = useMemo(() => {
     const base = parseDateValue(dayKey) || new Date()
-    const out = new Date(base.getTime() + 7 * 24 * 3600 * 1000)
+    // "This week" = current calendar week ending on Sunday (EU-style weeks starting Monday).
+    // JS: 0=Sun..6=Sat → days until Sunday.
+    const daysToSunday = (7 - base.getDay()) % 7
+    const out = new Date(base.getTime() + daysToSunday * 24 * 3600 * 1000)
     return formatDateInput(out)
   }, [dayKey, formatDateInput, parseDateValue])
   const monthEnd = useMemo(() => {
@@ -13884,11 +14489,33 @@ function PayScreen() {
     const out = new Date(base.getTime() + 30 * 24 * 3600 * 1000)
     return formatDateInput(out)
   }, [dayKey, formatDateInput, parseDateValue])
-  const groups = {
-    today: upcoming.filter(b=> (b.pay_date||b.due_date)===today),
-    thisWeek: upcoming.filter(b=> (b.pay_date||b.due_date)>today && (b.pay_date||b.due_date)<=thisWeekEnd),
-    inMonth: upcoming.filter(b=> (b.pay_date||b.due_date)>thisWeekEnd && (b.pay_date||b.due_date)<=monthEnd),
-  }
+  const visibleBills = useMemo(() => {
+    // Keep Payments screen focused on bills due this week (plus overdue).
+    return unpaidSorted.filter((b) => {
+      const d = billTargetDate(b)
+      return d && d <= thisWeekEnd
+    })
+  }, [billTargetDate, thisWeekEnd, unpaidSorted])
+
+  const todayBills = useMemo(() => visibleBills.filter((b) => billTargetDate(b) === today), [billTargetDate, today, visibleBills])
+  const upcomingBills = useMemo(() => visibleBills.filter((b) => {
+    const d = billTargetDate(b)
+    return d && d !== today
+  }), [billTargetDate, today, visibleBills])
+
+  const groups = useMemo(() => {
+    return {
+      today: unpaidSorted.filter((b) => billTargetDate(b) === today),
+      thisWeek: unpaidSorted.filter((b) => {
+        const d = billTargetDate(b)
+        return d > today && d <= thisWeekEnd
+      }),
+      inMonth: unpaidSorted.filter((b) => {
+        const d = billTargetDate(b)
+        return d > thisWeekEnd && d <= monthEnd
+      }),
+    }
+  }, [billTargetDate, monthEnd, thisWeekEnd, today, unpaidSorted])
 
   const planList = useMemo(() => {
     if (planBucket === 'today') return groups.today
@@ -14117,7 +14744,7 @@ function PayScreen() {
   }, [debtorBic, debtorCity, debtorCountry, debtorIban, debtorName, debtorPostalCode, debtorStreet, spaceId])
 
   const exportSepaXmlSelected = useCallback(async () => {
-    const picked = upcoming.filter((b) => selected[b.id])
+    const picked = visibleBills.filter((b) => selected[b.id])
     if (!picked.length) {
       Alert.alert(tr('Select bills'), tr('Select one or more bills.'))
       return
@@ -14196,10 +14823,10 @@ function PayScreen() {
     } finally {
       setPayActionVisible(false)
     }
-  }, [buildPain001Xml, debtorBic, debtorCity, debtorCountry, debtorIban, debtorName, debtorPostalCode, debtorStreet, planningDate, selected, upcoming])
+  }, [buildPain001Xml, debtorBic, debtorCity, debtorCountry, debtorIban, debtorName, debtorPostalCode, debtorStreet, planningDate, selected, visibleBills])
 
   const exportCsvSelected = useCallback(async () => {
-    const picked = upcoming.filter((b) => selected[b.id])
+    const picked = visibleBills.filter((b) => selected[b.id])
     if (!picked.length) {
       Alert.alert(tr('Select bills'), tr('Select one or more bills.'))
       return
@@ -14247,11 +14874,11 @@ function PayScreen() {
     } finally {
       setPayActionVisible(false)
     }
-  }, [selected, upcoming])
+  }, [selected, visibleBills])
 
   useEffect(() => {
     let cancelled = false
-    const first = upcoming.slice(0, 12)
+    const first = visibleBills.slice(0, 12)
     if (!first.length) return
 
     ;(async () => {
@@ -14276,7 +14903,7 @@ function PayScreen() {
     return () => {
       cancelled = true
     }
-  }, [qrThumbs, upcoming])
+  }, [qrThumbs, visibleBills])
 
   function buildPaymentQrPayload(bill: Bill): string | null {
     const iban = normalizeIban(bill.iban || '')
@@ -14396,7 +15023,7 @@ function PayScreen() {
   async function snooze(b: Bill, days: number) { await snoozeBillReminder({ ...b, space_id: spaceId } as any, days, spaceId) }
   async function rescheduleSelected() {
     const dateISO = planningDate
-    const picked = upcoming.filter(b=> selected[b.id])
+    const picked = visibleBills.filter(b=> selected[b.id])
     if (!picked.length) { Alert.alert(tr('Select bills'), tr('Select one or more bills.')); return }
     for (const b of picked) {
       if (supabase) { await setBillStatus(supabase!, b.id, b.status, spaceId) }
@@ -14411,7 +15038,7 @@ function PayScreen() {
 
   async function paySelected() {
     const paidDate = planningDate
-    const picked = upcoming.filter(b=> selected[b.id])
+    const picked = visibleBills.filter(b=> selected[b.id])
     if (!picked.length) { Alert.alert(tr('Select bills'), tr('Select one or more bills.')); return }
     for (const b of picked) {
       await markPaid(b, paidDate)
@@ -14502,29 +15129,157 @@ function PayScreen() {
       <View style={styles.pageStack}>
         <TabTopBar titleKey="Payments" />
 
-        <Surface elevated padded={false} style={styles.paySectionCard}>
-          <View style={styles.payBatchRow}>
-            <Pressable style={styles.dateButton} onPress={openDatePicker} hitSlop={8}>
-              <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-              <Text style={styles.dateButtonText}>{planningDate || tr('Start date')}</Text>
-            </Pressable>
-            <AppInput placeholder="YYYY-MM-DD" value={planningDate} onChangeText={setPlanningDate} style={{ flex: 1 }} />
-            <AppButton label={tr('Pay')} iconName="card-outline" onPress={() => setPayActionVisible(true)} />
-          </View>
-          <Text style={styles.helperText}>{tr('Select bills below, then pay or reschedule.')}</Text>
+        <Surface
+          elevated
+          padded={false}
+          style={[styles.paySectionCard, todayBills.length === 0 ? styles.paySectionCardEmpty : null]}
+        >
+          <SectionHeader title={`${tr('Pay')} ${tr('Today')}`} />
+          {todayBills.length === 0 ? (
+            <Text style={styles.mutedText}>{tr('No bills due today')}</Text>
+          ) : (
+            <>
+              <View style={styles.payBatchRow}>
+                <Pressable style={styles.dateButton} onPress={openDatePicker} hitSlop={8}>
+                  <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
+                  <Text style={styles.dateButtonText}>{planningDate || tr('Start date')}</Text>
+                </Pressable>
+                <AppInput placeholder="YYYY-MM-DD" value={planningDate} onChangeText={setPlanningDate} style={{ flex: 1 }} />
+                <AppButton label={tr('Pay')} iconName="card-outline" onPress={() => setPayActionVisible(true)} />
+              </View>
+              <Text style={styles.helperText}>{tr('Select bills below, then pay or reschedule.')}</Text>
+
+              <View style={{ marginTop: themeSpacing.sm }}>
+                {todayBills.map((item) => {
+                  const dueDate = parseDateValue(item.due_date)
+                  const todayDate = parseDateValue(today)
+                  const isOverdue = dueDate && todayDate ? dueDate.getTime() < todayDate.getTime() : false
+                  const canQr = !!buildPaymentQrPayload(item)
+                  const parts = buildPaymentCopyParts(item)
+                  const amountNum = getAmountNumber(item)
+                  const d = billTargetDate(item)
+                  return (
+                    <Surface key={item.id} elevated style={styles.billRowCard}>
+                      <View style={styles.billRowHeader}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.cardTitle}>{item.supplier}</Text>
+                          <View style={styles.payInfoRow}>
+                            <Text style={styles.payInfoLabelToPay}>{tr('To pay')}:</Text>
+                            <Text style={styles.payInfoValue}>{formatMoney(amountNum, item.currency)}</Text>
+                          </View>
+                          <View style={styles.payInfoRow}>
+                            <Text style={styles.payInfoLabelDue}>{tr('Due')}:</Text>
+                            <Text style={styles.payInfoValue}>{item.due_date}</Text>
+                          </View>
+                        </View>
+
+                        <View style={styles.payRightColumn}>
+                          <Pressable onPress={() => toggleSel(item.id)} hitSlop={6}>
+                            <Ionicons
+                              name={selected[item.id] ? 'checkbox-outline' : 'square-outline'}
+                              size={20}
+                              color={themeColors.primary}
+                            />
+                          </Pressable>
+                          <Pressable
+                            onPress={() => {
+                              if (!canQr) {
+                                const currency = String(item.currency || 'EUR').toUpperCase()
+                                if (currency !== 'EUR') Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
+                                else Alert.alert(tr('QR unavailable'), tr('Missing IBAN, amount, or creditor name.'))
+                                return
+                              }
+                              openPaymentQr(item)
+                            }}
+                            style={({ pressed }) => [styles.payQrIconWrap, pressed ? { opacity: 0.9 } : null]}
+                            hitSlop={6}
+                          >
+                            <Ionicons name="qr-code-outline" size={20} color={canQr ? themeColors.primary : themeColors.textMuted} />
+                          </Pressable>
+                        </View>
+                      </View>
+                      <View style={styles.billActionsRow}>
+                        <Chip
+                          text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
+                          tone={isOverdue ? 'warning' : 'neutral'}
+                        />
+                        <AppButton
+                          label={tr('Pay (copy details)')}
+                          variant="primary"
+                          iconName="copy-outline"
+                          onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
+                        />
+                        <View style={styles.payCopyMiniRow}>
+                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
+                            <Text style={styles.payCopyMiniText}>{tr('Reference')}</Text>
+                          </Pressable>
+                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.iban, 'IBAN not found.') }>
+                            <Text style={styles.payCopyMiniText}>IBAN</Text>
+                          </Pressable>
+                          <Pressable
+                            style={styles.payCopyMiniBtn}
+                            onPress={() => copyTextOrWarn(parts.amount ? `${parts.amount} ${parts.currency || ''}`.trim() : '', 'Amount not found.')}
+                          >
+                            <Text style={styles.payCopyMiniText}>{tr('Amount')}</Text>
+                          </Pressable>
+                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.') }>
+                            <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
+                          </Pressable>
+                        </View>
+                        <AppButton
+                          label={tr('Show QR')}
+                          variant="secondary"
+                          iconName="qr-code-outline"
+                          onPress={()=>openPaymentQr(item)}
+                        />
+                        <AppButton
+                          label={tr('Mark as paid')}
+                          variant="primary"
+                          iconName="checkmark-circle-outline"
+                          style={{ backgroundColor: '#16A34A', borderColor: '#16A34A' }}
+                          onPress={()=>markPaid(item, today)}
+                        />
+                      </View>
+                      <View style={styles.payAdjustRow}>
+                        <AppButton label={tr('+1d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 1)} style={{ flex: 1 }} />
+                        <AppButton label={'+3d'} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 3)} style={{ flex: 1 }} />
+                        <AppButton label={tr('+7d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 7)} style={{ flex: 1 }} />
+                      </View>
+                      <View style={styles.payDueRow}>
+                        <AppButton
+                          label={`${tr('Due')} ${tr('+1d')}`}
+                          variant="ghost"
+                          iconName="calendar-outline"
+                          onPress={() => postponeBillDue(item, 1)}
+                          style={{ flex: 1 }}
+                        />
+                        <AppButton
+                          label={`${tr('Due')} ${tr('+7d')}`}
+                          variant="ghost"
+                          iconName="calendar-outline"
+                          onPress={() => postponeBillDue(item, 7)}
+                          style={{ flex: 1 }}
+                        />
+                      </View>
+                    </Surface>
+                  )
+                })}
+              </View>
+            </>
+          )}
         </Surface>
 
         <Surface elevated>
           <SectionHeader title={tr('Upcoming bills')} />
-          {upcoming.length === 0 ? (
+          {upcomingBills.length === 0 ? (
             <EmptyState
-              title={tr('No unpaid bills')}
+              title={tr('No bills in this range.')}
               message={tr('Once you have unpaid bills, they will appear here so you can plan payments.')}
               iconName="checkmark-done-outline"
             />
           ) : (
             <FlatList
-              data={upcoming}
+              data={upcomingBills}
               keyExtractor={(b)=>b.id}
               contentContainerStyle={styles.listContent}
               renderItem={({ item })=> {
@@ -14534,6 +15289,7 @@ function PayScreen() {
                 const canQr = !!buildPaymentQrPayload(item)
                 const parts = buildPaymentCopyParts(item)
                 const amountNum = getAmountNumber(item)
+                const d = billTargetDate(item)
                 return (
                 <Surface elevated style={styles.billRowCard}>
                   <View style={styles.billRowHeader}>
@@ -14576,7 +15332,7 @@ function PayScreen() {
                   </View>
                   <View style={styles.billActionsRow}>
                     <Chip
-                      text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : (new Date(item.due_date).getTime()-Date.now())/(24*3600*1000) < 1 ? tr('Due today') : tr('Upcoming')}
+                      text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
                       tone={isOverdue ? 'warning' : 'neutral'}
                     />
                     <AppButton
@@ -14697,7 +15453,7 @@ function PayScreen() {
             <SectionHeader title={tr('Pay')} />
             <Text style={styles.bodyText}>{tr('Choose what to do with the selected bills:')}</Text>
             <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-              {upcoming.filter((b) => selected[b.id]).length >= 3 ? (
+              {visibleBills.filter((b) => selected[b.id]).length >= 3 ? (
                 <AppButton label={tr('Export SEPA XML')} iconName="download-outline" onPress={exportSepaXmlSelected} />
               ) : null}
               <AppButton label={tr('Export CSV')} variant="secondary" iconName="download-outline" onPress={exportCsvSelected} />
@@ -15135,7 +15891,9 @@ function MainTabs() {
             const iconName = icons[route.name] ?? 'ellipse-outline'
             const iconSize = route.name === 'Scan' ? 26 : 24
             return (
-              <Ionicons name={iconName} size={iconSize} color={color} />
+              <View style={{ transform: [{ translateY: focused ? -3 : 0 }] }}>
+                <Ionicons name={iconName} size={iconSize} color={color} />
+              </View>
             )
           },
         })}
@@ -16348,6 +17106,7 @@ const styles = StyleSheet.create({
   filtersHeaderRight: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs, flexShrink: 1 },
   filtersHeaderLabel: { fontSize: 12, color: '#4B5563' },
   filtersBody: { gap: themeSpacing.sm, marginTop: themeSpacing.sm },
+  reportsFiltersBody: { gap: themeSpacing.xs, marginTop: themeSpacing.xs },
   filterRow: { flexDirection: 'row', gap: themeLayout.gap },
   dateFilterSection: { gap: themeSpacing.xs },
   filterLabel: { fontSize: 12, fontWeight: '600', color: '#1F2937' },
@@ -16409,8 +17168,8 @@ const styles = StyleSheet.create({
   billRowHighlighted: { borderWidth: 1, borderColor: '#22C55E' },
   billRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: themeLayout.gap, flexWrap: 'wrap' },
   billActionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.xs, marginTop: themeSpacing.xs },
-  payAdjustRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: 6, marginTop: 4 },
-  payDueRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: 6, marginTop: 6 },
+  payAdjustRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: 6, marginTop: 2 },
+  payDueRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: 6, marginTop: 2 },
   payBillMeta: { fontSize: 13, color: '#374151' },
   payDueText: { fontWeight: '700', color: '#DC2626' },
   payDueOverdue: { fontWeight: '700', color: '#B91C1C' },
@@ -16433,32 +17192,38 @@ const styles = StyleSheet.create({
   qrImage: { width: 240, height: 240, alignSelf: 'center', borderRadius: 12, backgroundColor: '#FFFFFF' },
   reportStatLabel: { fontSize: 13, color: '#4B5563' },
   reportStatValue: { fontSize: 15, fontWeight: '700', color: themeColors.text },
-  reportViewToggleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm },
+  reportViewToggleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs },
   reportTableHeaderRow: { flexDirection: 'row', alignItems: 'center', paddingBottom: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: themeColors.border },
   reportTableRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: themeColors.border },
   reportChartCard: { padding: themeSpacing.sm, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
-  reportChartTitle: { fontSize: 12, fontWeight: '700', color: '#334155', marginBottom: themeSpacing.sm },
-  reportLegendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm, marginBottom: themeSpacing.sm },
+  reportChartTitle: { fontSize: 12, fontWeight: '700', color: '#334155', marginBottom: themeSpacing.xs },
+  reportChartSubtitle: { fontSize: 11, color: '#64748B', marginBottom: themeSpacing.xs },
+  reportLegendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm, marginBottom: themeSpacing.xs },
   reportLegendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   reportLegendSwatch: { width: 10, height: 10, borderRadius: 5 },
   reportLegendLabel: { fontSize: 11, color: '#475569' },
   reportBarsRow: { flexDirection: 'row', alignItems: 'flex-end', gap: themeSpacing.xs },
   reportBarItem: { flex: 1, alignItems: 'center', gap: 6 },
   reportBarTrack: { width: '100%', height: 140, borderRadius: 8, backgroundColor: '#F1F5F9', overflow: 'hidden', justifyContent: 'flex-end' },
-  reportBarFill: { width: '100%', backgroundColor: themeColors.primary, borderRadius: 8 },
+  reportBarFill: { width: '100%', backgroundColor: themeColors.primary, borderTopLeftRadius: 8, borderTopRightRadius: 8 },
+  reportBarValueLabel: { height: 14, fontSize: 10, fontWeight: '700', color: '#0F172A' },
   reportBarLabel: { fontSize: 11, color: '#64748B' },
   reportChartFrame: { borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, padding: 10, backgroundColor: '#FFFFFF' },
   reportAxisRow: { flexDirection: 'row', alignItems: 'flex-end', gap: themeSpacing.sm },
   reportYAxis: { width: 42, alignItems: 'flex-end', justifyContent: 'space-between', height: 140 },
   reportYAxisLabel: { fontSize: 10, color: '#64748B' },
   reportXAxis: { flex: 1, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#CBD5F5', marginTop: 6 },
+  reportXLabelsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
+  reportXLabelCell: { flex: 1 },
+  reportXLabelText: { fontSize: 10, color: '#64748B', textAlign: 'center' },
   reportGridLine: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#E2E8F0' },
   reportLineChart: { height: 160, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, backgroundColor: '#FFFFFF' },
   reportLineSegment: { position: 'absolute', height: 2, backgroundColor: themeColors.primary, borderRadius: 2 },
   reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: themeColors.primary },
   reportLineChart: { height: 160, borderRadius: 12, backgroundColor: '#F8FAFC', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
-  reportLineSegment: { position: 'absolute', height: 2, backgroundColor: '#1D4ED8' },
+  reportLineSegment: { position: 'absolute', height: 3, backgroundColor: '#1D4ED8', borderRadius: 3 },
   reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: '#1D4ED8' },
+  reportTableRowAlt: { backgroundColor: '#F8FAFC' },
   reportTableRowCard: { padding: themeSpacing.sm, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
   reportRowTitle: { fontSize: 13, fontWeight: '700', color: '#111827' },
   reportRowBarTrack: { height: 8, borderRadius: 999, backgroundColor: '#E5E7EB', overflow: 'hidden', marginTop: 8 },
@@ -16479,6 +17244,7 @@ const styles = StyleSheet.create({
   cameraFocusBox: { width: '64%', height: '64%', borderRadius: 18, borderWidth: 2, borderColor: '#FFFFFFAA' },
   cameraActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-start', gap: themeLayout.gap, marginTop: themeSpacing.xs },
   addBillActionButton: { minHeight: 52, paddingHorizontal: 18 },
+  addBillProfileCard: { padding: themeSpacing.sm, marginBottom: themeSpacing.sm },
   formCard: { gap: themeSpacing.sm },
   formIntro: { fontSize: 13, color: themeColors.textMuted },
   formNotice: { alignSelf: 'stretch' },
@@ -16588,7 +17354,7 @@ const styles = StyleSheet.create({
   homeProfileAvatarInitials: { fontSize: 11, fontWeight: '800', color: '#0F172A' },
   homeProfileName: { fontSize: 13, fontWeight: '800', color: themeColors.text },
   homeProfileHint: { marginTop: 1, fontSize: 10, color: themeColors.textMuted },
-  homeProfileActiveDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: themeColors.primary },
+  homeProfileActiveDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#16A34A' },
 
   homeSummaryRow: {
     flexDirection: 'row',
@@ -16654,6 +17420,7 @@ const styles = StyleSheet.create({
 
   // Pay
   paySectionCard: { padding: themeSpacing.sm },
+  paySectionCardEmpty: { paddingVertical: themeSpacing.xs },
   payBatchRow: { flexDirection: 'row', alignItems: 'center', gap: themeSpacing.xs, flexWrap: 'wrap' },
   payOverviewRow: { flexDirection: 'row', gap: themeSpacing.xs },
   payOverviewCard: { borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 10, paddingVertical: themeSpacing.sm, paddingHorizontal: themeSpacing.sm, backgroundColor: '#FFFFFF' },

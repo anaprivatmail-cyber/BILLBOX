@@ -28,10 +28,12 @@ export function Screen({
   children,
   scroll = true,
   style,
+  scrollRef,
 }: {
   children: React.ReactNode
   scroll?: boolean
   style?: StyleProp<ViewStyle>
+  scrollRef?: React.RefObject<ScrollView | null>
 }) {
   const insets = useSafeAreaInsets()
   const colors = useThemeColors()
@@ -60,6 +62,7 @@ export function Screen({
   return (
     <SafeAreaView edges={['top']} style={[{ flex: 1, backgroundColor: colors.background }, style]}>
       <ScrollView
+        ref={scrollRef}
         contentContainerStyle={{
           flexGrow: 1,
           paddingHorizontal: layout.screenPadding,

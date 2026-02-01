@@ -39,7 +39,18 @@ function isGoogleVisionFallbackAllowed() {
   // Safety valve: if PDF rasterization fails in production, you can allow
   // falling back to Google Vision OCR by setting ALLOW_GOOGLE_VISION_FALLBACK=true.
   const flag = String(process.env.ALLOW_GOOGLE_VISION_FALLBACK || '').trim().toLowerCase()
-  return flag === 'true' || flag === '1' || flag === 'yes' || flag === 'on'
+
+  // If explicitly enabled, always allow.
+  if (flag === 'true' || flag === '1' || flag === 'yes' || flag === 'on') return true
+
+  // Allow explicitly disabling fallback without turning off Vision entirely.
+  const disable = String(process.env.DISABLE_GOOGLE_VISION_FALLBACK || '').trim().toLowerCase()
+  if (disable === 'true' || disable === '1' || disable === 'yes' || disable === 'on') return false
+
+  // Default: if Vision credentials are configured, allow fallback.
+  // This only kicks in when PDF rasterization fails, so it won't affect normal flows.
+  const rawCreds = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
+  return !!(rawCreds && String(rawCreds).trim())
 }
 
 function looksLikeMisassignedName(input) {
