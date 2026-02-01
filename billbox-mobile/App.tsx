@@ -2748,6 +2748,11 @@ function BillDetailsScreen() {
     )
   }
 
+  const billAmountNumber = (() => {
+    const n = Number((bill as any)?.amount)
+    return Number.isFinite(n) ? n : 0
+  })()
+
   return (
     <Screen>
       <View style={styles.pageStack}>
@@ -2766,7 +2771,7 @@ function BillDetailsScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('Bill summary')} />
-          <Text style={styles.bodyText}>{bill.currency} {bill.amount.toFixed(2)} • {tr('Due')} {bill.due_date}</Text>
+          <Text style={styles.bodyText}>{bill.currency} {billAmountNumber.toFixed(2)} • {tr('Due')} {bill.due_date}</Text>
           {!!(bill as any).invoice_number && <Text style={styles.bodyText}>{tr('Invoice number')}: {(bill as any).invoice_number}</Text>}
           {!!bill.reference && <Text style={styles.bodyText}>{tr('Reference number')}: {bill.reference}</Text>}
           {!!bill.iban && <Text style={styles.bodyText}>{tr('IBAN')}: {bill.iban}</Text>}
@@ -9678,7 +9683,20 @@ function HomeScreen() {
   const { lang, setLang } = useLangContext()
   const insets = useSafeAreaInsets()
   const [summaries, setSummaries] = useState<
-    { spaceId: string; spaceName: string; totalUnpaid: number; unpaidCount: number; overdueCount: number; overdueTotal: number; nextDueDate: string | null; nextDueTotal: number }[]
+    {
+      spaceId: string
+      spaceName: string
+      totalUnpaid: number
+      unpaidCount: number
+      overdueCount: number
+      overdueTotal: number
+      nextDueDate: string | null
+      nextDueTotal: number
+      dueTodayCount: number
+      dueTodayTotal: number
+      activeWarrantyCount: number
+      expiringWarrantyCount30: number
+    }[]
   >([])
 
   const dayKey = useDayKey()
@@ -9696,10 +9714,69 @@ function HomeScreen() {
 
   const [languagePickerVisible, setLanguagePickerVisible] = useState(false)
   const [homeSummarySettingsVisible, setHomeSummarySettingsVisible] = useState(false)
-  const [homeSummaryVisibility, setHomeSummaryVisibility] = useState({ totalUnpaid: true, overdue: true, nextDue: true })
+  const [homeSummaryVisibility, setHomeSummaryVisibility] = useState({ counts: true, overdue: true, today: true, warranties: true })
   const [creatingPayer2, setCreatingPayer2] = useState(false)
   const [payer2NameDraft, setPayer2NameDraft] = useState('')
   const [upgradeModalVisible, setUpgradeModalVisible] = useState(false)
+
+  const payerAvatarKey = useCallback((payerId: string) => {
+    return `billbox.payer.avatar.${String(payerId || '').trim()}`
+  }, [])
+
+  const payerSpaces = useMemo(() => {
+    return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
+  }, [spacesCtx.spaces])
+
+  const [payerAvatars, setPayerAvatars] = useState<Record<string, string | null>>({})
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const ids = payerSpaces.map((s) => String(s.id || '').trim()).filter(Boolean)
+        if (!ids.length) {
+          setPayerAvatars({})
+          return
+        }
+        const keys = ids.map((id) => payerAvatarKey(id))
+        const pairs = await AsyncStorage.multiGet(keys)
+        const next: Record<string, string | null> = {}
+        for (let i = 0; i < ids.length; i++) {
+          next[ids[i]] = pairs[i]?.[1] ? String(pairs[i][1]) : null
+        }
+        setPayerAvatars(next)
+      } catch {
+        setPayerAvatars({})
+      }
+    })()
+  }, [payerAvatarKey, payerSpaces])
+
+  const pickPayerAvatar = useCallback(async (payerId: string) => {
+    try {
+      const pid = String(payerId || '').trim()
+      if (!pid) return
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.9,
+      })
+      if ((res as any)?.canceled) return
+      const asset = (res as any)?.assets?.[0]
+      const uri = String(asset?.uri || '').trim()
+      if (!uri) return
+
+      const target = `${FileSystem.documentDirectory}payer-avatar-${pid}-${Date.now()}.jpg`
+      try {
+        await FileSystem.copyAsync({ from: uri, to: target })
+      } catch {
+        // If copy fails (e.g. already persistent), fallback to original URI.
+      }
+
+      const storedUri = (await FileSystem.getInfoAsync(target)).exists ? target : uri
+      await AsyncStorage.setItem(payerAvatarKey(pid), storedUri)
+      setPayerAvatars((prev) => ({ ...prev, [pid]: storedUri }))
+    } catch {
+      Alert.alert(tr('Error'), tr('Open failed'))
+    }
+  }, [payerAvatarKey])
 
   const languageOptions = useMemo(() => {
     const opts: Array<{ code: Lang; key: string }> = [
@@ -9797,16 +9874,22 @@ function HomeScreen() {
         if (!raw) return
         const parsed = JSON.parse(raw)
         if (!parsed || typeof parsed !== 'object') return
-        setHomeSummaryVisibility((prev) => ({
-          totalUnpaid: typeof parsed.totalUnpaid === 'boolean' ? parsed.totalUnpaid : prev.totalUnpaid,
-          overdue: typeof parsed.overdue === 'boolean' ? parsed.overdue : prev.overdue,
-          nextDue: typeof parsed.nextDue === 'boolean' ? parsed.nextDue : prev.nextDue,
-        }))
+        setHomeSummaryVisibility((prev) => {
+          const overdue = typeof parsed.overdue === 'boolean' ? parsed.overdue : prev.overdue
+          const today = typeof parsed.today === 'boolean'
+            ? parsed.today
+            : (typeof parsed.nextDue === 'boolean' ? parsed.nextDue : prev.today)
+          const counts = typeof parsed.counts === 'boolean'
+            ? parsed.counts
+            : (typeof parsed.totalUnpaid === 'boolean' ? parsed.totalUnpaid : prev.counts)
+          const warranties = typeof parsed.warranties === 'boolean' ? parsed.warranties : prev.warranties
+          return { overdue, today, counts, warranties }
+        })
       } catch {}
     })()
   }, [])
 
-  const updateHomeSummaryVisibility = useCallback(async (next: { totalUnpaid: boolean; overdue: boolean; nextDue: boolean }) => {
+  const updateHomeSummaryVisibility = useCallback(async (next: { counts: boolean; overdue: boolean; today: boolean; warranties: boolean }) => {
     setHomeSummaryVisibility(next)
     try {
       await AsyncStorage.setItem('billbox.home.summaryVisibility', JSON.stringify(next))
@@ -9825,8 +9908,33 @@ function HomeScreen() {
       try {
         const supabase = getSupabase()
         const todayIso = dayKey
+        const addDaysIso = (iso: string, days: number) => {
+          try {
+            const [y, m, d] = iso.split('-').map((p) => parseInt(p, 10))
+            const base = new Date(y, (m || 1) - 1, d || 1)
+            if (Number.isNaN(base.getTime())) return iso
+            const out = new Date(base.getTime() + days * 24 * 3600 * 1000)
+            return out.toISOString().slice(0, 10)
+          } catch {
+            return iso
+          }
+        }
+        const soonIso = addDaysIso(todayIso, 30)
 
-        const next: { spaceId: string; spaceName: string; totalUnpaid: number; unpaidCount: number; overdueCount: number; overdueTotal: number; nextDueDate: string | null; nextDueTotal: number }[] = []
+        const next: {
+          spaceId: string
+          spaceName: string
+          totalUnpaid: number
+          unpaidCount: number
+          overdueCount: number
+          overdueTotal: number
+          nextDueDate: string | null
+          nextDueTotal: number
+          dueTodayCount: number
+          dueTodayTotal: number
+          activeWarrantyCount: number
+          expiringWarrantyCount30: number
+        }[] = []
 
         for (const sp of payerSpaces) {
           const sid = sp.id
@@ -9840,16 +9948,29 @@ function HomeScreen() {
             bills = (locals as any) || []
           }
 
+          let warranties: Warranty[] = []
+          if (supabase) {
+            const { data, error } = await listWarranties(supabase, sid, entitlements)
+            if (error) throw error
+            warranties = (data as any) || []
+          } else {
+            warranties = (await loadLocalWarranties(sid)) as any
+          }
+
           let totalUnpaid = 0
           let unpaidCount = 0
           let overdueCount = 0
           let overdueTotal = 0
           let nextDue: string | null = null
           let nextDueTotal = 0
+          let dueTodayCount = 0
+          let dueTodayTotal = 0
+          let activeWarrantyCount = 0
+          let expiringWarrantyCount30 = 0
 
           for (const bill of bills) {
             if (!isBillUnpaid(bill.status)) continue
-            const amountRaw = Number((bill as any)?.amount ?? 0)
+            const amountRaw = Number(String((bill as any)?.amount ?? '').replace(',', '.'))
             const amount = Number.isFinite(amountRaw) ? amountRaw : 0
             unpaidCount += 1
             totalUnpaid += amount
@@ -9858,6 +9979,9 @@ function HomeScreen() {
             if (due < todayIso) {
               overdueCount += 1
               overdueTotal += amount
+            } else if (due === todayIso) {
+              dueTodayCount += 1
+              dueTodayTotal += amount
             } else {
               if (!nextDue || due < nextDue) {
                 nextDue = due
@@ -9866,6 +9990,17 @@ function HomeScreen() {
                 nextDueTotal += amount
               }
             }
+          }
+
+          for (const w of warranties || []) {
+            const exp = String((w as any)?.expires_at || '').trim()
+            if (!exp) {
+              activeWarrantyCount += 1
+              continue
+            }
+            if (exp < todayIso) continue
+            activeWarrantyCount += 1
+            if (exp <= soonIso) expiringWarrantyCount30 += 1
           }
 
           next.push({
@@ -9877,6 +10012,10 @@ function HomeScreen() {
             overdueTotal,
             nextDueDate: nextDue,
             nextDueTotal,
+            dueTodayCount,
+            dueTodayTotal,
+            activeWarrantyCount,
+            expiringWarrantyCount30,
           })
         }
 
@@ -9912,26 +10051,40 @@ function HomeScreen() {
   const activePayerId = String(spacesCtx.current?.id || spaceId || '').trim()
   const activeSummary = (summaries || []).find((s) => s.spaceId === activePayerId) || (summaries || [])[0] || null
   const mask = '•••'
-  const totalUnpaidValue = activeSummary
-    ? (homeSummaryVisibility.totalUnpaid ? `EUR ${Number(activeSummary.totalUnpaid || 0).toFixed(2)}` : mask)
-    : (homeSummaryVisibility.totalUnpaid ? '—' : mask)
-  const totalUnpaidSubValue = activeSummary
-    ? (homeSummaryVisibility.totalUnpaid ? tr('{count} bills', { count: activeSummary.unpaidCount || 0 }) : mask)
-    : (homeSummaryVisibility.totalUnpaid ? '—' : mask)
-  const overdueValue = activeSummary
-    ? (homeSummaryVisibility.overdue ? `EUR ${Number(activeSummary.overdueTotal || 0).toFixed(2)}` : mask)
-    : (homeSummaryVisibility.overdue ? '—' : mask)
-  const overdueSubValue = activeSummary
-    ? (homeSummaryVisibility.overdue ? tr('{count} bills', { count: activeSummary.overdueCount || 0 }) : mask)
-    : (homeSummaryVisibility.overdue ? '—' : mask)
-  const nextDueValue = activeSummary
-    ? (homeSummaryVisibility.nextDue ? (activeSummary.nextDueDate || tr('None')) : mask)
-    : (homeSummaryVisibility.nextDue ? '—' : mask)
-  const nextDueSubValue = activeSummary
-    ? (homeSummaryVisibility.nextDue
-      ? (activeSummary.nextDueDate ? `EUR ${Number(activeSummary.nextDueTotal || 0).toFixed(2)}` : '—')
-      : mask)
-    : (homeSummaryVisibility.nextDue ? '—' : mask)
+
+  const formatEur = useCallback((amount: number, visible: boolean) => {
+    if (!visible) return mask
+    const n = Number.isFinite(amount) ? amount : 0
+    return `EUR ${n.toFixed(2)}`
+  }, [mask])
+
+  const profileSlots = useMemo(() => {
+    const base = payerOptions.slice(0, 2).map((o) => ({
+      id: String((o as any).value || ''),
+      name: String((o as any).label || '').trim() || 'Profil',
+      isPlaceholder: String((o as any).value || '').startsWith('__'),
+    }))
+    if (base.length === 1) {
+      base.push({ id: '__locked_payer2__', name: 'Profil 2', isPlaceholder: true })
+    }
+    return base.slice(0, 2)
+  }, [payerOptions])
+
+  const initialsFromName = useCallback((name: string) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+    const first = parts[0]?.[0] || ''
+    const second = parts.length > 1 ? (parts[1]?.[0] || '') : (parts[0]?.[1] || '')
+    const out = (first + second).toUpperCase()
+    return out || '•'
+  }, [])
+
+  const overdueCount = Number(activeSummary?.overdueCount || 0)
+  const overdueTotal = Number(activeSummary?.overdueTotal || 0)
+  const todayCount = Number(activeSummary?.dueTodayCount || 0)
+  const todayTotal = Number(activeSummary?.dueTodayTotal || 0)
+  const expWCount = Number(activeSummary?.expiringWarrantyCount30 || 0)
+  const activeWCount = Number(activeSummary?.activeWarrantyCount || 0)
+  const activeBillsCount = Number(activeSummary?.unpaidCount || 0)
 
   const retentionNotices = useMemo(() => {
     const notices: Array<{ tone: 'info' | 'warning'; message: string }> = []
@@ -10031,7 +10184,7 @@ function HomeScreen() {
         <Surface elevated padded={false} style={[styles.card, styles.homeHeroCard]}>
           <View style={styles.homeHeroHeaderRow}>
             <View style={{ flexShrink: 1 }}>
-              <Text style={styles.homeHeroTitle}>Billbox</Text>
+              <Text style={styles.homeHeroTitle}>BillBox</Text>
             </View>
             <TouchableOpacity
               onPress={() => setHomeSummarySettingsVisible(true)}
@@ -10051,112 +10204,202 @@ function HomeScreen() {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.homeMetricsRow}>
-            <Pressable
-              onPress={() => {
-                navigation.navigate('Bills', {
-                  filterPreset: {
-                    supplierQuery: '',
-                    amountMin: '',
-                    amountMax: '',
-                    dateMode: 'due',
-                    dateFrom: '',
-                    dateTo: '',
-                    statusFilter: 'unpaid',
-                    unpaidOnly: true,
-                    overdueOnly: false,
-                    hasAttachmentsOnly: false,
-                    includeArchived: false,
-                    filtersExpanded: false,
-                  },
-                })
-              }}
-              style={({ pressed }) => [styles.homeMetricCard, styles.homeMetricCardUnpaid, pressed && { opacity: 0.92 }]}
-              hitSlop={8}
-            >
-              <Text style={styles.homeMetricValue} numberOfLines={1}>{totalUnpaidValue}</Text>
-              <Text style={styles.homeMetricSubValue} numberOfLines={1}>{totalUnpaidSubValue}</Text>
-              <Text style={styles.homeMetricLabel}>{tr('Total unpaid')}</Text>
-            </Pressable>
+          <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.sm }}>
+            <View style={styles.homeProfilesRow}>
+              {profileSlots.map((slot) => {
+                const isActive = String(slot.id) === String(spacesCtx.current?.id || spaceId || '')
+                const isLocked = slot.id === '__locked_payer2__'
+                const isCreate = slot.id === '__create_payer2__'
+                const canShowAvatar = !slot.isPlaceholder && isPayerSpaceId(slot.id)
+                const avatarUri = canShowAvatar ? (payerAvatars[slot.id] || null) : null
+                const initials = initialsFromName(slot.name)
+                return (
+                  <Pressable
+                    key={slot.id}
+                    onPress={() => handlePayerChange(slot.id)}
+                    style={({ pressed }) => [
+                      styles.homeProfileChip,
+                      isActive && styles.homeProfileChipActive,
+                      (isLocked || isCreate) && styles.homeProfileChipPlaceholder,
+                      pressed && { opacity: 0.92 },
+                    ]}
+                  >
+                    <View style={styles.homeProfileAvatarWrap}>
+                      {avatarUri ? (
+                        <Image source={{ uri: avatarUri }} style={styles.homeProfileAvatarImg} />
+                      ) : (
+                        <View style={styles.homeProfileAvatarFallback}>
+                          <Text style={styles.homeProfileAvatarInitials}>{initials}</Text>
+                        </View>
+                      )}
+                    </View>
 
-            <Pressable
-              onPress={() => {
-                navigation.navigate('Bills', {
-                  filterPreset: {
-                    supplierQuery: '',
-                    amountMin: '',
-                    amountMax: '',
-                    dateMode: 'due',
-                    dateFrom: '',
-                    dateTo: '',
-                    statusFilter: 'unpaid',
-                    unpaidOnly: true,
-                    overdueOnly: true,
-                    hasAttachmentsOnly: false,
-                    includeArchived: false,
-                    filtersExpanded: false,
-                  },
-                })
-              }}
-              style={({ pressed }) => [styles.homeMetricCard, styles.homeMetricCardOverdue, pressed && { opacity: 0.92 }]}
-              hitSlop={8}
-            >
-              <Text style={styles.homeMetricValue} numberOfLines={1}>{overdueValue}</Text>
-              <Text style={styles.homeMetricSubValue} numberOfLines={1}>{overdueSubValue}</Text>
-              <Text style={styles.homeMetricLabel}>{tr('Overdue')}</Text>
-            </Pressable>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.homeProfileName} numberOfLines={1}>{slot.name}</Text>
+                    </View>
 
-            <Pressable
-              onPress={() => {
-                const next = String(activeSummary?.nextDueDate || '').trim()
-                const isIso = /^\d{4}-\d{2}-\d{2}$/.test(next)
-                navigation.navigate('Bills', {
-                  filterPreset: {
-                    supplierQuery: '',
-                    amountMin: '',
-                    amountMax: '',
-                    dateMode: 'due',
-                    dateFrom: isIso ? next : '',
-                    dateTo: isIso ? next : '',
-                    statusFilter: 'unpaid',
-                    unpaidOnly: true,
-                    overdueOnly: false,
-                    hasAttachmentsOnly: false,
-                    includeArchived: false,
-                    filtersExpanded: false,
-                  },
-                })
-              }}
-              style={({ pressed }) => [styles.homeMetricCard, styles.homeMetricCardNext, pressed && { opacity: 0.92 }]}
-              hitSlop={8}
-            >
-              <Text style={styles.homeMetricValue} numberOfLines={1}>{nextDueValue}</Text>
-              <Text style={styles.homeMetricSubValue} numberOfLines={1}>{nextDueSubValue}</Text>
-              <Text style={styles.homeMetricLabel}>{tr('Next due date')}</Text>
-            </Pressable>
-          </View>
-
-          <View style={{ marginTop: themeSpacing.sm }}>
-            <Text style={styles.mutedText}>{tr('Profiles')}</Text>
-            <SegmentedControl
-              value={spacesCtx.current?.id || spaceId || ''}
-              onChange={(id) => { handlePayerChange(id) }}
-              options={payerOptions}
-              activeBgColor={themeColors.primary}
-              activeTextColor="#FFFFFF"
-              style={{ marginTop: themeSpacing.xs }}
-            />
+                    {isLocked ? (
+                      <Ionicons name="lock-closed-outline" size={16} color={colors.textMuted} />
+                    ) : isActive ? (
+                      <View style={styles.homeProfileActiveDot} />
+                    ) : (
+                      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                    )}
+                  </Pressable>
+                )
+              })}
+            </View>
 
             {creatingPayer2 ? (
-              <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
-                <Text style={styles.bodyText}>{tr('Create Profil 2 (Več only).')}</Text>
-                <AppInput placeholder={tr('Profil 2 name')} value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
+              <View style={{ gap: themeSpacing.sm }}>
+                <Text style={styles.bodyText}>Ustvari Profil 2 (Več)</Text>
+                <AppInput placeholder="Ime profila" value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
                 <View style={{ flexDirection: 'row', gap: themeLayout.gap }}>
                   <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setCreatingPayer2(false)} />
-                  <AppButton label={tr('Create Profil 2')} iconName="add-outline" onPress={savePayer2} />
+                  <AppButton label="Ustvari" iconName="add-outline" onPress={savePayer2} />
                 </View>
               </View>
             ) : null}
+
+            <View style={{ gap: themeSpacing.xs }}>
+              <Pressable
+                onPress={() => {
+                  navigation.navigate('Bills', {
+                    filterPreset: {
+                      supplierQuery: '',
+                      amountMin: '',
+                      amountMax: '',
+                      dateMode: 'due',
+                      dateFrom: '',
+                      dateTo: '',
+                      statusFilter: 'unpaid',
+                      unpaidOnly: true,
+                      overdueOnly: true,
+                      hasAttachmentsOnly: false,
+                      includeArchived: false,
+                      filtersExpanded: false,
+                    },
+                  })
+                }}
+                style={({ pressed }) => [
+                  styles.homeSummaryRow,
+                  overdueCount > 0 ? styles.homeSummaryRowDanger : styles.homeSummaryRowNeutral,
+                  pressed && { opacity: 0.92 },
+                ]}
+              >
+                <Ionicons name={overdueCount > 0 ? 'alert-circle-outline' : 'checkmark-circle-outline'} size={18} color={overdueCount > 0 ? '#9F1239' : '#166534'} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.homeSummaryRowTitle} numberOfLines={1}>
+                    {homeSummaryVisibility.overdue
+                      ? (overdueCount > 0
+                        ? tr('{count} overdue bills', { count: overdueCount })
+                        : tr('No overdue bills'))
+                      : mask}
+                  </Text>
+                </View>
+                <Text style={styles.homeSummaryRowValue} numberOfLines={1}>
+                  {formatEur(overdueTotal, homeSummaryVisibility.overdue)}
+                </Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  navigation.navigate('Bills', {
+                    filterPreset: {
+                      supplierQuery: '',
+                      amountMin: '',
+                      amountMax: '',
+                      dateMode: 'due',
+                      dateFrom: dayKey,
+                      dateTo: dayKey,
+                      statusFilter: 'unpaid',
+                      unpaidOnly: true,
+                      overdueOnly: false,
+                      hasAttachmentsOnly: false,
+                      includeArchived: false,
+                      filtersExpanded: false,
+                    },
+                  })
+                }}
+                style={({ pressed }) => [styles.homeSummaryRow, styles.homeSummaryRowInfo, pressed && { opacity: 0.92 }]}
+              >
+                <Ionicons name="calendar-outline" size={18} color="#1D4ED8" />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.homeSummaryRowTitle} numberOfLines={1}>
+                    {homeSummaryVisibility.today
+                      ? (todayCount > 0
+                        ? tr('{count} bills due today', { count: todayCount })
+                        : tr('No bills due today'))
+                      : mask}
+                  </Text>
+                </View>
+                <Text style={styles.homeSummaryRowValue} numberOfLines={1}>
+                  {formatEur(todayTotal, homeSummaryVisibility.today)}
+                </Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+              </Pressable>
+
+              <Pressable
+                onPress={() => safeNavigate('Warranties', { initialStatusFilter: 'expiring' })}
+                style={({ pressed }) => [
+                  styles.homeSummaryRow,
+                  expWCount > 0 ? styles.homeSummaryRowWarn : styles.homeSummaryRowNeutral,
+                  pressed && { opacity: 0.92 },
+                ]}
+              >
+                <Ionicons name={expWCount > 0 ? 'time-outline' : 'shield-checkmark-outline'} size={18} color={expWCount > 0 ? '#92400E' : '#166534'} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.homeSummaryRowTitle} numberOfLines={1}>
+                    {homeSummaryVisibility.warranties
+                      ? (expWCount > 0
+                        ? tr('{count} warranties expiring soon', { count: expWCount })
+                        : tr('No warranties expiring soon'))
+                      : mask}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+              </Pressable>
+
+              <View style={styles.homeCountsRow}>
+                <Pressable
+                  onPress={() => {
+                    navigation.navigate('Bills', {
+                      filterPreset: {
+                        supplierQuery: '',
+                        amountMin: '',
+                        amountMax: '',
+                        dateMode: 'due',
+                        dateFrom: '',
+                        dateTo: '',
+                        statusFilter: 'unpaid',
+                        unpaidOnly: true,
+                        overdueOnly: false,
+                        hasAttachmentsOnly: false,
+                        includeArchived: false,
+                        filtersExpanded: false,
+                      },
+                    })
+                  }}
+                  style={({ pressed }) => [styles.homeCountChip, pressed && { opacity: 0.92 }]}
+                >
+                  <Ionicons name="receipt-outline" size={16} color={colors.text} />
+                  <Text style={styles.homeCountChipText} numberOfLines={1}>
+                    {homeSummaryVisibility.counts ? tr('Active bills: {count}', { count: activeBillsCount }) : mask}
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => safeNavigate('Warranties', { initialStatusFilter: 'active' })}
+                  style={({ pressed }) => [styles.homeCountChip, pressed && { opacity: 0.92 }]}
+                >
+                  <Ionicons name="shield-outline" size={16} color={colors.text} />
+                  <Text style={styles.homeCountChipText} numberOfLines={1}>
+                    {homeSummaryVisibility.counts ? tr('Active warranties: {count}', { count: activeWCount }) : mask}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
 
           </View>
         </Surface>
@@ -10290,10 +10533,10 @@ function HomeScreen() {
 
             <View style={{ gap: themeSpacing.sm, marginTop: themeSpacing.sm }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap }}>
-                <Text style={styles.bodyText}>{tr('Show total unpaid')}</Text>
+                <Text style={styles.bodyText}>{tr('Show counts')}</Text>
                 <Switch
-                  value={homeSummaryVisibility.totalUnpaid}
-                  onValueChange={(v) => updateHomeSummaryVisibility({ ...homeSummaryVisibility, totalUnpaid: v })}
+                  value={homeSummaryVisibility.counts}
+                  onValueChange={(v) => updateHomeSummaryVisibility({ ...homeSummaryVisibility, counts: v })}
                 />
               </View>
 
@@ -10306,10 +10549,18 @@ function HomeScreen() {
               </View>
 
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap }}>
-                <Text style={styles.bodyText}>{tr('Show next due date')}</Text>
+                <Text style={styles.bodyText}>{tr('Show due today')}</Text>
                 <Switch
-                  value={homeSummaryVisibility.nextDue}
-                  onValueChange={(v) => updateHomeSummaryVisibility({ ...homeSummaryVisibility, nextDue: v })}
+                  value={homeSummaryVisibility.today}
+                  onValueChange={(v) => updateHomeSummaryVisibility({ ...homeSummaryVisibility, today: v })}
+                />
+              </View>
+
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeLayout.gap }}>
+                <Text style={styles.bodyText}>{tr('Show warranties')}</Text>
+                <Switch
+                  value={homeSummaryVisibility.warranties}
+                  onValueChange={(v) => updateHomeSummaryVisibility({ ...homeSummaryVisibility, warranties: v })}
                 />
               </View>
             </View>
@@ -10318,7 +10569,7 @@ function HomeScreen() {
               <AppButton
                 label={tr('Reset')}
                 variant="ghost"
-                onPress={() => updateHomeSummaryVisibility({ totalUnpaid: true, overdue: true, nextDue: true })}
+                onPress={() => updateHomeSummaryVisibility({ counts: true, overdue: true, today: true, warranties: true })}
               />
               <AppButton label={tr('Done')} onPress={() => setHomeSummarySettingsVisible(false)} />
             </View>
@@ -10384,6 +10635,7 @@ function WarrantiesScreenWithBoundary() {
 function WarrantiesScreen() {
   const supabase = useMemo(() => getSupabase(), [])
   const navigation = useNavigation<any>()
+  const route = useRoute<any>()
   const spacesCtx = useSpacesContext()
   const scrollRef = useRef<ScrollView | null>(null)
   const [items, setItems] = useState<Warranty[]>([])
@@ -10432,6 +10684,13 @@ function WarrantiesScreen() {
     const base = new Date()
     return new Date(base.getFullYear(), base.getMonth(), base.getDate())
   }, [])
+
+  useEffect(() => {
+    const initial = route.params?.initialStatusFilter
+    if (initial === 'active' || initial === 'expiring' || initial === 'expired') {
+      setWarrantyStatusFilter(initial)
+    }
+  }, [route.params?.initialStatusFilter])
 
   const openWarrantyAttachment = useCallback(async (warranty: Warranty) => {
     try {
@@ -11693,6 +11952,7 @@ function ReportsScreen() {
     archived: false,
   }))
   const [supplierQuery, setSupplierQuery] = useState('')
+  const [supplierDropdownOpen, setSupplierDropdownOpen] = useState(false)
   const [amountMin, setAmountMin] = useState('')
   const [amountMax, setAmountMax] = useState('')
   const [exportBusy, setExportBusy] = useState(false)
@@ -11924,6 +12184,11 @@ function ReportsScreen() {
     })
   }, [amountMax, amountMin, bills, dateMode, isPro, isStatusIncluded, range.end, range.start, supplierQuery])
 
+  const getAmountNumber = useCallback((bill: Bill): number => {
+    const n = Number((bill as any)?.amount)
+    return Number.isFinite(n) ? n : 0
+  }, [])
+
   const supplierOptions = useMemo(() => {
     const all = (bills || [])
       .map((b) => String(b.supplier || '').trim())
@@ -11936,13 +12201,13 @@ function ReportsScreen() {
 
   const totals = useMemo(() => {
     const totalBillsInRange = filtered.length
-    const totalAmountEur = filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? b.amount : 0), 0)
+    const totalAmountEur = filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? getAmountNumber(b) : 0), 0)
     const unpaidTotalEur = filtered.reduce((sum, b) => {
       if (!isBillUnpaid(b.status)) return sum
-      return sum + (b.currency === 'EUR' ? b.amount : 0)
+      return sum + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
     }, 0)
     return { totalBillsInRange, totalAmountEur, unpaidTotalEur }
-  }, [filtered])
+  }, [filtered, getAmountNumber])
 
   const series = useMemo(() => {
     const keyFn = groupBy === 'year' ? yyyyKey : yyyymmKey
@@ -11951,13 +12216,13 @@ function ReportsScreen() {
     for (const b of filtered) {
       const iso = getBillDateForMode(b, modeForDate)
       const key = keyFn(iso) || '—'
-      grouped[key] = (grouped[key] || 0) + (b.currency === 'EUR' ? b.amount : 0)
+      grouped[key] = (grouped[key] || 0) + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
     }
     const keys = Object.keys(grouped).sort()
     const max = keys.reduce((m, k) => Math.max(m, grouped[k] || 0), 0)
     const points = keys.map((k) => ({ key: k, value: grouped[k] || 0, pct: max > 0 ? (grouped[k] / max) * 100 : 0 }))
     return { points, max }
-  }, [dateMode, filtered, groupBy, isPro])
+  }, [dateMode, filtered, getAmountNumber, groupBy, isPro])
 
   const reportPalette = ['#2563EB', '#F97316', '#10B981', '#A855F7', '#0EA5E9', '#E11D48']
 
@@ -11972,7 +12237,7 @@ function ReportsScreen() {
       const statusKey = isBillUnpaid(b.status) ? 'unpaid' : b.status === 'paid' ? 'paid' : b.status === 'archived' ? 'archived' : null
       if (!statusKey || !statuses.includes(statusKey)) continue
       grouped[key] = grouped[key] || {}
-      grouped[key][statusKey] = (grouped[key][statusKey] || 0) + (b.currency === 'EUR' ? b.amount : 0)
+      grouped[key][statusKey] = (grouped[key][statusKey] || 0) + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
     }
     const keys = Object.keys(grouped).sort()
     const series = statuses.map((status) => {
@@ -11981,7 +12246,7 @@ function ReportsScreen() {
     })
     const max = series.reduce((m, s) => Math.max(m, ...(s.points.map((p) => p.value))), 0)
     return { keys, series, max }
-  }, [dateMode, filtered, getBillDateForMode, groupBy, isPro, selectedStatusList])
+  }, [dateMode, filtered, getAmountNumber, getBillDateForMode, groupBy, isPro, selectedStatusList])
 
   const tableRows = useMemo(() => {
     const modeForDate = isPro ? dateMode : 'due'
@@ -11995,9 +12260,9 @@ function ReportsScreen() {
         id: b.id,
         supplier: String(b.supplier || '').trim() || tr('Unknown'),
         date: getBillDateForMode(b, modeForDate),
-        amount: b.currency === 'EUR' ? `EUR ${b.amount.toFixed(2)}` : `${b.amount.toFixed(2)} ${b.currency || ''}`,
+        amount: b.currency === 'EUR' ? `EUR ${getAmountNumber(b).toFixed(2)}` : `${getAmountNumber(b).toFixed(2)} ${b.currency || ''}`,
       }))
-  }, [dateMode, filtered, getBillDateForMode, isPro, tr])
+  }, [dateMode, filtered, getAmountNumber, getBillDateForMode, isPro, tr])
 
   const lineSeries = useMemo(() => {
     if (isPro && selectedStatusList.length > 1) {
@@ -12042,8 +12307,8 @@ function ReportsScreen() {
 
     for (const b of filtered) {
       const supplier = String((b as any)?.supplier || '').trim() || tr('Unknown')
-      supplierTotals[supplier] = (supplierTotals[supplier] || 0) + (b.currency === 'EUR' ? b.amount : 0)
-      if (!maxBill || (b.currency === 'EUR' ? b.amount : 0) > ((maxBill.currency === 'EUR' ? maxBill.amount : 0) || 0)) {
+      supplierTotals[supplier] = (supplierTotals[supplier] || 0) + (b.currency === 'EUR' ? getAmountNumber(b) : 0)
+      if (!maxBill || (b.currency === 'EUR' ? getAmountNumber(b) : 0) > ((maxBill.currency === 'EUR' ? getAmountNumber(maxBill) : 0) || 0)) {
         maxBill = b
       }
     }
@@ -12056,11 +12321,11 @@ function ReportsScreen() {
     const lines = [
       `${tr('Bills in range')}: ${filtered.length}`,
       topSuppliers.length ? `${tr('Supplier')}:\n${topSuppliers.join('\n')}` : '',
-      maxBill ? `${tr('Total amount (EUR)')}: EUR ${(filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? b.amount : 0), 0)).toFixed(2)}` : '',
+      maxBill ? `${tr('Total amount (EUR)')}: EUR ${(filtered.reduce((sum, b) => sum + (b.currency === 'EUR' ? getAmountNumber(b) : 0), 0)).toFixed(2)}` : '',
     ].filter(Boolean)
 
     Alert.alert(tr('Reports'), lines.join('\n\n'))
-  }, [filtered, tr])
+  }, [filtered, getAmountNumber, tr])
 
   const reportPayload = useMemo(() => {
     const isAdvanced = isPro
@@ -13637,7 +13902,11 @@ function PayScreen() {
   }, [planList])
 
   const planTotal = useMemo(() => {
-    return planList.reduce((sum, b) => sum + Number(b?.amount || 0), 0)
+    return planList.reduce((sum, b) => {
+      const raw = (b as any)?.amount
+      const n = Number(String(raw ?? '').replace(',', '.'))
+      return sum + (Number.isFinite(n) ? n : 0)
+    }, 0)
   }, [planList])
 
   const formatMoney = useCallback((value: number, currency: string) => {
@@ -13646,6 +13915,12 @@ function PayScreen() {
     } catch {
       return `${Number(value || 0).toFixed(2)} ${currency || 'EUR'}`
     }
+  }, [])
+
+  const getAmountNumber = useCallback((bill: Bill): number => {
+    const raw = (bill as any)?.amount
+    const n = Number(String(raw ?? '').replace(',', '.'))
+    return Number.isFinite(n) ? n : 0
   }, [])
 
   async function makeQrDataUri(payload: string, opts: { width: number; margin?: number }) {
@@ -13659,7 +13934,7 @@ function PayScreen() {
     const iban = String(normalizeIban(bill.iban || '') || bill.iban || '').trim()
     const reference = String([bill.reference_model, bill.reference].filter(Boolean).join(' ').trim())
     const purpose = String(bill.purpose || '').trim()
-    const amountNum = Number(bill.amount || 0)
+    const amountNum = getAmountNumber(bill)
     const currency = String(bill.currency || '').toUpperCase()
     const amount = Number.isFinite(amountNum) ? amountNum.toFixed(2) : ''
 
@@ -14006,8 +14281,8 @@ function PayScreen() {
   function buildPaymentQrPayload(bill: Bill): string | null {
     const iban = normalizeIban(bill.iban || '')
     if (!iban) return null
-    const amount = Number(bill.amount || 0)
-    if (!amount || Number.isNaN(amount)) return null
+    const amount = getAmountNumber(bill)
+    if (!Number.isFinite(amount) || amount <= 0) return null
     const currency = String(bill.currency || 'EUR').toUpperCase()
     if (currency !== 'EUR') return null
     const creditor = String(bill.creditor_name || bill.supplier || '').trim()
@@ -14040,7 +14315,7 @@ function PayScreen() {
         Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
         return
       }
-      Alert.alert(tr('QR unavailable'), tr('Missing IBAN or amount.'))
+      Alert.alert(tr('QR unavailable'), tr('Missing IBAN, amount, or creditor name.'))
       return
     }
     setQrBill(bill)
@@ -14258,50 +14533,46 @@ function PayScreen() {
                 const isOverdue = dueDate && todayDate ? dueDate.getTime() < todayDate.getTime() : false
                 const canQr = !!buildPaymentQrPayload(item)
                 const parts = buildPaymentCopyParts(item)
+                const amountNum = getAmountNumber(item)
                 return (
                 <Surface elevated style={styles.billRowCard}>
                   <View style={styles.billRowHeader}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.cardTitle}>{item.supplier}</Text>
-                      <Text style={styles.payBillMeta}>
-                        {item.currency} {item.amount.toFixed(2)} • {tr('Due')}: <Text style={isOverdue ? styles.payDueOverdue : styles.payDueText}>{item.due_date}</Text>
-                        {(item as any).pay_date ? ` • ${tr('Planned')}: ${(item as any).pay_date}` : ''}
-                      </Text>
-                    </View>
-                    <View style={styles.payAmountWrap}>
-                      <Text style={styles.payAmountText}>{formatMoney(item.amount, item.currency)}</Text>
-                      <Text style={styles.payAmountCaption}>{tr('To pay')}</Text>
+                      <View style={styles.payInfoRow}>
+                        <Text style={styles.payInfoLabelToPay}>{tr('To pay')}:</Text>
+                        <Text style={styles.payInfoValue}>{formatMoney(amountNum, item.currency)}</Text>
+                      </View>
+                      <View style={styles.payInfoRow}>
+                        <Text style={styles.payInfoLabelDue}>{tr('Due')}:</Text>
+                        <Text style={styles.payInfoValue}>{item.due_date}</Text>
+                      </View>
                     </View>
 
-                    <Pressable
-                      onPress={() => {
-                        if (!canQr) {
-                          const currency = String(item.currency || 'EUR').toUpperCase()
-                          if (currency !== 'EUR') Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
-                          else Alert.alert(tr('QR unavailable'), tr('Missing IBAN or amount.'))
-                          return
-                        }
-                        openPaymentQr(item)
-                      }}
-                      style={({ pressed }) => [styles.payQrThumbWrap, pressed ? { opacity: 0.92 } : null]}
-                      hitSlop={6}
-                    >
-                      {canQr && qrThumbs[item.id] ? (
-                        <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrThumb} />
-                      ) : (
-                        <View style={styles.payQrThumbPlaceholder}>
-                          <Ionicons name="qr-code-outline" size={18} color={themeColors.textMuted} />
-                        </View>
-                      )}
-                    </Pressable>
-
-                    <Pressable onPress={()=>toggleSel(item.id)}>
-                      <Ionicons
-                        name={selected[item.id] ? 'checkbox-outline' : 'square-outline'}
-                        size={20}
-                        color={themeColors.primary}
-                      />
-                    </Pressable>
+                    <View style={styles.payRightColumn}>
+                      <Pressable onPress={() => toggleSel(item.id)} hitSlop={6}>
+                        <Ionicons
+                          name={selected[item.id] ? 'checkbox-outline' : 'square-outline'}
+                          size={20}
+                          color={themeColors.primary}
+                        />
+                      </Pressable>
+                      <Pressable
+                        onPress={() => {
+                          if (!canQr) {
+                            const currency = String(item.currency || 'EUR').toUpperCase()
+                            if (currency !== 'EUR') Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
+                            else Alert.alert(tr('QR unavailable'), tr('Missing IBAN, amount, or creditor name.'))
+                            return
+                          }
+                          openPaymentQr(item)
+                        }}
+                        style={({ pressed }) => [styles.payQrIconWrap, pressed ? { opacity: 0.9 } : null]}
+                        hitSlop={6}
+                      >
+                        <Ionicons name="qr-code-outline" size={20} color={canQr ? themeColors.primary : themeColors.textMuted} />
+                      </Pressable>
+                    </View>
                   </View>
                   <View style={styles.billActionsRow}>
                     <Chip
@@ -14346,9 +14617,9 @@ function PayScreen() {
                     />
                   </View>
                   <View style={styles.payAdjustRow}>
-                    <AppButton label={tr('+1d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 1)} />
-                    <AppButton label={tr('+2d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 2)} />
-                    <AppButton label={tr('+7d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 7)} />
+                    <AppButton label={tr('+1d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 1)} style={{ flex: 1 }} />
+                    <AppButton label={'+3d'} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 3)} style={{ flex: 1 }} />
+                    <AppButton label={tr('+7d')} variant="ghost" iconName="time-outline" onPress={()=>postponeBill(item, 7)} style={{ flex: 1 }} />
                   </View>
                   <View style={styles.payDueRow}>
                     <AppButton
@@ -14356,12 +14627,14 @@ function PayScreen() {
                       variant="ghost"
                       iconName="calendar-outline"
                       onPress={() => postponeBillDue(item, 1)}
+                      style={{ flex: 1 }}
                     />
                     <AppButton
                       label={`${tr('Due')} ${tr('+7d')}`}
                       variant="ghost"
                       iconName="calendar-outline"
                       onPress={() => postponeBillDue(item, 7)}
+                      style={{ flex: 1 }}
                     />
                   </View>
                 </Surface>
@@ -14906,6 +15179,65 @@ function SettingsScreen() {
   const [inboxConfigured, setInboxConfigured] = useState(false)
   const [inboxError, setInboxError] = useState<string | null>(null)
 
+  const payerAvatarKey = useCallback((payerId: string) => {
+    return `billbox.payer.avatar.${String(payerId || '').trim()}`
+  }, [])
+
+  const [payerAvatars, setPayerAvatars] = useState<Record<string, string | null>>({})
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const ids = (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id)).map((s) => String(s.id || '').trim()).filter(Boolean)
+        if (!ids.length) {
+          setPayerAvatars({})
+          return
+        }
+        const keys = ids.map((id) => payerAvatarKey(id))
+        const pairs = await AsyncStorage.multiGet(keys)
+        const next: Record<string, string | null> = {}
+        for (let i = 0; i < ids.length; i++) {
+          next[ids[i]] = pairs[i]?.[1] ? String(pairs[i][1]) : null
+        }
+        setPayerAvatars(next)
+      } catch {
+        setPayerAvatars({})
+      }
+    })()
+  }, [payerAvatarKey, spacesCtx.spaces])
+
+  const pickPayerAvatar = useCallback(async (payerId: string) => {
+    try {
+      const pid = String(payerId || '').trim()
+      if (!pid) return
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.9 })
+      if ((res as any)?.canceled) return
+      const asset = (res as any)?.assets?.[0]
+      const uri = String(asset?.uri || '').trim()
+      if (!uri) return
+
+      const target = `${FileSystem.documentDirectory}payer-avatar-${pid}-${Date.now()}.jpg`
+      try { await FileSystem.copyAsync({ from: uri, to: target }) } catch {}
+      const storedUri = (await FileSystem.getInfoAsync(target)).exists ? target : uri
+
+      await AsyncStorage.setItem(payerAvatarKey(pid), storedUri)
+      setPayerAvatars((prev) => ({ ...prev, [pid]: storedUri }))
+    } catch {
+      Alert.alert(tr('Error'), tr('Open failed'))
+    }
+  }, [payerAvatarKey])
+
+  const removePayerAvatar = useCallback(async (payerId: string) => {
+    try {
+      const pid = String(payerId || '').trim()
+      if (!pid) return
+      await AsyncStorage.removeItem(payerAvatarKey(pid))
+      setPayerAvatars((prev) => ({ ...prev, [pid]: null }))
+    } catch {
+      Alert.alert(tr('Error'), tr('Save failed'))
+    }
+  }, [payerAvatarKey])
+
   const languageOptions = useMemo(() => {
     const opts: Array<{ code: Lang; key: string }> = [
       { code: 'de', key: 'german' },
@@ -15028,12 +15360,20 @@ function SettingsScreen() {
             const p2Slot = payerLabelFromSpaceId('personal2')
             const p2Locked = entitlements.plan !== 'pro'
 
+            const p1Avatar = payerAvatars['personal'] || null
+            const p2Avatar = payerAvatars['personal2'] || null
+
             if (!p1) return null
 
             return (
               <View style={{ borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
-                  <Text style={{ fontWeight: '600' }}>{p1Slot}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
+                    <View style={{ width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' }}>
+                      {p1Avatar ? <Image source={{ uri: p1Avatar }} style={{ width: 34, height: 34 }} /> : <Ionicons name="person-outline" size={16} color={themeColors.textMuted} />}
+                    </View>
+                    <Text style={{ fontWeight: '600' }}>{p1Slot}</Text>
+                  </View>
                   {p1Active ? <Badge label={tr('Active')} tone="success" /> : null}
                 </View>
                 <Pressable
@@ -15060,11 +15400,30 @@ function SettingsScreen() {
                       setRenameVisible(true)
                     }}
                   />
+                  <AppButton
+                    label={tr('Change photo')}
+                    variant="secondary"
+                    iconName="image-outline"
+                    onPress={() => { void pickPayerAvatar('personal') }}
+                  />
+                  {p1Avatar ? (
+                    <AppButton
+                      label={tr('Remove photo')}
+                      variant="ghost"
+                      iconName="trash-outline"
+                      onPress={() => { void removePayerAvatar('personal') }}
+                    />
+                  ) : null}
                 </View>
 
                 <View style={{ marginTop: themeSpacing.sm, paddingTop: themeSpacing.xs, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: themeColors.border }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
-                    <Text style={{ fontWeight: '600' }}>{p2Slot}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
+                      <View style={{ width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' }}>
+                        {p2Avatar ? <Image source={{ uri: p2Avatar }} style={{ width: 34, height: 34 }} /> : <Ionicons name="person-outline" size={16} color={themeColors.textMuted} />}
+                      </View>
+                      <Text style={{ fontWeight: '600' }}>{p2Slot}</Text>
+                    </View>
                     {p2Active ? <Badge label={tr('Active')} tone="success" /> : null}
                   </View>
 
@@ -16050,8 +16409,8 @@ const styles = StyleSheet.create({
   billRowHighlighted: { borderWidth: 1, borderColor: '#22C55E' },
   billRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: themeLayout.gap, flexWrap: 'wrap' },
   billActionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.xs, marginTop: themeSpacing.xs },
-  payAdjustRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 },
-  payDueRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6 },
+  payAdjustRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: 6, marginTop: 4 },
+  payDueRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: 6, marginTop: 6 },
   payBillMeta: { fontSize: 13, color: '#374151' },
   payDueText: { fontWeight: '700', color: '#DC2626' },
   payDueOverdue: { fontWeight: '700', color: '#B91C1C' },
@@ -16061,6 +16420,12 @@ const styles = StyleSheet.create({
   payQrThumbWrap: { width: 44, height: 44, borderRadius: 10, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
   payQrThumb: { width: 44, height: 44 },
   payQrThumbPlaceholder: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  payRightColumn: { alignItems: 'center', justifyContent: 'flex-start', gap: 10 },
+  payQrIconWrap: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
+  payInfoRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 2 },
+  payInfoLabelToPay: { fontSize: 13, fontWeight: '700', color: '#2563EB' },
+  payInfoLabelDue: { fontSize: 13, fontWeight: '700', color: '#DC2626' },
+  payInfoValue: { fontSize: 13, color: '#374151', fontWeight: '600' },
   payCopyMiniRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
   payCopyMiniBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
   payCopyMiniText: { fontSize: 12, fontWeight: '700', color: '#334155' },
@@ -16190,6 +16555,72 @@ const styles = StyleSheet.create({
   homeMetricValue: { fontSize: 16, fontWeight: '800', color: themeColors.text },
   homeMetricSubValue: { marginTop: 2, fontSize: 11, color: '#475569', fontWeight: '600' },
   homeMetricLabel: { marginTop: 4, fontSize: 11, color: themeColors.textMuted },
+
+  homeProfilesRow: { flexDirection: 'row', gap: themeSpacing.sm },
+  homeProfileChip: {
+    flex: 1,
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: themeSpacing.sm,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+    backgroundColor: '#FFFFFF',
+  },
+  homeProfileChipActive: { borderColor: themeColors.primary, borderWidth: 1, backgroundColor: '#EFF6FF' },
+  homeProfileChipPlaceholder: { opacity: 0.9 },
+  homeProfileAvatarWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  homeProfileAvatarImg: { width: 28, height: 28, resizeMode: 'cover' },
+  homeProfileAvatarFallback: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
+  homeProfileAvatarInitials: { fontSize: 11, fontWeight: '800', color: '#0F172A' },
+  homeProfileName: { fontSize: 13, fontWeight: '800', color: themeColors.text },
+  homeProfileHint: { marginTop: 1, fontSize: 10, color: themeColors.textMuted },
+  homeProfileActiveDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: themeColors.primary },
+
+  homeSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: themeSpacing.sm,
+    paddingVertical: 9,
+    paddingHorizontal: themeSpacing.sm,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  homeSummaryRowDanger: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
+  homeSummaryRowWarn: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
+  homeSummaryRowInfo: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
+  homeSummaryRowNeutral: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
+  homeSummaryRowTitle: { fontSize: 13, fontWeight: '800', color: themeColors.text },
+  homeSummaryRowValue: { fontSize: 12, fontWeight: '800', color: themeColors.text, marginRight: 2 },
+
+  homeCountsRow: { flexDirection: 'row', gap: themeSpacing.sm },
+  homeCountChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: themeSpacing.xs,
+    paddingVertical: 10,
+    paddingHorizontal: themeSpacing.sm,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+    backgroundColor: '#FFFFFF',
+  },
+  homeCountChipText: { flex: 1, fontSize: 12, fontWeight: '800', color: themeColors.text },
+
   statCard: {
     paddingVertical: themeSpacing.xs,
     paddingHorizontal: themeSpacing.sm,
