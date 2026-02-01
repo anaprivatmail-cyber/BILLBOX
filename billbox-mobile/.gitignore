@@ -45,3 +45,6 @@ tools/missing-phrases.txt
 # generated native folders
 /ios
 /android
+
+# local secrets (never commit)
+/secrets/
