@@ -220,7 +220,8 @@ export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30,
 
   const ids: string[] = []
   for (const days of daysBefore) {
-    const when = new Date(expires.getTime() - days * 24 * 3600 * 1000)
+    const day = new Date(expires.getTime() - days * 24 * 3600 * 1000)
+    const when = atLocalHour(day, 10)
     if (when.getTime() <= Date.now()) continue
     try {
       const id = await Notifications.scheduleNotificationAsync({

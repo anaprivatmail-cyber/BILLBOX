@@ -2636,7 +2636,15 @@ function BillDetailsScreen() {
   const route = useRoute<any>()
   const navigation = useNavigation<any>()
   const supabase = useMemo(() => getSupabase(), [])
-  const bill = useMemo(() => sanitizeBillForRoute(route.params?.bill), [route.params?.bill])
+  const routeBill = useMemo(() => sanitizeBillForRoute(route.params?.bill), [route.params?.bill])
+  const billIdParam = useMemo(() => {
+    const raw = (route as any)?.params?.billId
+    const fallback = routeBill?.id
+    const id = raw ?? fallback
+    return String(id || '').trim() || null
+  }, [route, routeBill?.id])
+  const [bill, setBill] = useState<Bill | null>(routeBill)
+  const [billLoadError, setBillLoadError] = useState<string | null>(null)
   const spaceIdOverride = typeof route.params?.spaceIdOverride === 'string' ? String(route.params.spaceIdOverride) : null
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
@@ -2675,7 +2683,71 @@ function BillDetailsScreen() {
     setDangerConfirm({ title, message, onConfirm, confirmLabel })
   }, [])
 
-  const effectiveSpaceId = spaceIdOverride || spaceId
+  const effectiveSpaceId = spaceIdOverride || spaceId || space?.id || 'default'
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setBillLoadError(null)
+
+      if (routeBill) {
+        setBill(routeBill)
+        return
+      }
+
+      const id = billIdParam
+      if (!id) {
+        setBill(null)
+        setBillLoadError(tr('Could not open this bill.'))
+        return
+      }
+
+      if (spaceLoading || !space) return
+
+      try {
+        if (supabase) {
+          const { data, error } = await (supabase as any)
+            .from('bills')
+            .select('*')
+            .eq('id', id)
+            .maybeSingle()
+          if (cancelled) return
+          if (error || !data) {
+            setBill(null)
+            setBillLoadError(tr('Could not open this bill.'))
+            return
+          }
+          const safe = sanitizeBillForRoute(data)
+          if (!safe) {
+            setBill(null)
+            setBillLoadError(tr('Could not open this bill.'))
+            return
+          }
+          setBill(safe)
+          return
+        }
+
+        const locals = await loadLocalBills(effectiveSpaceId)
+        const found = (locals || []).find((b: any) => String(b?.id || '') === id) || null
+        if (cancelled) return
+        const safe = sanitizeBillForRoute(found)
+        if (!safe) {
+          setBill(null)
+          setBillLoadError(tr('Could not open this bill.'))
+          return
+        }
+        setBill(safe)
+      } catch {
+        if (!cancelled) {
+          setBill(null)
+          setBillLoadError(tr('Could not open this bill.'))
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [billIdParam, effectiveSpaceId, routeBill, spaceLoading, space, supabase])
 
   useEffect(() => {
     setInvoiceNumber(String((bill as any)?.invoice_number || ''))
@@ -2712,8 +2784,13 @@ function BillDetailsScreen() {
 
   useEffect(() => { (async ()=>{
     if (!bill || spaceLoading || !space) return
-    if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, effectiveSpaceId))
-    else setAttachments(await listLocalAttachments(effectiveSpaceId, 'bills', bill.id))
+    try {
+      if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, effectiveSpaceId))
+      else setAttachments(await listLocalAttachments(effectiveSpaceId, 'bills', bill.id))
+    } catch {
+      // Never crash the details screen due to attachments listing issues.
+      setAttachments([])
+    }
 
     try {
       if (supabase) {
@@ -2732,8 +2809,12 @@ function BillDetailsScreen() {
 
   async function refresh() {
     if (!bill || spaceLoading || !space) return
-    if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, effectiveSpaceId))
-    else setAttachments(await listLocalAttachments(effectiveSpaceId, 'bills', bill.id))
+    try {
+      if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'bills', bill.id, effectiveSpaceId))
+      else setAttachments(await listLocalAttachments(effectiveSpaceId, 'bills', bill.id))
+    } catch {
+      setAttachments([])
+    }
   }
 
   async function addImage() {
@@ -2836,6 +2917,19 @@ function BillDetailsScreen() {
     } finally {
       setInvoiceSaving(false)
     }
+  }
+
+  if (billLoadError && !bill && !spaceLoading && space) {
+    return (
+      <Screen scroll={false}>
+        <View style={styles.centered}>
+          <Text style={styles.mutedText}>{billLoadError}</Text>
+          <View style={{ marginTop: themeSpacing.sm }}>
+            <AppButton label={tr('Back')} variant="secondary" iconName="chevron-back-outline" onPress={() => navigation.goBack()} />
+          </View>
+        </View>
+      </Screen>
+    )
   }
 
   if (!bill || spaceLoading || !space) {
@@ -8541,7 +8635,8 @@ function BillsListScreen() {
             onPress: () => {
               try {
                 const safe = sanitizeBillForRoute(first)
-                if (safe) navigation.navigate('Bill Details', { bill: safe })
+                const billSpaceId = String((first as any)?.__spaceId || spaceId || '')
+                if (safe) navigation.navigate('Bill Details', { billId: safe.id, spaceIdOverride: billSpaceId })
                 else Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
               } catch {}
             },
@@ -9263,7 +9358,7 @@ function BillsListScreen() {
               Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
               return
             }
-            navigation.navigate('Bill Details', { bill: safe, spaceIdOverride: billSpaceId })
+            navigation.navigate('Bill Details', { billId: safe.id, spaceIdOverride: billSpaceId })
           }}
           style={({ pressed }) => [styles.billCardPressable, pressed && styles.billCardPressed]}
           hitSlop={8}
@@ -10604,38 +10699,57 @@ function HomeScreen() {
                 const avatarUri = canShowAvatar ? (payerAvatars[slot.id] || null) : null
                 const initials = initialsFromName(slot.name)
                 return (
-                  <Pressable
+                  <View
                     key={slot.id}
-                    onPress={() => handlePayerChange(slot.id)}
-                    style={({ pressed }) => [
+                    style={[
                       styles.homeProfileChip,
                       isActive && styles.homeProfileChipActive,
                       (isLocked || isCreate) && styles.homeProfileChipPlaceholder,
-                      pressed && { opacity: 0.92 },
                     ]}
                   >
-                    <View style={styles.homeProfileAvatarWrap}>
-                      {avatarUri ? (
-                        <Image source={{ uri: avatarUri }} style={styles.homeProfileAvatarImg} />
+                    <Pressable
+                      onPress={() => {
+                        if (!canShowAvatar || isLocked || isCreate) {
+                          handlePayerChange(slot.id)
+                          return
+                        }
+                        void pickPayerAvatar(slot.id)
+                      }}
+                      style={({ pressed }) => [pressed && { opacity: 0.9 }]}
+                      hitSlop={8}
+                      accessibilityLabel={tr('Change photo')}
+                    >
+                      <View style={styles.homeProfileAvatarWrap}>
+                        {avatarUri ? (
+                          <Image source={{ uri: avatarUri }} style={styles.homeProfileAvatarImg} />
+                        ) : (
+                          <View style={styles.homeProfileAvatarFallback}>
+                            <Text style={styles.homeProfileAvatarInitials}>{initials}</Text>
+                          </View>
+                        )}
+                      </View>
+                    </Pressable>
+
+                    <Pressable
+                      onPress={() => handlePayerChange(slot.id)}
+                      style={({ pressed }) => [
+                        { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center' },
+                        pressed && { opacity: 0.92 },
+                      ]}
+                      hitSlop={8}
+                    >
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.homeProfileName} numberOfLines={1}>{slot.name}</Text>
+                      </View>
+                      {isLocked ? (
+                        <Ionicons name="lock-closed-outline" size={16} color={colors.textMuted} />
+                      ) : isActive ? (
+                        <View style={styles.homeProfileActiveDot} />
                       ) : (
-                        <View style={styles.homeProfileAvatarFallback}>
-                          <Text style={styles.homeProfileAvatarInitials}>{initials}</Text>
-                        </View>
+                        <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
                       )}
-                    </View>
-
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={styles.homeProfileName} numberOfLines={1}>{slot.name}</Text>
-                    </View>
-
-                    {isLocked ? (
-                      <Ionicons name="lock-closed-outline" size={16} color={colors.textMuted} />
-                    ) : isActive ? (
-                      <View style={styles.homeProfileActiveDot} />
-                    ) : (
-                      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-                    )}
-                  </Pressable>
+                    </Pressable>
+                  </View>
                 )
               })}
             </View>
@@ -10712,9 +10826,13 @@ function HomeScreen() {
                     },
                   })
                 }}
-                style={({ pressed }) => [styles.homeSummaryRow, styles.homeSummaryRowInfo, pressed && { opacity: 0.92 }]}
+                style={({ pressed }) => [
+                  styles.homeSummaryRow,
+                  todayCount > 0 ? styles.homeSummaryRowWarn : styles.homeSummaryRowNeutral,
+                  pressed && { opacity: 0.92 },
+                ]}
               >
-                <Ionicons name="calendar-outline" size={18} color="#1D4ED8" />
+                <Ionicons name={todayCount > 0 ? 'time-outline' : 'checkmark-circle-outline'} size={18} color={todayCount > 0 ? '#92400E' : '#166534'} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.homeSummaryRowTitle} numberOfLines={1}>
                     {homeSummaryVisibility.today
@@ -10734,11 +10852,11 @@ function HomeScreen() {
                 onPress={() => safeNavigate('Warranties', { initialStatusFilter: 'expiring' })}
                 style={({ pressed }) => [
                   styles.homeSummaryRow,
-                  expWCount > 0 ? styles.homeSummaryRowWarn : styles.homeSummaryRowNeutral,
+                  expWCount > 0 ? styles.homeSummaryRowDanger : styles.homeSummaryRowNeutral,
                   pressed && { opacity: 0.92 },
                 ]}
               >
-                <Ionicons name={expWCount > 0 ? 'time-outline' : 'shield-checkmark-outline'} size={18} color={expWCount > 0 ? '#92400E' : '#166534'} />
+                <Ionicons name={expWCount > 0 ? 'time-outline' : 'shield-checkmark-outline'} size={18} color={expWCount > 0 ? '#B91C1C' : '#166534'} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.homeSummaryRowTitle} numberOfLines={1}>
                     {homeSummaryVisibility.warranties
@@ -10979,10 +11097,10 @@ function HomeScreen() {
   )
 }
 
-class WarrantiesErrorBoundary extends React.Component<{ requestId: string; children: React.ReactNode }, { hasError: boolean; error: any }> {
+class WarrantiesErrorBoundary extends React.Component<{ requestId: string; children: React.ReactNode }, { hasError: boolean; error: any; showDetails: boolean }> {
   constructor(props: any) {
     super(props)
-    this.state = { hasError: false, error: null }
+    this.state = { hasError: false, error: null, showDetails: false }
   }
 
   static getDerivedStateFromError(error: any) {
@@ -11000,11 +11118,148 @@ class WarrantiesErrorBoundary extends React.Component<{ requestId: string; child
       <Screen scroll={false}>
         <View style={styles.centered}>
           <Text style={styles.mutedText}>{tr('Unknown error')}</Text>
-          <Text style={styles.mutedText}>{tr('Request ID')}: {this.props.requestId}</Text>
+          <Pressable onPress={() => this.setState((s) => ({ ...s, showDetails: !s.showDetails }))} hitSlop={8}>
+            <Text style={styles.mutedText}>{tr('Request ID')}: {this.props.requestId}</Text>
+            <Text style={[styles.mutedText, { marginTop: 6 }]}>{this.state.showDetails ? tr('Hide details') : tr('Show details')}</Text>
+          </Pressable>
+
+          {this.state.showDetails ? (
+            <View style={{ marginTop: themeSpacing.sm, width: '100%', maxWidth: 720 }}>
+              <Text style={[styles.mutedText, { fontWeight: '700' }]}>{tr('Error')}</Text>
+              <Text selectable style={styles.mutedText}>
+                {String((this.state.error as any)?.message || this.state.error || '')}
+              </Text>
+              {((this.state.error as any)?.stack) ? (
+                <Text selectable style={[styles.mutedText, { marginTop: 8 }]}>
+                  {String((this.state.error as any).stack)}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </Screen>
     )
   }
+}
+
+class ReportsErrorBoundary extends React.Component<{ requestId: string; children: React.ReactNode }, { hasError: boolean; error: any; showDetails: boolean }> {
+  constructor(props: any) {
+    super(props)
+    this.state = { hasError: false, error: null, showDetails: false }
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error: any, info: any) {
+    const { requestId } = this.props
+    console.error(`[reports] route=Reports requestId=${requestId}`, error, info)
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children
+    return (
+      <Screen scroll={false}>
+        <View style={styles.centered}>
+          <Text style={styles.mutedText}>{tr('Unknown error')}</Text>
+          <Pressable onPress={() => this.setState((s) => ({ ...s, showDetails: !s.showDetails }))} hitSlop={8}>
+            <Text style={styles.mutedText}>{tr('Request ID')}: {this.props.requestId}</Text>
+            <Text style={[styles.mutedText, { marginTop: 6 }]}>{this.state.showDetails ? tr('Hide details') : tr('Show details')}</Text>
+          </Pressable>
+
+          {this.state.showDetails ? (
+            <View style={{ marginTop: themeSpacing.sm, width: '100%', maxWidth: 720 }}>
+              <Text style={[styles.mutedText, { fontWeight: '700' }]}>{tr('Error')}</Text>
+              <Text selectable style={styles.mutedText}>
+                {String((this.state.error as any)?.message || this.state.error || '')}
+              </Text>
+              {((this.state.error as any)?.stack) ? (
+                <Text selectable style={[styles.mutedText, { marginTop: 8 }]}>
+                  {String((this.state.error as any).stack)}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      </Screen>
+    )
+  }
+}
+
+function ReportsScreenWithBoundary() {
+  const requestIdRef = useRef<string>(createRequestId('reports'))
+  const requestId = requestIdRef.current
+
+  useEffect(() => {
+    console.info(`[nav] route=Reports requestId=${requestId}`)
+  }, [requestId])
+
+  return (
+    <ReportsErrorBoundary requestId={requestId}>
+      <ReportsScreen />
+    </ReportsErrorBoundary>
+  )
+}
+
+class BillDetailsErrorBoundary extends React.Component<{ requestId: string; children: React.ReactNode }, { hasError: boolean; error: any; showDetails: boolean }> {
+  constructor(props: any) {
+    super(props)
+    this.state = { hasError: false, error: null, showDetails: false }
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error: any, info: any) {
+    const { requestId } = this.props
+    console.error(`[bill-details] route=BillDetails requestId=${requestId}`, error, info)
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children
+    return (
+      <Screen scroll={false}>
+        <View style={styles.centered}>
+          <Text style={styles.mutedText}>{tr('Unknown error')}</Text>
+          <Pressable onPress={() => this.setState((s) => ({ ...s, showDetails: !s.showDetails }))} hitSlop={8}>
+            <Text style={styles.mutedText}>{tr('Request ID')}: {this.props.requestId}</Text>
+            <Text style={[styles.mutedText, { marginTop: 6 }]}>{this.state.showDetails ? tr('Hide details') : tr('Show details')}</Text>
+          </Pressable>
+
+          {this.state.showDetails ? (
+            <View style={{ marginTop: themeSpacing.sm, width: '100%', maxWidth: 720 }}>
+              <Text style={[styles.mutedText, { fontWeight: '700' }]}>{tr('Error')}</Text>
+              <Text selectable style={styles.mutedText}>
+                {String((this.state.error as any)?.message || this.state.error || '')}
+              </Text>
+              {((this.state.error as any)?.stack) ? (
+                <Text selectable style={[styles.mutedText, { marginTop: 8 }]}>
+                  {String((this.state.error as any).stack)}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      </Screen>
+    )
+  }
+}
+
+function BillDetailsScreenWithBoundary() {
+  const requestIdRef = useRef<string>(createRequestId('bill-details'))
+  const requestId = requestIdRef.current
+
+  useEffect(() => {
+    console.info(`[nav] route=Bill Details requestId=${requestId}`)
+  }, [requestId])
+
+  return (
+    <BillDetailsErrorBoundary requestId={requestId}>
+      <BillDetailsScreen />
+    </BillDetailsErrorBoundary>
+  )
 }
 
 function WarrantiesScreenWithBoundary() {
@@ -11730,14 +11985,14 @@ function WarrantiesScreen() {
             }}
             style={({ pressed }) => [
               styles.homeSummaryRow,
-              expiringSoon30.length ? styles.homeSummaryRowWarn : styles.homeSummaryRowNeutral,
+              expiringSoon30.length ? styles.homeSummaryRowDanger : styles.homeSummaryRowNeutral,
               pressed && { opacity: 0.92 },
             ]}
           >
             <Ionicons
               name={expiringSoon30.length ? 'time-outline' : 'shield-checkmark-outline'}
               size={18}
-              color={expiringSoon30.length ? '#92400E' : '#166534'}
+              color={expiringSoon30.length ? '#B91C1C' : '#166534'}
             />
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text style={styles.homeSummaryRowTitle} numberOfLines={1}>
@@ -11850,21 +12105,27 @@ function WarrantiesScreen() {
             </View>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm }}>
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
-                <AppInput
-                  placeholder="YYYY-MM-DD"
-                  value={purchaseDate}
-                  onChangeText={setPurchaseDate}
-                  hint={tr('Purchase date')}
-                />
+                <Text style={styles.mutedText}>{tr('Start date')}</Text>
+                <Pressable
+                  onPress={() => openDatePicker('purchase')}
+                  style={({ pressed }) => [styles.dateButton, pressed && { opacity: 0.92 }]}
+                  hitSlop={8}
+                >
+                  <Text style={styles.dateButtonText}>{purchaseDate || 'YYYY-MM-DD'}</Text>
+                  <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
+                </Pressable>
               </View>
 
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
-                <AppInput
-                  placeholder="YYYY-MM-DD"
-                  value={expiresAt}
-                  onChangeText={setExpiresAt}
-                  hint={tr('Expires')}
-                />
+                <Text style={styles.mutedText}>{tr('End date')}</Text>
+                <Pressable
+                  onPress={() => openDatePicker('expires')}
+                  style={({ pressed }) => [styles.dateButton, pressed && { opacity: 0.92 }]}
+                  hitSlop={8}
+                >
+                  <Text style={styles.dateButtonText}>{expiresAt || 'YYYY-MM-DD'}</Text>
+                  <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
+                </Pressable>
               </View>
 
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
@@ -12271,7 +12532,7 @@ function WarrantyDetailsScreen() {
                       Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
                       return
                     }
-                    navigation.navigate('Bill Details', { bill: safe })
+                    navigation.navigate('Bill Details', { billId: safe.id, spaceIdOverride: spaceId || null })
                   }}
                 />
               </>
@@ -12679,22 +12940,6 @@ function ReportsScreen() {
     return k
   }, [groupBy])
 
-  const barLabelStep = useMemo(() => {
-    const n = series.points.length
-    if (n <= 8) return 1
-    return Math.max(1, Math.ceil(n / 6))
-  }, [series.points.length])
-
-  const shouldShowBarValueLabels = useMemo(() => {
-    return series.points.length > 0 && series.points.length <= 6
-  }, [series.points.length])
-
-  const lineLabelStep = useMemo(() => {
-    const n = lineSeries[0]?.points.length || 0
-    if (n <= 8) return 1
-    return Math.max(1, Math.ceil(n / 6))
-  }, [lineSeries])
-
   const supplierOptions = useMemo(() => {
     const all = (bills || [])
       .map((b) => String(b.supplier || '').trim())
@@ -12801,6 +13046,22 @@ function ReportsScreen() {
       return { id: seriesItem.id, label: seriesItem.label, color: seriesItem.color, points }
     })
   }, [lineMax, lineSeries, reportsChartSize.height, reportsChartSize.width])
+
+  const barLabelStep = useMemo(() => {
+    const n = series.points.length
+    if (n <= 8) return 1
+    return Math.max(1, Math.ceil(n / 6))
+  }, [series.points.length])
+
+  const shouldShowBarValueLabels = useMemo(() => {
+    return series.points.length > 0 && series.points.length <= 6
+  }, [series.points.length])
+
+  const lineLabelStep = useMemo(() => {
+    const n = lineSeries[0]?.points.length || 0
+    if (n <= 8) return 1
+    return Math.max(1, Math.ceil(n / 6))
+  }, [lineSeries])
 
   const showBasicInsights = useCallback(() => {
     if (!filtered.length) {
@@ -13498,7 +13759,7 @@ function ReportsScreen() {
                     <Text style={[styles.mutedText, { width: 96 }]}>{tr('Due')}</Text>
                     <Text style={[styles.mutedText, { width: 120, textAlign: 'right' }]}>{tr('Amount')}</Text>
                   </View>
-                  {tableRows.map((row) => (
+                  {tableRows.map((row, idx) => (
                     <View key={row.id} style={[styles.reportTableRow, idx % 2 === 1 ? styles.reportTableRowAlt : null]}>
                       <Text style={[styles.bodyText, { flex: 1 }]} numberOfLines={1}>{row.supplier}</Text>
                       <Text style={[styles.mutedText, { width: 96 }]}>{row.date || '—'}</Text>
@@ -14241,7 +14502,7 @@ function ExportsScreen() {
                           Alert.alert(tr('Open failed'), tr('Could not open this bill.'))
                           return
                         }
-                        navigation.navigate('Bill Details', { bill: safe })
+                        navigation.navigate('Bill Details', { billId: safe.id, spaceIdOverride: effectiveSpaceId })
                       }}
                     />
                     <AppButton label={tr('Export PDF')} variant="secondary" iconName="print-outline" onPress={() => exportPDFSingle(item)} disabled={exportBusy} />
@@ -15917,14 +16178,235 @@ function SettingsScreen() {
   function changeLang(l: Lang) { setLang(l) }
   const [languageModalVisible, setLanguageModalVisible] = useState(false)
   const [remindersEnabled, setRemindersEnabledState] = useState<boolean>(true)
+  const [remindersStatus, setRemindersStatus] = useState<null | {
+    scheduledTotal: number
+    billConfiguredCount: number
+    warrantyConfiguredCount: number
+    inboxConfiguredCount: number
+    items?: Array<{
+      kind: 'bill' | 'warranty' | 'inbox'
+      id: string
+      title: string
+      nextAt: string | null
+      savedIds: number
+      scheduledCount: number
+    }>
+  }>(null)
+  const [remindersDetailsOpen, setRemindersDetailsOpen] = useState(false)
+  const spacesCtx = useSpacesContext()
+  const { space } = useActiveSpace()
+  const { snapshot: entitlements } = useEntitlements()
   useEffect(() => {
     ;(async () => {
       setRemindersEnabledState(await getRemindersEnabled())
     })()
   }, [])
-  const spacesCtx = useSpacesContext()
-  const { space } = useActiveSpace()
-  const { snapshot: entitlements } = useEntitlements()
+
+  const refreshRemindersStatus = useCallback(async () => {
+    try {
+      const payerId = String(spacesCtx.current?.id || '').trim() || String(space?.id || '').trim() || 'default'
+      const scheduled = await Notifications.getAllScheduledNotificationsAsync().catch(() => [] as any[])
+
+      const allKeys = await AsyncStorage.getAllKeys().catch(() => [] as string[])
+      const billPrefix = `billbox.reminders.bill.${payerId}.`
+      const warrantyPrefix = `billbox.reminders.warranty.${payerId}.`
+      const inboxPrefix = `billbox.reminders.inbox.${payerId}.`
+
+      const billKeys = allKeys.filter((k) => k.startsWith(billPrefix))
+      const warrantyKeys = allKeys.filter((k) => k.startsWith(warrantyPrefix))
+      const inboxKeys = allKeys.filter((k) => k.startsWith(inboxPrefix))
+
+      async function getConfiguredMap(keys: string[], prefix: string): Promise<Record<string, number>> {
+        const out: Record<string, number> = {}
+        if (!keys.length) return out
+        const pairs = await AsyncStorage.multiGet(keys)
+        for (const [k, raw] of pairs) {
+          if (!k || !k.startsWith(prefix)) continue
+          const id = k.slice(prefix.length)
+          if (!id) continue
+          if (!raw) continue
+          try {
+            const parsed = JSON.parse(raw)
+            if (Array.isArray(parsed) && parsed.length > 0) out[id] = parsed.length
+          } catch {}
+        }
+        return out
+      }
+
+      const billConfiguredMap = await getConfiguredMap(billKeys, billPrefix)
+      const warrantyConfiguredMap = await getConfiguredMap(warrantyKeys, warrantyPrefix)
+      const inboxConfiguredMap = await getConfiguredMap(inboxKeys, inboxPrefix)
+
+      const billConfiguredCount = Object.keys(billConfiguredMap).length
+      const warrantyConfiguredCount = Object.keys(warrantyConfiguredMap).length
+      const inboxConfiguredCount = Object.keys(inboxConfiguredMap).length
+
+      type Agg = { scheduledCount: number; nextAt: Date | null }
+      const scheduledAgg: Record<string, Agg> = {}
+
+      const normalizeTriggerDate = (trigger: any): Date | null => {
+        try {
+          if (!trigger) return null
+          if (trigger.date) {
+            const d = new Date(trigger.date)
+            return Number.isNaN(d.getTime()) ? null : d
+          }
+          if (typeof trigger.seconds === 'number') {
+            const d = new Date(Date.now() + trigger.seconds * 1000)
+            return Number.isNaN(d.getTime()) ? null : d
+          }
+          return null
+        } catch {
+          return null
+        }
+      }
+
+      for (const req of Array.isArray(scheduled) ? scheduled : []) {
+        try {
+          const data: any = (req as any)?.content?.data || {}
+          const targetSpace = data?.space_id
+          if (targetSpace && String(targetSpace) !== payerId) continue
+
+          const billId = data?.bill_id ? String(data.bill_id) : null
+          const warrantyId = data?.warranty_id ? String(data.warranty_id) : null
+          const inboxId = data?.inbox_id ? String(data.inbox_id) : null
+          const kind: 'bill' | 'warranty' | 'inbox' | null = billId ? 'bill' : warrantyId ? 'warranty' : inboxId ? 'inbox' : null
+          const id = billId || warrantyId || inboxId
+          if (!kind || !id) continue
+          const key = `${kind}:${id}`
+          const when = normalizeTriggerDate((req as any)?.trigger)
+
+          const prev = scheduledAgg[key] || { scheduledCount: 0, nextAt: null }
+          const nextAt = !when
+            ? prev.nextAt
+            : !prev.nextAt
+              ? when
+              : (when.getTime() < prev.nextAt.getTime() ? when : prev.nextAt)
+          scheduledAgg[key] = { scheduledCount: prev.scheduledCount + 1, nextAt }
+        } catch {}
+      }
+
+      // Map IDs to friendly titles.
+      const billById: Record<string, any> = {}
+      const warrantyById: Record<string, any> = {}
+
+      try {
+        const billIds = Array.from(
+          new Set([
+            ...Object.keys(billConfiguredMap),
+            ...Object.keys(scheduledAgg).filter((k) => k.startsWith('bill:')).map((k) => k.slice('bill:'.length)),
+          ]),
+        )
+        if (billIds.length) {
+          const billsList = supabase ? (await listBills(supabase, payerId)).data : await loadLocalBills(payerId)
+          for (const b of billsList || []) billById[String((b as any)?.id || '')] = b
+        }
+      } catch {}
+
+      try {
+        const warrantyIds = Array.from(
+          new Set([
+            ...Object.keys(warrantyConfiguredMap),
+            ...Object.keys(scheduledAgg).filter((k) => k.startsWith('warranty:')).map((k) => k.slice('warranty:'.length)),
+          ]),
+        )
+        if (warrantyIds.length) {
+          const warrantyList = supabase ? (await listWarranties(supabase, payerId)).data : await loadLocalWarranties(payerId)
+          for (const w of warrantyList || []) warrantyById[String((w as any)?.id || '')] = w
+        }
+      } catch {}
+
+      const fmt = (d: Date | null): string | null => {
+        if (!d) return null
+        try { return d.toLocaleString() } catch { return d.toISOString() }
+      }
+
+      const unionKeys = new Set<string>([
+        ...Object.keys(billConfiguredMap).map((id) => `bill:${id}`),
+        ...Object.keys(warrantyConfiguredMap).map((id) => `warranty:${id}`),
+        ...Object.keys(inboxConfiguredMap).map((id) => `inbox:${id}`),
+        ...Object.keys(scheduledAgg),
+      ])
+
+      const items = Array.from(unionKeys)
+        .map((key) => {
+          const [kind, id] = key.split(':') as any
+          if (!id) return null
+          if (kind !== 'bill' && kind !== 'warranty' && kind !== 'inbox') return null
+          const agg = scheduledAgg[key] || { scheduledCount: 0, nextAt: null }
+          const savedIds = kind === 'bill' ? (billConfiguredMap[id] || 0) : kind === 'warranty' ? (warrantyConfiguredMap[id] || 0) : (inboxConfiguredMap[id] || 0)
+
+          let title = id
+          if (kind === 'bill') {
+            const b = billById[id]
+            const supplier = String(b?.supplier || '').trim()
+            const due = String(b?.due_date || '').trim()
+            title = `${tr('Bill')}: ${supplier || id}${due ? ` • ${tr('Due')} ${due}` : ''}`
+          } else if (kind === 'warranty') {
+            const w = warrantyById[id]
+            const name = String(w?.item_name || '').trim()
+            const expires = String(w?.expires_at || '').trim()
+            title = `${tr('Warranty')}: ${name || id}${expires ? ` • ${tr('Expires')} ${expires}` : ''}`
+          } else {
+            title = `${tr('Inbox')}: ${id}`
+          }
+
+          return {
+            kind,
+            id,
+            title,
+            nextAt: fmt(agg.nextAt),
+            savedIds,
+            scheduledCount: agg.scheduledCount,
+          }
+        })
+        .filter(Boolean) as any[]
+
+      items.sort((a, b) => {
+        const order = (k: string) => (k === 'bill' ? 0 : k === 'warranty' ? 1 : 2)
+        const byKind = order(a.kind) - order(b.kind)
+        if (byKind !== 0) return byKind
+        return String(a.title).localeCompare(String(b.title))
+      })
+
+      setRemindersStatus({
+        scheduledTotal: Array.isArray(scheduled) ? scheduled.length : 0,
+        billConfiguredCount,
+        warrantyConfiguredCount,
+        inboxConfiguredCount,
+        items,
+      })
+    } catch {
+      setRemindersStatus(null)
+    }
+  }, [space?.id, spacesCtx.current?.id])
+
+  useEffect(() => {
+    if (spacesCtx.loading || !space) return
+    void refreshRemindersStatus()
+  }, [refreshRemindersStatus, space, spacesCtx.loading])
+
+  const sendTestNotification = useCallback(async () => {
+    await ensureNotificationConfig()
+    const ok = await requestPermissionIfNeeded()
+    if (!ok) {
+      try { await Linking.openSettings() } catch {}
+      return
+    }
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: tr('Reminders & notifications'),
+          body: tr('Test notification'),
+          data: { playSound: true },
+        },
+        trigger: { seconds: 5 } as any,
+      })
+      Alert.alert(tr('Scheduled'), tr('Test notification in ~5 seconds.'))
+    } catch {
+      Alert.alert(tr('Error'), tr('Unable to save.'))
+    }
+  }, [])
   const [renameTarget, setRenameTarget] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renameVisible, setRenameVisible] = useState(false)
@@ -16127,9 +16609,17 @@ function SettingsScreen() {
               <View style={{ borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
-                    <View style={{ width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' }}>
+                    <Pressable
+                      onPress={() => { void pickPayerAvatar('personal') }}
+                      style={({ pressed }) => [
+                        { width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },
+                        pressed && { opacity: 0.9 },
+                      ]}
+                      hitSlop={8}
+                      accessibilityLabel={tr('Change photo')}
+                    >
                       {p1Avatar ? <Image source={{ uri: p1Avatar }} style={{ width: 34, height: 34 }} /> : <Ionicons name="person-outline" size={16} color={themeColors.textMuted} />}
-                    </View>
+                    </Pressable>
                     <Text style={{ fontWeight: '600' }}>{p1Slot}</Text>
                   </View>
                   {p1Active ? <Badge label={tr('Active')} tone="success" /> : null}
@@ -16158,12 +16648,6 @@ function SettingsScreen() {
                       setRenameVisible(true)
                     }}
                   />
-                  <AppButton
-                    label={tr('Change photo')}
-                    variant="secondary"
-                    iconName="image-outline"
-                    onPress={() => { void pickPayerAvatar('personal') }}
-                  />
                   {p1Avatar ? (
                     <AppButton
                       label={tr('Remove photo')}
@@ -16172,14 +16656,32 @@ function SettingsScreen() {
                       onPress={() => { void removePayerAvatar('personal') }}
                     />
                   ) : null}
+                  <AppButton
+                    label={tr('Remove')}
+                    variant="ghost"
+                    iconName="trash-outline"
+                    onPress={() => {
+                      setRemoveTarget({ id: p1.id, displayName: p1.name || p1Slot, slotLabel: p1Slot })
+                      setRemoveVisible(true)
+                    }}
+                  />
                 </View>
 
                 <View style={{ marginTop: themeSpacing.sm, paddingTop: themeSpacing.xs, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: themeColors.border }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
-                      <View style={{ width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' }}>
+                      <Pressable
+                        onPress={p2 ? () => { void pickPayerAvatar('personal2') } : undefined}
+                        style={({ pressed }) => [
+                          { width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },
+                          !p2 ? { opacity: 0.6 } : null,
+                          pressed && p2 ? { opacity: 0.9 } : null,
+                        ]}
+                        hitSlop={8}
+                        accessibilityLabel={tr('Change photo')}
+                      >
                         {p2Avatar ? <Image source={{ uri: p2Avatar }} style={{ width: 34, height: 34 }} /> : <Ionicons name="person-outline" size={16} color={themeColors.textMuted} />}
-                      </View>
+                      </Pressable>
                       <Text style={{ fontWeight: '600' }}>{p2Slot}</Text>
                     </View>
                     {p2Active ? <Badge label={tr('Active')} tone="success" /> : null}
@@ -16240,6 +16742,14 @@ function SettingsScreen() {
                             setRenameVisible(true)
                           }}
                         />
+                        {p2Avatar ? (
+                          <AppButton
+                            label={tr('Remove photo')}
+                            variant="ghost"
+                            iconName="trash-outline"
+                            onPress={() => { void removePayerAvatar('personal2') }}
+                          />
+                        ) : null}
                         <AppButton
                           label={tr('Remove')}
                           variant="ghost"
@@ -16375,6 +16885,31 @@ function SettingsScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('Reminders & notifications')} />
+          <Text style={styles.mutedText}>
+            {tr('Bills: 3 days before at 10:00 and on due date at 09:00.')} {'\n'}
+            {tr('Warranties: 30 days before and 7 days before (10:00).')}
+          </Text>
+          <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>
+            {tr('Reminders are configured per bill or warranty in Details → Reminders.')}{'\n'}
+            {tr('If Configured is 0, open a bill/warranty and tap “Schedule defaults”.')}
+          </Text>
+
+          {remindersStatus ? (
+            <View style={{ marginTop: themeSpacing.xs }}>
+              <InlineInfo
+                tone="info"
+                iconName="information-circle-outline"
+                message={tr('Scheduled notifications: {count}\nConfigured bills: {bills}\nConfigured warranties: {warranties}\nInbox reminders: {inbox}', {
+                  count: remindersStatus.scheduledTotal,
+                  bills: remindersStatus.billConfiguredCount,
+                  warranties: remindersStatus.warrantyConfiguredCount,
+                  inbox: remindersStatus.inboxConfiguredCount,
+                })}
+                translate={false}
+              />
+            </View>
+          ) : null}
+
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
             <AppButton
               label={remindersEnabled ? tr('Cancel reminders') : tr('Enable reminders')}
@@ -16391,6 +16926,7 @@ function SettingsScreen() {
                   await cancelAllReminders()
                   try { await Notifications.setBadgeCountAsync(0) } catch {}
                   setRemindersEnabledState(false)
+                  setRemindersStatus(null)
                   return
                 }
 
@@ -16402,9 +16938,51 @@ function SettingsScreen() {
                 }
                 await setRemindersEnabled(true)
                 setRemindersEnabledState(true)
+                void refreshRemindersStatus()
               }}
             />
+
+            <AppButton
+              label={tr('Refresh status')}
+              variant="secondary"
+              iconName="refresh-outline"
+              onPress={() => { void refreshRemindersStatus() }}
+            />
+
+            <AppButton
+              label={tr('Test notification')}
+              variant="secondary"
+              iconName="notifications-outline"
+              onPress={() => { void sendTestNotification() }}
+            />
+
+            {remindersStatus?.items?.length ? (
+              <AppButton
+                label={remindersDetailsOpen ? tr('Hide details') : tr('Show details')}
+                variant="ghost"
+                iconName={remindersDetailsOpen ? 'chevron-up-outline' : 'chevron-down-outline'}
+                onPress={() => setRemindersDetailsOpen((v) => !v)}
+              />
+            ) : null}
           </View>
+
+          {remindersDetailsOpen && remindersStatus?.items?.length ? (
+            <View style={{ marginTop: themeSpacing.sm, gap: 6 }}>
+              {remindersStatus.items.slice(0, 20).map((it) => (
+                <View key={`${it.kind}:${it.id}`} style={{ paddingVertical: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: themeColors.border }}>
+                  <Text style={[styles.bodyText, { fontWeight: '700' }]} numberOfLines={2}>
+                    {it.title}
+                  </Text>
+                  <Text style={styles.mutedText}>
+                    {tr('Next reminder: {date}', { date: it.nextAt || '—' })} • {tr('Scheduled')}: {it.scheduledCount} • {tr('Configured')}: {it.savedIds}
+                  </Text>
+                </View>
+              ))}
+              {remindersStatus.items.length > 20 ? (
+                <Text style={styles.mutedText}>{tr('Showing first {count}.', { count: 20 })}</Text>
+              ) : null}
+            </View>
+          ) : null}
         </Surface>
 
         <Surface elevated>
@@ -16683,10 +17261,10 @@ function AppNavigation({ loggedIn, setLoggedIn, lang, setLang, authLoading }: Ap
               <Stack.Screen name="BillBox" component={MainTabs} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Inbox" component={InboxScreen} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Warranties" component={WarrantiesScreenWithBoundary} options={{ headerShown: coerceBool(false) }} />
-              <Stack.Screen name="Reports" component={ReportsScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Reports" component={ReportsScreenWithBoundary} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Exports" component={ExportsRedirectScreen} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Payments" component={PaymentsScreen} options={{ headerShown: coerceBool(false) }} />
-              <Stack.Screen name="Bill Details" component={BillDetailsScreen} options={{ headerShown: coerceBool(false) }} />
+              <Stack.Screen name="Bill Details" component={BillDetailsScreenWithBoundary} options={{ headerShown: coerceBool(false) }} />
               <Stack.Screen name="Warranty Details" component={WarrantyDetailsScreen} options={{ headerShown: coerceBool(false) }} />
             </>
           )}
@@ -17368,7 +17946,7 @@ const styles = StyleSheet.create({
   homeSummaryRowDanger: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
   homeSummaryRowWarn: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
   homeSummaryRowInfo: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
-  homeSummaryRowNeutral: { backgroundColor: '#FFFFFF', borderColor: themeColors.border },
+  homeSummaryRowNeutral: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
   homeSummaryRowTitle: { fontSize: 13, fontWeight: '800', color: themeColors.text },
   homeSummaryRowValue: { fontSize: 12, fontWeight: '800', color: themeColors.text, marginRight: 2 },
 
