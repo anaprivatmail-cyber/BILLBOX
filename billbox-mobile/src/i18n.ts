@@ -231,7 +231,7 @@ const dict: DictByLang = {
     'Date range': 'Datum od–do',
     'Start date': 'Začetni datum',
     'End date': 'Končni datum',
-    'Unpaid only': 'Samo neplačani',
+    'Unpaid only': 'Neplačani',
     Overdue: 'Zapadlo',
     'Has attachment': 'Ima prilogo',
     'Include archived': 'Vključi arhivirane',

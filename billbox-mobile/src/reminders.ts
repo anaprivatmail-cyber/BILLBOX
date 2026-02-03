@@ -7,6 +7,17 @@ function tr(key: string, vars?: any): string {
 }
 
 const LS_REMINDERS_ENABLED = 'billbox.reminders.enabled'
+const LS_PREFIX_BILL = 'billbox.reminders.bill.'
+const LS_PREFIX_WARRANTY = 'billbox.reminders.warranty.'
+const LS_PREFIX_INBOX = 'billbox.reminders.inbox.'
+
+function todayLocalISO(): string {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
 
 export async function getRemindersEnabled(): Promise<boolean> {
   try {
@@ -28,6 +39,19 @@ export async function setRemindersEnabled(enabled: boolean): Promise<void> {
 export async function cancelAllReminders(): Promise<void> {
   try {
     await Notifications.cancelAllScheduledNotificationsAsync()
+  } catch {}
+}
+
+export async function clearAllReminderMetadata(): Promise<void> {
+  try {
+    const keys = await AsyncStorage.getAllKeys().catch(() => [] as string[])
+    const target = (keys || []).filter(
+      (k) =>
+        typeof k === 'string' &&
+        (k.startsWith(LS_PREFIX_BILL) || k.startsWith(LS_PREFIX_WARRANTY) || k.startsWith(LS_PREFIX_INBOX)),
+    )
+    if (!target.length) return
+    await AsyncStorage.multiRemove(target).catch(() => {})
   } catch {}
 }
 
@@ -154,6 +178,31 @@ export async function scheduleBillReminders(bill: any, daysBefore = [3, 0], spac
     } catch {}
   }
 
+  // If default reminder times are already in the past (e.g. enabling reminders late),
+  // schedule a single best-effort reminder so the user still gets notified.
+  if (ids.length === 0) {
+    try {
+      const dueIso = String(bill?.due_date || '').trim().slice(0, 10)
+      const todayIso = todayLocalISO()
+      const when = dueIso === todayIso
+        ? new Date(Date.now() + 10 * 60 * 1000)
+        : atLocalHour(new Date(Date.now() + 24 * 3600 * 1000), 9)
+
+      if (when.getTime() > Date.now()) {
+        const id = await Notifications.scheduleNotificationAsync({
+          content: {
+            title: tr('Bill reminder'),
+            body: tr('{supplier} is due {date}.', { supplier: bill.supplier || tr('Bill'), date: bill.due_date }),
+            data: { bill_id: bill.id, space_id: spaceId || null, playSound: true },
+            categoryIdentifier: 'bill',
+          },
+          trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
+        })
+        ids.push(id)
+      }
+    } catch {}
+  }
+
   await saveIds(storageKey, ids)
 }
 
@@ -233,6 +282,29 @@ export async function scheduleWarrantyReminders(warranty: any, daysBefore = [30,
         trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
       })
       ids.push(id)
+    } catch {}
+  }
+
+  // If all default reminders are already in the past but the warranty is still active,
+  // schedule a single best-effort reminder.
+  if (ids.length === 0 && expires.getTime() > Date.now()) {
+    try {
+      const expIso = String(warranty?.expires_at || '').trim().slice(0, 10)
+      const todayIso = todayLocalISO()
+      const base = expIso === todayIso ? new Date(Date.now() + 10 * 60 * 1000) : new Date()
+      const next10 = atLocalHour(base, 10)
+      const when = next10.getTime() > Date.now() ? next10 : atLocalHour(new Date(Date.now() + 24 * 3600 * 1000), 10)
+      if (when.getTime() > Date.now()) {
+        const id = await Notifications.scheduleNotificationAsync({
+          content: {
+            title: tr('Warranty reminder'),
+            body: tr('{item} expires {date}.', { item: warranty.item_name || tr('Warranty'), date: warranty.expires_at }),
+            data: { warranty_id: warranty.id, space_id: spaceId || null, playSound: true },
+          },
+          trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
+        })
+        ids.push(id)
+      }
     } catch {}
   }
 

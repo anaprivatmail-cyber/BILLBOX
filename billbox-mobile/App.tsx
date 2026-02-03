@@ -40,6 +40,7 @@ import {
   scheduleInboxReviewReminder,
   cancelInboxReviewReminder,
   cancelAllReminders,
+  clearAllReminderMetadata,
   getRemindersEnabled,
   setRemindersEnabled,
 } from './src/reminders'
@@ -2770,6 +2771,22 @@ function BillDetailsScreen() {
     }
   }, [])
 
+  const parseDateValue = useCallback((value?: string | null): Date | null => {
+    if (!value) return null
+    const raw = String(value || '').trim()
+    if (!raw) return null
+    if (raw.includes('T')) {
+      const parsed = new Date(raw)
+      if (Number.isNaN(parsed.getTime())) return null
+      return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate())
+    }
+    const parts = raw.split('-')
+    if (parts.length !== 3) return null
+    const [y, m, d] = parts.map((p) => Number(p))
+    if ([y, m, d].some((p) => Number.isNaN(p))) return null
+    return new Date(y, m - 1, d)
+  }, [])
+
   const buildBillReminderInfo = useCallback((dueDate?: string | null) => {
     if (!dueDate) return null
     const parsed = parseDateValue(String(dueDate))
@@ -3687,6 +3704,33 @@ function ScanBillScreen() {
   const payerSpaces = useMemo(() => {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
   }, [spacesCtx.spaces])
+
+  const payerAvatarKey = useCallback((payerId: string) => {
+    return `billbox.payer.avatar.${String(payerId || '').trim()}`
+  }, [])
+
+  const [payerAvatars, setPayerAvatars] = useState<Record<string, string | null>>({})
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const ids = payerSpaces.map((s) => String(s.id || '').trim()).filter(Boolean)
+        if (!ids.length) {
+          setPayerAvatars({})
+          return
+        }
+        const keys = ids.map((id) => payerAvatarKey(id))
+        const pairs = await AsyncStorage.multiGet(keys)
+        const next: Record<string, string | null> = {}
+        for (let i = 0; i < ids.length; i++) {
+          next[ids[i]] = pairs[i]?.[1] ? String(pairs[i][1]) : null
+        }
+        setPayerAvatars(next)
+      } catch {
+        setPayerAvatars({})
+      }
+    })()
+  }, [payerAvatarKey, payerSpaces])
 
   const scrollRef = useRef<ScrollView | null>(null)
   const billDraftYOffsetRef = useRef(0)
@@ -6367,6 +6411,7 @@ function ScanBillScreen() {
                   const sid = String(s.id || '').trim()
                   const name = String(s.name || '').trim() || tr(payerLabelFromSpaceId(sid))
                   const isActive = sid === String(spacesCtx.current?.id || spaceId || '').trim()
+                  const avatarUri = payerAvatars[sid] || null
                   return (
                     <Pressable
                       key={sid}
@@ -6379,9 +6424,13 @@ function ScanBillScreen() {
                       hitSlop={8}
                     >
                       <View style={styles.homeProfileAvatarWrap}>
-                        <View style={styles.homeProfileAvatarFallback}>
-                          <Text style={styles.homeProfileAvatarInitials}>{initialsFromName(name)}</Text>
-                        </View>
+                        {avatarUri ? (
+                          <Image source={{ uri: avatarUri }} style={styles.homeProfileAvatarImg} />
+                        ) : (
+                          <View style={styles.homeProfileAvatarFallback}>
+                            <Text style={styles.homeProfileAvatarInitials}>{initialsFromName(name)}</Text>
+                          </View>
+                        )}
                       </View>
 
                       <View style={{ flex: 1, minWidth: 0 }}>
@@ -6397,6 +6446,8 @@ function ScanBillScreen() {
                   )
                 })}
               </View>
+
+              <Text style={styles.mutedText}>{tr('This bill will be saved in the active profile.')}</Text>
             </View>
           </Surface>
         ) : null}
@@ -6966,16 +7017,56 @@ function InboxScreen() {
   const navigation = useNavigation<any>()
   const route = useRoute<any>()
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const spacesCtx = useSpacesContext()
   const { snapshot: entitlements } = useEntitlements()
   const supabase = useMemo(() => getSupabase(), [])
   const [items, setItems] = useState<InboxItem[]>([])
-  const [filter, setFilter] = useState<'pending' | 'archived' | 'all'>('pending')
   const [busy, setBusy] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [highlightId, setHighlightId] = useState<string | null>(null)
 
+  const payerSpaces = useMemo(() => {
+    return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
+  }, [spacesCtx.spaces])
+
+  const payerAvatarKey = useCallback((payerId: string) => {
+    return `billbox.payer.avatar.${String(payerId || '').trim()}`
+  }, [])
+
+  const [payerAvatars, setPayerAvatars] = useState<Record<string, string | null>>({})
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const ids = payerSpaces.map((s) => String(s.id || '').trim()).filter(Boolean)
+        if (!ids.length) {
+          setPayerAvatars({})
+          return
+        }
+        const keys = ids.map((id) => payerAvatarKey(id))
+        const pairs = await AsyncStorage.multiGet(keys)
+        const next: Record<string, string | null> = {}
+        for (let i = 0; i < ids.length; i++) {
+          next[ids[i]] = pairs[i]?.[1] ? String(pairs[i][1]) : null
+        }
+        setPayerAvatars(next)
+      } catch {
+        setPayerAvatars({})
+      }
+    })()
+  }, [payerAvatarKey, payerSpaces])
+
+  const initialsFromName = useCallback((name: string) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+    const first = parts[0]?.[0] || ''
+    const second = parts.length > 1 ? (parts[1]?.[0] || '') : (parts[0]?.[1] || '')
+    const out = (first + second).toUpperCase()
+    return out || '•'
+  }, [])
+
   // Local inbox is stored per app profile slot (e.g. "personal", "personal2").
-  const inboxSpaceKey = spaceId || 'default'
+  const activeProfileSlot = String(spacesCtx.current?.id || spaceId || '').trim()
+  const inboxSpaceKey = activeProfileSlot || 'default'
   // Server inbox is scoped by the real space UUID.
   const serverSpaceId = space?.id || null
 
@@ -7248,6 +7339,10 @@ function InboxScreen() {
 
   useFocusEffect(useCallback(() => {
     refresh()
+    const id = setInterval(() => {
+      void refresh()
+    }, 20000)
+    return () => clearInterval(id)
   }, [refresh]))
 
   useEffect(() => {
@@ -7257,10 +7352,10 @@ function InboxScreen() {
     }
   }, [route, navigation])
 
-  const filtered = useMemo(() => {
-    if (filter === 'all') return items
-    return items.filter((item) => item.status === (filter === 'pending' ? 'pending' : 'archived'))
-  }, [items, filter])
+  const visibleItems = useMemo(() => {
+    // Keep Inbox focused on actionable items; processed items are handled in Bills/Warranties.
+    return (items || []).filter((item) => item.status !== 'processed')
+  }, [items])
 
   async function importFromDevice() {
     try {
@@ -7287,10 +7382,6 @@ function InboxScreen() {
   }
 
   async function runOcr(item: InboxItem) {
-    if (!entitlements.canUseOCR) {
-      showUpgradeAlert('ocr')
-      return
-    }
     let kind: 'bill' | 'warranty' | 'other' = 'bill'
     try {
       const meta = (item as any).meta || {}
@@ -7317,6 +7408,10 @@ function InboxScreen() {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
       if (kind === 'warranty') {
+        if (!entitlements.canUseOCR) {
+          showUpgradeAlert('ocr')
+          return
+        }
         const { rawText } = await performOCR(sourceUri, { preferQr: false, allowAi: false, languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
         const w = extractWarrantyFieldsFromOcr(typeof rawText === 'string' ? rawText : '')
         const parts: string[] = []
@@ -7331,48 +7426,18 @@ function InboxScreen() {
         await refresh()
         Alert.alert(tr('Scan complete'), nextNotes)
       } else {
-        const { fields, summary, rawText, mode, meta } = await performOCR(sourceUri, { preferQr: true, allowAi: true, aiMode: 'document', languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
-
-        const classification = meta?.classification || null
-        const clsConf = typeof classification?.confidence === 'number' ? classification.confidence : null
-        const hasBasicAmount = Boolean(fields && typeof fields.amount === 'number')
-        const sourceHint = /qr/i.test(String(mode || '')) ? 'qr' : 'ocr'
-        const enriched = fields ? { ...fields, rawText: typeof rawText === 'string' ? rawText : '', _source: sourceHint, mode, _classification: classification } : fields
-
-        const isInvoice = classification?.isInvoice
-        const billLikeOverride = /(predra\u010dun|predracun|proforma|pro\s*forma|proforma\s*rechnung|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b|\bestimate\b|devis|preventivo|\bofferta\b|\bp\u0159edra\u010dun\b|\bpr\u00e9facture\b)/i.test(String(rawText || ''))
-          || /(predra\u010dun|predracun|proforma|pro\s*forma|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b)/i.test(classifierText)
-
-        const treatAsNotInvoice = isInvoice === false && (clsConf == null || clsConf >= 0.7) && !billLikeOverride
-        const treatAsInvoice = isInvoice === true || billLikeOverride || (!treatAsNotInvoice && hasBasicAmount)
-
-        let nextStatus: any = 'new'
-        if (treatAsNotInvoice) nextStatus = item.status || 'new'
-        else if (treatAsInvoice) nextStatus = (item.status === 'archived') ? 'archived' : 'pending'
-
-        const reason = classification?.reason ? String(classification.reason) : ''
-        const nextNotes = treatAsNotInvoice ? (reason ? `${tr('Not an invoice')}: ${reason}` : tr('Not an invoice')) : summary
-
-        await updateInboxItem(inboxSpaceKey, item.id, { extractedFields: enriched, notes: nextNotes, status: nextStatus })
-        if (nextStatus === 'pending' || nextStatus === 'archived') await cancelInboxReviewReminder(item.id, inboxSpaceKey)
-        else await scheduleInboxReviewReminder(item.id, item.name, inboxSpaceKey)
-        await refresh()
-
-        try {
-          const sourceUri = (item as any).localPath || item.uri
-          const cached = await ensureLocalReadableFile(sourceUri, item.name || 'document', item.mimeType, { allowBase64Fallback: true })
-          navigation.navigate('Scan', {
-            inboxPrefill: {
-              id: item.id,
-              fields: enriched,
-              attachmentPath: cached?.uri || sourceUri,
-              mimeType: item.mimeType,
-              inboxStatus: item.status,
-            },
-          })
-        } catch {
-          Alert.alert(tr('Scan complete'), summary)
-        }
+        // Open the exact same Add bill form flow used by "Dodaj račun".
+        // The Scan screen will auto-run OCR/AI extraction from the staged attachment.
+        const cached = await ensureLocalReadableFile(sourceUri, item.name || 'document', item.mimeType, { allowBase64Fallback: true })
+        navigation.navigate('Scan', {
+          inboxPrefill: {
+            id: item.id,
+            fields: item.extractedFields || {},
+            attachmentPath: cached?.uri || sourceUri,
+            mimeType: item.mimeType,
+            inboxStatus: item.status,
+          },
+        })
       }
     } catch (e: any) {
       const msg = e?.message || tr('Could not read this document.')
@@ -7409,34 +7474,6 @@ function InboxScreen() {
       await Linking.openURL(uri)
     } catch {
       Alert.alert(tr('Open failed'), tr('Could not open this file.'))
-    }
-  }
-
-  async function attachToBill(item: InboxItem) {
-    if ((item as any)?.extractedFields?._kind === 'warranty') {
-      Alert.alert(tr('Inbox'), tr('This looks like a warranty. Open Warranties.'))
-      try { navigation.navigate('Warranties') } catch {}
-      return
-    }
-    if (!item.extractedFields) {
-      Alert.alert(tr('Scan first'), tr('Scan the document to prefill the bill.'))
-      return
-    }
-    try {
-      setBusy(item.id)
-      const sourceUri = (item as any).localPath || item.uri
-      const cached = await ensureLocalReadableFile(sourceUri, item.name || 'document', item.mimeType, { allowBase64Fallback: true })
-      navigation.navigate('Scan', {
-        inboxPrefill: {
-          id: item.id,
-          fields: item.extractedFields,
-          attachmentPath: cached?.uri || sourceUri,
-          mimeType: item.mimeType,
-          inboxStatus: item.status,
-        },
-      })
-    } finally {
-      setBusy(null)
     }
   }
 
@@ -7484,26 +7521,64 @@ function InboxScreen() {
     <Screen>
       <View style={styles.pageStack}>
         <TabTopBar titleKey="Inbox" />
+
+        {payerSpaces.length > 1 ? (
+          <Surface elevated padded={false} style={[styles.card, styles.addBillProfileCard]}>
+            <View style={{ gap: themeSpacing.sm }}>
+              <Text style={styles.formSectionTitle}>{tr('Profile')}</Text>
+              <View style={styles.homeProfilesRow}>
+                {payerSpaces.slice(0, 2).map((s) => {
+                  const sid = String(s.id || '').trim()
+                  const name = String(s.name || '').trim() || tr(payerLabelFromSpaceId(sid))
+                  const isActive = sid === String(spacesCtx.current?.id || spaceId || '').trim()
+                  const avatarUri = payerAvatars[sid] || null
+                  return (
+                    <Pressable
+                      key={sid}
+                      onPress={() => { void spacesCtx.setCurrent(sid) }}
+                      style={({ pressed }) => [
+                        styles.homeProfileChip,
+                        isActive && styles.homeProfileChipActive,
+                        pressed && { opacity: 0.92 },
+                      ]}
+                      hitSlop={8}
+                    >
+                      <View style={styles.homeProfileAvatarWrap}>
+                        {avatarUri ? (
+                          <Image source={{ uri: avatarUri }} style={styles.homeProfileAvatarImg} />
+                        ) : (
+                          <View style={styles.homeProfileAvatarFallback}>
+                            <Text style={styles.homeProfileAvatarInitials}>{initialsFromName(name)}</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.homeProfileName} numberOfLines={1}>{name}</Text>
+                      </View>
+
+                      {isActive ? (
+                        <View style={styles.homeProfileActiveDot} />
+                      ) : (
+                        <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
+                      )}
+                    </Pressable>
+                  )
+                })}
+              </View>
+            </View>
+          </Surface>
+        ) : null}
+
         <View style={styles.inboxControlsRow}>
           <TouchableOpacity style={[styles.primaryBtn, importing && styles.primaryBtnDisabled]} onPress={importFromDevice} disabled={importing}>
             <Text style={styles.primaryBtnText}>{importing ? tr('Importing…') : tr('Import from device')}</Text>
           </TouchableOpacity>
-          <View style={styles.inboxFilterRow}>
-            <TouchableOpacity style={[styles.secondaryBtn, filter==='pending' ? styles.secondaryBtnActive : null]} onPress={()=>setFilter('pending')}>
-              <Text style={[styles.secondaryBtnText, filter==='pending' ? styles.secondaryBtnTextActive : null]}>{tr('Pending')}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.secondaryBtn, filter==='archived' ? styles.secondaryBtnActive : null]} onPress={()=>setFilter('archived')}>
-              <Text style={[styles.secondaryBtnText, filter==='archived' ? styles.secondaryBtnTextActive : null]}>{tr('Archived')}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.secondaryBtn, filter==='all' ? styles.secondaryBtnActive : null]} onPress={()=>setFilter('all')}>
-              <Text style={[styles.secondaryBtnText, filter==='all' ? styles.secondaryBtnTextActive : null]}>{tr('All')}</Text>
-            </TouchableOpacity>
-          </View>
         </View>
 
         <View style={styles.listWrapper}>
           <FlatList
-            data={filtered}
+            data={visibleItems}
             keyExtractor={(item) => item.id}
             ListEmptyComponent={<Text>{tr('No documents yet. Share a PDF, image, or email attachment to BillBox.')}</Text>}
             renderItem={({ item }) => (
@@ -7542,12 +7617,6 @@ function InboxScreen() {
                     iconName="scan-outline"
                     onPress={()=>runOcr(item)}
                     disabled={busy===item.id}
-                  />
-                  <AppButton
-                    label={tr('Attach to bill')}
-                    variant="outline"
-                    iconName="link-outline"
-                    onPress={()=>attachToBill(item)}
                   />
                   <AppButton
                     label={tr('Archive')}
@@ -7637,8 +7706,8 @@ function BillsListScreen() {
   }))
   const [unpaidOnly, setUnpaidOnly] = useState(false)
   const [overdueOnly, setOverdueOnly] = useState(false)
-  const [hasAttachmentsOnly, setHasAttachmentsOnly] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
+  const hasAttachmentsOnly = false
   const [highlightId, setHighlightId] = useState<string | null>(null)
   const [attachmentCounts, setAttachmentCounts] = useState<Record<string, number>>({})
   const [warrantyBillIds, setWarrantyBillIds] = useState<Record<string, true>>({})
@@ -8249,7 +8318,6 @@ function BillsListScreen() {
     setStatusSelections({ unpaid: true, paid: true, archived: false })
     setUnpaidOnly(false)
     setOverdueOnly(false)
-    setHasAttachmentsOnly(false)
     setIncludeArchived(false)
     setDateMode('due')
   }, [])
@@ -8328,7 +8396,6 @@ function BillsListScreen() {
     if (typeof preset.dateMode === 'string') setDateMode(preset.dateMode)
     if (typeof preset.dateFrom === 'string') setDateFrom(preset.dateFrom)
     if (typeof preset.dateTo === 'string') setDateTo(preset.dateTo)
-    if (typeof preset.hasAttachmentsOnly === 'boolean') setHasAttachmentsOnly(preset.hasAttachmentsOnly)
     if (typeof preset.includeArchived === 'boolean') setIncludeArchived(preset.includeArchived)
     if (typeof preset.overdueOnly === 'boolean') setOverdueOnly(preset.overdueOnly)
 
@@ -8416,8 +8483,6 @@ function BillsListScreen() {
       const isOverdue = dueDate ? isBillUnpaid(bill.status) && dueDate.getTime() < today.getTime() : false
       if (overdueOnly && !isOverdue) return false
 
-      if (hasAttachmentsOnly && (attachmentCounts[bill.id] || 0) === 0) return false
-
       const trackedDate = parseDateValue(getBillDate(bill, dateMode))
       if (fromDate && (!trackedDate || trackedDate.getTime() < fromDate.getTime())) return false
       if (toDate && (!trackedDate || trackedDate.getTime() > toDate.getTime())) return false
@@ -8433,7 +8498,7 @@ function BillsListScreen() {
       if (aTime === bTime) return String((a as any)?.supplier || '').localeCompare(String((b as any)?.supplier || ''))
       return aTime - bTime
     })
-  }, [amountMax, amountMin, attachmentCounts, bills, dateFrom, dateMode, dateTo, getBillDate, hasAttachmentsOnly, overdueOnly, parseDateValue, isStatusIncluded, supplierQuery, today, unpaidOnly, includeArchived])
+  }, [amountMax, amountMin, attachmentCounts, bills, dateFrom, dateMode, dateTo, getBillDate, overdueOnly, parseDateValue, isStatusIncluded, supplierQuery, today, unpaidOnly, includeArchived])
 
   const totalCount = bills.length
   const resultsLabel = filteredBills.length === totalCount
@@ -9593,17 +9658,30 @@ function BillsListScreen() {
                   </View>
 
                   <View style={styles.filterToggleRow}>
-                    <View style={styles.filterToggle}>
-                      <Switch value={unpaidOnly} onValueChange={handleUnpaidToggle} />
-                      <Text style={styles.toggleLabel}>{tr('Unpaid only')}</Text>
+                    <View style={{ width: '100%' }}>
+                      <Text style={styles.filterLabel}>{tr('Status')}</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
+                        <AppButton
+                          label={tr('All')}
+                          variant={statusFilterCompat === 'all' ? 'secondary' : 'ghost'}
+                          onPress={() => handleStatusChange('all')}
+                        />
+                        <AppButton
+                          label={tr('Unpaid only')}
+                          variant={statusFilterCompat === 'unpaid' ? 'secondary' : 'ghost'}
+                          onPress={() => handleStatusChange('unpaid')}
+                        />
+                        <AppButton
+                          label={tr('Paid')}
+                          variant={statusFilterCompat === 'paid' ? 'secondary' : 'ghost'}
+                          onPress={() => handleStatusChange('paid')}
+                        />
+                      </View>
                     </View>
+
                     <View style={styles.filterToggle}>
                       <Switch value={overdueOnly} onValueChange={setOverdueOnly} />
                       <Text style={styles.toggleLabel}>{tr('Overdue')}</Text>
-                    </View>
-                    <View style={styles.filterToggle}>
-                      <Switch value={hasAttachmentsOnly} onValueChange={setHasAttachmentsOnly} />
-                      <Text style={styles.toggleLabel}>{tr('Has attachment')}</Text>
                     </View>
                     <View style={styles.filterToggle}>
                       <Switch
@@ -9634,32 +9712,6 @@ function BillsListScreen() {
                 </View>
               )}
             </Surface>
-
-            <View style={{ marginTop: themeSpacing.sm }}>
-              <Text style={styles.filterLabel}>{tr('Status')}</Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                <AppButton
-                  label={tr('All')}
-                  variant={statusSelections.unpaid && statusSelections.paid && (!includeArchived || statusSelections.archived) ? 'secondary' : 'ghost'}
-                  onPress={() => setStatusSelections({ unpaid: true, paid: true, archived: includeArchived })}
-                />
-                <AppButton
-                  label={tr('Unpaid')}
-                  variant={statusSelections.unpaid ? 'secondary' : 'ghost'}
-                  onPress={() => setStatusSelections((prev) => ({ ...prev, unpaid: !prev.unpaid }))}
-                />
-                <AppButton
-                  label={tr('Paid')}
-                  variant={statusSelections.paid ? 'secondary' : 'ghost'}
-                  onPress={() => setStatusSelections((prev) => ({ ...prev, paid: !prev.paid }))}
-                />
-                <AppButton
-                  label={tr('Archived')}
-                  variant={statusSelections.archived ? 'secondary' : 'ghost'}
-                  onPress={() => setStatusSelections((prev) => ({ ...prev, archived: !prev.archived }))}
-                />
-              </View>
-            </View>
 
             <View style={styles.billsPrimaryActionsRow}>
               <View style={styles.flex1} />
@@ -11311,6 +11363,41 @@ function WarrantiesScreen() {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
   }, [spacesCtx.spaces])
 
+  const payerAvatarKey = useCallback((payerId: string) => {
+    return `billbox.payer.avatar.${String(payerId || '').trim()}`
+  }, [])
+
+  const [payerAvatars, setPayerAvatars] = useState<Record<string, string | null>>({})
+
+  const initialsFromName = useCallback((name: string) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+    const first = parts[0]?.[0] || ''
+    const second = parts.length > 1 ? (parts[1]?.[0] || '') : (parts[0]?.[1] || '')
+    const out = (first + second).toUpperCase()
+    return out || '•'
+  }, [])
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const ids = payerSpaces.map((s) => String(s.id || '').trim()).filter(Boolean)
+        if (!ids.length) {
+          setPayerAvatars({})
+          return
+        }
+        const keys = ids.map((id) => payerAvatarKey(id))
+        const pairs = await AsyncStorage.multiGet(keys)
+        const next: Record<string, string | null> = {}
+        for (let i = 0; i < ids.length; i++) {
+          next[ids[i]] = pairs[i]?.[1] ? String(pairs[i][1]) : null
+        }
+        setPayerAvatars(next)
+      } catch {
+        setPayerAvatars({})
+      }
+    })()
+  }, [payerAvatarKey, payerSpaces])
+
   const billSpaceIds = useMemo(() => {
     const ids = payerSpaces.map((s) => s.id)
     const p1 = ids.includes('personal') ? 'personal' : (ids[0] || null)
@@ -12010,17 +12097,49 @@ function WarrantiesScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('New warranty')} />
-          {spacesCtx.spaces.length > 1 ? (
+          {payerSpaces.length > 1 ? (
             <View style={{ marginBottom: themeSpacing.sm }}>
               <Text style={styles.mutedText}>{tr('Profile')}</Text>
-              <SegmentedControl
-                value={spacesCtx.current?.id || spaceId || ''}
-                onChange={(id) => { spacesCtx.setCurrent(id) }}
-                options={spacesCtx.spaces.map((s) => ({ value: s.id, label: s.name }))}
-                activeBgColor={themeColors.primary}
-                activeTextColor="#FFFFFF"
-                style={{ marginTop: themeSpacing.xs }}
-              />
+              <View style={[styles.homeProfilesRow, { marginTop: themeSpacing.xs }]}>
+                {payerSpaces.slice(0, 2).map((s) => {
+                  const sid = String(s.id || '').trim()
+                  const name = String(s.name || '').trim() || tr(payerLabelFromSpaceId(sid))
+                  const isActive = sid === String(spacesCtx.current?.id || spaceId || '').trim()
+                  const avatarUri = payerAvatars[sid] || null
+                  return (
+                    <Pressable
+                      key={sid}
+                      onPress={() => { void spacesCtx.setCurrent(sid) }}
+                      style={({ pressed }) => [
+                        styles.homeProfileChip,
+                        isActive && styles.homeProfileChipActive,
+                        pressed && { opacity: 0.92 },
+                      ]}
+                      hitSlop={8}
+                    >
+                      <View style={styles.homeProfileAvatarWrap}>
+                        {avatarUri ? (
+                          <Image source={{ uri: avatarUri }} style={styles.homeProfileAvatarImg} />
+                        ) : (
+                          <View style={styles.homeProfileAvatarFallback}>
+                            <Text style={styles.homeProfileAvatarInitials}>{initialsFromName(name)}</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.homeProfileName} numberOfLines={1}>{name}</Text>
+                      </View>
+
+                      {isActive ? (
+                        <View style={styles.homeProfileActiveDot} />
+                      ) : (
+                        <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
+                      )}
+                    </Pressable>
+                  )
+                })}
+              </View>
             </View>
           ) : null}
 
@@ -12928,7 +13047,9 @@ function ReportsScreen() {
     const abs = Math.abs(v)
     if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
     if (abs >= 1_000) return `${(v / 1_000).toFixed(1)}k`
-    return v.toFixed(0)
+    if (abs >= 100) return v.toFixed(0)
+    if (abs >= 10) return v.toFixed(1)
+    return v.toFixed(2)
   }, [])
 
   const formatPeriodLabel = useCallback((key: string): string => {
@@ -13032,15 +13153,16 @@ function ReportsScreen() {
   }, [lineSeries])
 
   const linePoints = useMemo(() => {
-    const width = Math.max(0, reportsChartSize.width - 24)
-    const height = Math.max(0, reportsChartSize.height - 24)
+    const pad = 8
+    const width = Math.max(0, reportsChartSize.width - pad * 2)
+    const height = Math.max(0, reportsChartSize.height - pad * 2)
     const count = lineSeries[0]?.points.length || 0
     if (!count || width <= 0 || height <= 0) return []
     const max = lineMax || 1
     return lineSeries.map((seriesItem) => {
       const points = seriesItem.points.map((p, idx) => {
-        const x = 12 + (count === 1 ? width / 2 : (idx / (count - 1)) * width)
-        const y = 12 + (max > 0 ? (1 - p.value / max) * height : height)
+        const x = pad + (count === 1 ? width / 2 : (idx / (count - 1)) * width)
+        const y = pad + (max > 0 ? (1 - p.value / max) * height : height)
         return { ...p, x, y }
       })
       return { id: seriesItem.id, label: seriesItem.label, color: seriesItem.color, points }
@@ -13194,6 +13316,28 @@ function ReportsScreen() {
     try {
       const profileLabel = selectedPayerIds.map((id) => payerLabelFromSpaceId(id)).join(' + ')
       const selectedView = reportsView
+
+      const dateModeForExport = isPro ? dateMode : 'due'
+      const dateModeLabel = dateModeForExport === 'invoice' ? tr('Invoice') : dateModeForExport === 'created' ? tr('Created') : tr('Due')
+      const groupByLabel = groupBy === 'year' ? tr('Year') : tr('Month')
+      const statusLabel = selectedStatusList.length
+        ? selectedStatusList.map((s) => (s === 'unpaid' ? tr('Unpaid') : s === 'paid' ? tr('Paid') : tr('Archived'))).join(', ')
+        : '—'
+      const supplierLabel = supplierQuery.trim() ? supplierQuery.trim() : '—'
+      const amountLabel = isPro && (amountMin.trim() || amountMax.trim())
+        ? `${amountMin.trim() || '—'} – ${amountMax.trim() || '—'}`
+        : '—'
+
+      function escapeHtml(v: any): string {
+        const s = v === null || v === undefined ? '' : String(v)
+        return s
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;')
+      }
+
       const chartSvg = (() => {
         const points = series.points
         if (!points.length) return ''
@@ -13232,12 +13376,12 @@ function ReportsScreen() {
         const xLabels = (() => {
           if (points.length === 1) {
             const x = padL + plotW / 2
-            return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${points[0].key}</text>`
+            return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${escapeHtml(formatPeriodLabel(points[0].key))}</text>`
           }
           const barW = plotW / points.length
           return points.map((p, i) => {
             const x = padL + i * barW + barW / 2
-            return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${p.key}</text>`
+            return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${escapeHtml(formatPeriodLabel(p.key))}</text>`
           }).join('')
         })()
         return `
@@ -13247,8 +13391,8 @@ function ReportsScreen() {
             <line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" stroke="#CBD5F5" />
             <line x1="${padL}" y1="${padT + plotH * 0.5}" x2="${w - padR}" y2="${padT + plotH * 0.5}" stroke="#E2E8F0" />
             <line x1="${padL}" y1="${padT}" x2="${w - padR}" y2="${padT}" stroke="#E2E8F0" />
-            <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${max.toFixed(0)}</text>
-            <text x="${padL - 6}" y="${padT + plotH * 0.5 + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${(max * 0.5).toFixed(0)}</text>
+            <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${escapeHtml(formatEurCompact(max))}</text>
+            <text x="${padL - 6}" y="${padT + plotH * 0.5 + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${escapeHtml(formatEurCompact(max * 0.5))}</text>
             <text x="${padL - 6}" y="${h - padB + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR 0</text>
             ${bars}
             ${xLabels}
@@ -13270,7 +13414,7 @@ function ReportsScreen() {
         const max = lineMax || 1
         const xLabels = seriesItems[0].points.map((p, i) => {
           const x = padL + i * (plotW / Math.max(1, count - 1))
-          return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${p.key}</text>`
+          return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="#64748b">${escapeHtml(formatPeriodLabel(p.key))}</text>`
         }).join('')
         const lines = seriesItems.map((s) => {
           const pointsStr = s.points.map((p, i) => {
@@ -13300,8 +13444,8 @@ function ReportsScreen() {
             <line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" stroke="#CBD5F5" />
             <line x1="${padL}" y1="${padT + plotH * 0.5}" x2="${w - padR}" y2="${padT + plotH * 0.5}" stroke="#E2E8F0" />
             <line x1="${padL}" y1="${padT}" x2="${w - padR}" y2="${padT}" stroke="#E2E8F0" />
-            <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${max.toFixed(0)}</text>
-            <text x="${padL - 6}" y="${padT + plotH * 0.5 + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${(max * 0.5).toFixed(0)}</text>
+            <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${escapeHtml(formatEurCompact(max))}</text>
+            <text x="${padL - 6}" y="${padT + plotH * 0.5 + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR ${escapeHtml(formatEurCompact(max * 0.5))}</text>
             <text x="${padL - 6}" y="${h - padB + 4}" text-anchor="end" font-size="10" fill="#64748b">EUR 0</text>
             ${lines}
             ${xLabels}
@@ -13310,13 +13454,13 @@ function ReportsScreen() {
       })()
       const tableHtml = tableRows.map((r) => `
         <tr>
-          <td>${r.supplier}</td>
-          <td>${r.date || '—'}</td>
-          <td style="text-align:right;">${r.amount}</td>
+          <td>${escapeHtml(r.supplier)}</td>
+          <td>${escapeHtml(r.date || '—')}</td>
+          <td style="text-align:right;">${escapeHtml(r.amount)}</td>
         </tr>
       `).join('')
 
-      const billsListHtml = tableRows.map((r) => `<li><b>${r.supplier}</b> — ${r.date || '—'} — ${r.amount}</li>`).join('')
+      const billsListHtml = tableRows.map((r) => `<li><b>${escapeHtml(r.supplier)}</b> — ${escapeHtml(r.date || '—')} — ${escapeHtml(r.amount)}</li>`).join('')
 
       const viewSectionHtml = (() => {
         if (selectedView === 'table') {
@@ -13324,7 +13468,7 @@ function ReportsScreen() {
             <div class="card">
               <div class="k" style="margin-bottom:8px;">${tr('Table')}</div>
               ${tableHtml
-                ? `<table><thead><tr><th>${tr('Supplier')}</th><th>${tr('Due')}</th><th style=\"text-align:right;\">${tr('Amount')}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
+                ? `<table><thead><tr><th>${tr('Supplier')}</th><th>${escapeHtml(dateModeLabel)}</th><th style=\"text-align:right;\">${tr('Amount')}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
                 : `<div class="k">${tr('No bills in this range.')}</div>`
               }
             </div>
@@ -13363,9 +13507,18 @@ function ReportsScreen() {
           <body>
             <h1>${tr('Reports')}</h1>
             <div class="meta">
-              ${tr('Profiles')}: ${profileLabel}<br/>
-              ${tr('Date range')}: ${range.start} – ${range.end}<br/>
-              ${tr('Generated')}: ${new Date().toISOString()}
+              ${tr('Profiles')}: ${escapeHtml(profileLabel)}<br/>
+              ${tr('Date range')}: ${escapeHtml(range.start)} – ${escapeHtml(range.end)}<br/>
+              ${tr('Generated')}: ${escapeHtml(new Date().toISOString())}
+            </div>
+            <div class="card">
+              <div class="k" style="margin-bottom:8px;">${tr('Filters')}</div>
+              <div class="row"><div class="k">${tr('View')}</div><div class="v">${escapeHtml(selectedView === 'chart' ? tr('Chart') : tr('Table'))}</div></div>
+              <div class="row"><div class="k">${tr('Date mode')}</div><div class="v">${escapeHtml(dateModeLabel)}</div></div>
+              <div class="row"><div class="k">${tr('Group by')}</div><div class="v">${escapeHtml(groupByLabel)}</div></div>
+              <div class="row"><div class="k">${tr('Status')}</div><div class="v">${escapeHtml(statusLabel)}</div></div>
+              <div class="row"><div class="k">${tr('Supplier')}</div><div class="v">${escapeHtml(supplierLabel)}</div></div>
+              <div class="row"><div class="k">${tr('Amount range')}</div><div class="v">${escapeHtml(amountLabel)}</div></div>
             </div>
             <div class="card">
               <div class="row"><div class="k">${tr('Bills in range')}</div><div class="v">${totals.totalBillsInRange}</div></div>
@@ -13704,6 +13857,8 @@ function ReportsScreen() {
                                   const dy = next ? next.y - p.y : 0
                                   const len = next ? Math.max(2, Math.sqrt(dx * dx + dy * dy)) : 0
                                   const angle = next ? Math.atan2(dy, dx) : 0
+                                  const midX = next ? (p.x + next.x) / 2 : p.x
+                                  const midY = next ? (p.y + next.y) / 2 : p.y
                                   return (
                                     <React.Fragment key={`${seriesItem.id}-${p.key}`}>
                                       {next ? (
@@ -13711,15 +13866,11 @@ function ReportsScreen() {
                                           style={[
                                             styles.reportLineSegment,
                                             {
-                                              left: p.x,
-                                              top: p.y - lineThickness / 2,
+                                              left: midX - len / 2,
+                                              top: midY - lineThickness / 2,
                                               width: len,
                                               backgroundColor: seriesItem.color,
-                                              transform: [
-                                                { translateX: -len / 2 },
-                                                { rotateZ: `${angle}rad` },
-                                                { translateX: len / 2 },
-                                              ],
+                                              transform: [{ rotateZ: `${angle}rad` }],
                                             },
                                           ]}
                                         />
@@ -14570,7 +14721,7 @@ function ExportsRedirectScreen() {
 
 function PayScreen() {
   const supabase = useMemo(() => getSupabase(), [])
-  const [items, setItems] = useState<Bill[]>([])
+  const [items, setItems] = useState<(Bill & { __spaceId?: string })[]>([])
   const [selected, setSelected] = useState<Record<string, boolean>>({})
   const [planningDate, setPlanningDate] = useState(new Date().toISOString().slice(0,10))
   const [payActionVisible, setPayActionVisible] = useState(false)
@@ -14581,6 +14732,7 @@ function PayScreen() {
   const [qrDataUri, setQrDataUri] = useState<string | null>(null)
   const [qrBusy, setQrBusy] = useState(false)
   const [qrThumbs, setQrThumbs] = useState<Record<string, string>>({})
+  const [qrThumbErrors, setQrThumbErrors] = useState<Record<string, boolean>>({})
   const qrThumbInFlight = useRef<Record<string, boolean>>({})
   const [bankConfigVisible, setBankConfigVisible] = useState(false)
   const [debtorName, setDebtorName] = useState('')
@@ -14650,6 +14802,23 @@ function PayScreen() {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
   }, [spacesCtx.spaces])
 
+  const payerNameById = useMemo(() => {
+    const out: Record<string, string> = {}
+    for (const s of payerSpaces) {
+      const label = String((s as any)?.name || '').trim() || tr(payerLabelFromSpaceId(s.id))
+      out[s.id] = label
+    }
+    return out
+  }, [payerSpaces])
+
+  const billPayerId = useCallback((b: Bill & { __spaceId?: string }) => {
+    const local = (b as any)?.__spaceId || localPayerIdFromDbSpaceId(entitlements, (b as any)?.space_id)
+    if (local) return local
+    const raw = String((b as any)?.space_id || '')
+    if (isPayerSpaceId(raw)) return raw
+    return billSpaceIds[0] || spaceId || 'personal'
+  }, [billSpaceIds, entitlements, spaceId])
+
   const billSpaceIds = useMemo(() => {
     const ids = payerSpaces.map((s) => s.id)
     const p1 = ids.includes('personal') ? 'personal' : (ids[0] || null)
@@ -14695,13 +14864,16 @@ function PayScreen() {
     const ids = billSpaceIds.length ? billSpaceIds : (spaceId ? [spaceId] : [])
     if (supabase) {
       const { data } = await listBills(supabase, ids.length > 1 ? ids : (ids[0] || spaceId), entitlements)
-      let next = (data || []) as Bill[]
+      let next = ((data || []) as any[]).map((b) => {
+        const local = localPayerIdFromDbSpaceId(entitlements, (b as any)?.space_id) || (b as any)?.__spaceId
+        return { ...(b as any), __spaceId: local || (ids.length ? ids[0] : spaceId) }
+      }) as (Bill & { __spaceId?: string })[]
       if (entitlements.plan === 'pro') {
-        const merged: Bill[] = []
+        const merged: (Bill & { __spaceId?: string })[] = []
         for (const sid of ids) {
-          const group = next.filter((b) => (b as any)?.space_id === sid || (b as any)?.__spaceId === sid)
+          const group = next.filter((b) => (b as any)?.__spaceId === sid)
           const ensured = await ensureInstallmentBills({ spaceId: sid, supabase, existingBills: group, horizonMonths: 2 })
-          for (const b of ensured || []) merged.push(b as any)
+          for (const b of ensured || []) merged.push({ ...(b as any), __spaceId: sid })
         }
         next = merged.length ? merged : next
       } else {
@@ -14709,18 +14881,18 @@ function PayScreen() {
       }
       setItems(next)
     } else {
-      const collected: Bill[] = []
+      const collected: (Bill & { __spaceId?: string })[] = []
       for (const sid of ids) {
         const locals = await loadLocalBills(sid)
-        for (const b of (locals as any) || []) collected.push(b as any)
+        for (const b of (locals as any) || []) collected.push({ ...(b as any), __spaceId: sid })
       }
-      let next = collected as Bill[]
+      let next = collected as (Bill & { __spaceId?: string })[]
       if (entitlements.plan === 'pro') {
-        const merged: Bill[] = []
+        const merged: (Bill & { __spaceId?: string })[] = []
         for (const sid of ids) {
           const group = next.filter((b) => (b as any)?.__spaceId === sid)
           const ensured = await ensureInstallmentBills({ spaceId: sid, supabase: null, existingBills: group, horizonMonths: 2 })
-          for (const b of ensured || []) merged.push(b as any)
+          for (const b of ensured || []) merged.push({ ...(b as any), __spaceId: sid })
         }
         next = merged.length ? merged : next
       } else {
@@ -14813,8 +14985,26 @@ function PayScreen() {
 
   async function makeQrDataUri(payload: string, opts: { width: number; margin?: number }) {
     const QRCode = (await import('qrcode')) as any
-    const uri = await QRCode.toDataURL(payload, { width: opts.width, margin: opts.margin ?? 1 })
-    return String(uri)
+    const width = Math.max(96, Math.min(640, Math.floor(Number(opts.width) || 240)))
+    const margin = Math.max(0, Math.min(8, Math.floor(Number(opts.margin ?? 1) || 1)))
+    try {
+      const uri = await QRCode.toDataURL(payload, {
+        width,
+        margin,
+        errorCorrectionLevel: 'M',
+        type: 'image/png',
+      })
+      return String(uri)
+    } catch {
+      // Best-effort fallback with slightly smaller output.
+      const uri = await QRCode.toDataURL(payload, {
+        width: Math.max(96, Math.floor(width * 0.8)),
+        margin,
+        errorCorrectionLevel: 'L',
+        type: 'image/png',
+      })
+      return String(uri)
+    }
   }
 
   function buildPaymentCopyParts(bill: Bill) {
@@ -15151,10 +15341,12 @@ function PayScreen() {
         if (!payload) continue
         qrThumbInFlight.current[b.id] = true
         try {
-          const uri = await makeQrDataUri(payload, { width: 96, margin: 1 })
+          const uri = await makeQrDataUri(payload, { width: 128, margin: 1 })
           if (cancelled) return
           setQrThumbs((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: uri }))
+          setQrThumbErrors((prev) => (prev[b.id] ? { ...prev, [b.id]: false } : prev))
         } catch {
+          setQrThumbErrors((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: true }))
         } finally {
           qrThumbInFlight.current[b.id] = false
         }
@@ -15165,6 +15357,39 @@ function PayScreen() {
       cancelled = true
     }
   }, [qrThumbs, visibleBills])
+
+  useEffect(() => {
+    // Ensure QR is generated for each selected bill (even if it is not in the prefetch window).
+    let cancelled = false
+    const picked = visibleBills.filter((b) => !!selected[b.id])
+    if (!picked.length) return
+
+    ;(async () => {
+      for (const b of picked) {
+        if (cancelled) return
+        if (!b?.id) continue
+        if (qrThumbs[b.id]) continue
+        if (qrThumbInFlight.current[b.id]) continue
+        const payload = buildPaymentQrPayload(b)
+        if (!payload) continue
+        qrThumbInFlight.current[b.id] = true
+        try {
+          const uri = await makeQrDataUri(payload, { width: 160, margin: 1 })
+          if (cancelled) return
+          setQrThumbs((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: uri }))
+          setQrThumbErrors((prev) => (prev[b.id] ? { ...prev, [b.id]: false } : prev))
+        } catch {
+          setQrThumbErrors((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: true }))
+        } finally {
+          qrThumbInFlight.current[b.id] = false
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [qrThumbs, selected, visibleBills])
 
   function buildPaymentQrPayload(bill: Bill): string | null {
     const iban = normalizeIban(bill.iban || '')
@@ -15363,11 +15588,24 @@ function PayScreen() {
   }
   function toggleSel(id: string) { setSelected(prev=> ({ ...prev, [id]: !prev[id] })) }
   function Chip({ text, tone = 'neutral' }: { text: string; tone?: 'neutral' | 'warning' }) {
-    const bg = tone === 'warning' ? '#FEF3C7' : themeColors.primarySoft
-    const fg = tone === 'warning' ? '#92400E' : themeColors.primary
+    const bg = tone === 'warning' ? '#DC2626' : themeColors.primarySoft
+    const fg = tone === 'warning' ? '#FFFFFF' : themeColors.primary
     return (
-      <View style={{ backgroundColor: bg, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3 }}>
-        <Text style={{ color: fg, fontSize: 12, fontWeight: '600' }} numberOfLines={1}>
+      <View
+        style={{
+          backgroundColor: bg,
+          borderRadius: 10,
+          paddingHorizontal: 10,
+          paddingVertical: 5,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 6,
+        }}
+      >
+        {tone === 'warning' ? (
+          <Ionicons name="alert-circle" size={14} color={fg} />
+        ) : null}
+        <Text style={{ color: fg, fontSize: 12, fontWeight: '800', letterSpacing: tone === 'warning' ? 0.2 : 0 }} numberOfLines={1}>
           {text}
         </Text>
       </View>
@@ -15419,6 +15657,8 @@ function PayScreen() {
                   const parts = buildPaymentCopyParts(item)
                   const amountNum = getAmountNumber(item)
                   const d = billTargetDate(item)
+                  const payerId = billPayerId(item as any)
+                  const payerLabel = payerNameById[payerId] || tr(payerLabelFromSpaceId(payerId))
                   return (
                     <Surface key={item.id} elevated style={styles.billRowCard}>
                       <View style={styles.billRowHeader}>
@@ -15442,33 +15682,13 @@ function PayScreen() {
                               color={themeColors.primary}
                             />
                           </Pressable>
-                          <Pressable
-                            onPress={() => {
-                              if (!canQr) {
-                                const currency = String(item.currency || 'EUR').toUpperCase()
-                                if (currency !== 'EUR') Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
-                                else Alert.alert(tr('QR unavailable'), tr('Missing IBAN, amount, or creditor name.'))
-                                return
-                              }
-                              openPaymentQr(item)
-                            }}
-                            style={({ pressed }) => [styles.payQrIconWrap, pressed ? { opacity: 0.9 } : null]}
-                            hitSlop={6}
-                          >
-                            <Ionicons name="qr-code-outline" size={20} color={canQr ? themeColors.primary : themeColors.textMuted} />
-                          </Pressable>
                         </View>
                       </View>
                       <View style={styles.billActionsRow}>
+                        <Chip text={payerLabel} tone="neutral" />
                         <Chip
                           text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
                           tone={isOverdue ? 'warning' : 'neutral'}
-                        />
-                        <AppButton
-                          label={tr('Pay (copy details)')}
-                          variant="primary"
-                          iconName="copy-outline"
-                          onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
                         />
                         <View style={styles.payCopyMiniRow}>
                           <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
@@ -15487,12 +15707,40 @@ function PayScreen() {
                             <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
                           </Pressable>
                         </View>
-                        <AppButton
-                          label={tr('Show QR')}
-                          variant="secondary"
-                          iconName="qr-code-outline"
-                          onPress={()=>openPaymentQr(item)}
-                        />
+                        <View style={{ marginLeft: 'auto', alignItems: 'center', gap: 6 }}>
+                          {selected[item.id] ? (
+                            canQr ? (
+                              <Pressable
+                                onPress={() => openPaymentQr(item)}
+                                style={({ pressed }) => [styles.payQrInlineWrap, pressed ? { opacity: 0.95 } : null]}
+                              >
+                                {qrThumbs[item.id] ? (
+                                  <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrInlineImage} />
+                                ) : qrThumbErrors[item.id] ? (
+                                  <View style={[styles.payQrInlinePlaceholder, styles.payQrInlineUnavailable]}>
+                                    <Ionicons name="alert-circle-outline" size={20} color={themeColors.textMuted} />
+                                    <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                                  </View>
+                                ) : (
+                                  <View style={styles.payQrInlinePlaceholder}>
+                                    <ActivityIndicator size="small" color={themeColors.primary} />
+                                  </View>
+                                )}
+                              </Pressable>
+                            ) : (
+                              <View style={[styles.payQrInlineWrap, styles.payQrInlineUnavailable]}>
+                                <Ionicons name="qr-code-outline" size={22} color={themeColors.textMuted} />
+                                <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                              </View>
+                            )
+                          ) : null}
+                          <AppButton
+                            label={tr('Pay (copy details)')}
+                            variant="primary"
+                            iconName="copy-outline"
+                            onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
+                          />
+                        </View>
                         <AppButton
                           label={tr('Mark as paid')}
                           variant="primary"
@@ -15551,6 +15799,8 @@ function PayScreen() {
                 const parts = buildPaymentCopyParts(item)
                 const amountNum = getAmountNumber(item)
                 const d = billTargetDate(item)
+                const payerId = billPayerId(item as any)
+                const payerLabel = payerNameById[payerId] || tr(payerLabelFromSpaceId(payerId))
                 return (
                 <Surface elevated style={styles.billRowCard}>
                   <View style={styles.billRowHeader}>
@@ -15574,33 +15824,13 @@ function PayScreen() {
                           color={themeColors.primary}
                         />
                       </Pressable>
-                      <Pressable
-                        onPress={() => {
-                          if (!canQr) {
-                            const currency = String(item.currency || 'EUR').toUpperCase()
-                            if (currency !== 'EUR') Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
-                            else Alert.alert(tr('QR unavailable'), tr('Missing IBAN, amount, or creditor name.'))
-                            return
-                          }
-                          openPaymentQr(item)
-                        }}
-                        style={({ pressed }) => [styles.payQrIconWrap, pressed ? { opacity: 0.9 } : null]}
-                        hitSlop={6}
-                      >
-                        <Ionicons name="qr-code-outline" size={20} color={canQr ? themeColors.primary : themeColors.textMuted} />
-                      </Pressable>
                     </View>
                   </View>
                   <View style={styles.billActionsRow}>
+                    <Chip text={payerLabel} tone="neutral" />
                     <Chip
                       text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
                       tone={isOverdue ? 'warning' : 'neutral'}
-                    />
-                    <AppButton
-                      label={tr('Pay (copy details)')}
-                      variant="primary"
-                      iconName="copy-outline"
-                      onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
                     />
                     <View style={styles.payCopyMiniRow}>
                       <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
@@ -15619,12 +15849,40 @@ function PayScreen() {
                         <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
                       </Pressable>
                     </View>
-                    <AppButton
-                      label={tr('Show QR')}
-                      variant="secondary"
-                      iconName="qr-code-outline"
-                      onPress={()=>openPaymentQr(item)}
-                    />
+                    <View style={{ marginLeft: 'auto', alignItems: 'center', gap: 6 }}>
+                      {selected[item.id] ? (
+                        canQr ? (
+                          <Pressable
+                            onPress={() => openPaymentQr(item)}
+                            style={({ pressed }) => [styles.payQrInlineWrap, pressed ? { opacity: 0.95 } : null]}
+                          >
+                            {qrThumbs[item.id] ? (
+                              <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrInlineImage} />
+                            ) : qrThumbErrors[item.id] ? (
+                              <View style={[styles.payQrInlinePlaceholder, styles.payQrInlineUnavailable]}>
+                                <Ionicons name="alert-circle-outline" size={20} color={themeColors.textMuted} />
+                                <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                              </View>
+                            ) : (
+                              <View style={styles.payQrInlinePlaceholder}>
+                                <ActivityIndicator size="small" color={themeColors.primary} />
+                              </View>
+                            )}
+                          </Pressable>
+                        ) : (
+                          <View style={[styles.payQrInlineWrap, styles.payQrInlineUnavailable]}>
+                            <Ionicons name="qr-code-outline" size={22} color={themeColors.textMuted} />
+                            <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                          </View>
+                        )
+                      ) : null}
+                      <AppButton
+                        label={tr('Pay (copy details)')}
+                        variant="primary"
+                        iconName="copy-outline"
+                        onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
+                      />
+                    </View>
                     <AppButton
                       label={tr('Mark as paid')}
                       variant="primary"
@@ -16106,20 +16364,36 @@ function MainTabs() {
           headerShown: false,
           tabBarActiveTintColor: themeColors.primary,
           tabBarInactiveTintColor: '#94A3B8',
-          tabBarLabel: route.name === 'Scan'
-            ? t(lang, 'Add bill')
-            : t(
-              lang,
-              (
-                {
-                  Home: 'home',
-                  Scan: 'scan',
-                  Bills: 'bills',
-                  Pay: 'Payments',
-                  Settings: 'settings',
-                } as any
-              )[route.name] || route.name
-            ),
+          tabBarLabel: ({ focused, color }) => {
+            const label = route.name === 'Scan'
+              ? t(lang, 'Add bill')
+              : t(
+                lang,
+                (
+                  {
+                    Home: 'home',
+                    Scan: 'scan',
+                    Bills: 'bills',
+                    Pay: 'Payments',
+                    Settings: 'settings',
+                  } as any
+                )[route.name] || route.name
+              )
+
+            return (
+              <Text
+                style={{
+                  fontSize: 10,
+                  fontWeight: focused ? '800' : '600',
+                  color,
+                  marginTop: 0,
+                  marginBottom: 0,
+                }}
+              >
+                {label}
+              </Text>
+            )
+          },
           tabBarStyle: {
             borderTopColor: 'transparent',
             borderTopWidth: 0,
@@ -16127,12 +16401,6 @@ function MainTabs() {
             paddingTop: 4,
             paddingBottom: bottomPadding,
             height: barHeight,
-          },
-          tabBarLabelStyle: {
-            fontSize: 10,
-            fontWeight: '600',
-            marginTop: 0,
-            marginBottom: 0,
           },
           tabBarItemStyle: {
             paddingVertical: 4,
@@ -16152,7 +16420,13 @@ function MainTabs() {
             const iconName = icons[route.name] ?? 'ellipse-outline'
             const iconSize = route.name === 'Scan' ? 26 : 24
             return (
-              <View style={{ transform: [{ translateY: focused ? -3 : 0 }] }}>
+              <View
+                style={[
+                  styles.tabIconPill,
+                  focused ? styles.tabIconPillActive : null,
+                  { transform: [{ translateY: focused ? -2 : 0 }] },
+                ]}
+              >
                 <Ionicons name={iconName} size={iconSize} color={color} />
               </View>
             )
@@ -16168,6 +16442,61 @@ function MainTabs() {
       <ProfileRenameGate />
     </>
   )
+}
+
+async function rescheduleDefaultRemindersForAllPayers(params: {
+  supabase: SupabaseClient | null
+  entitlements: EntitlementsSnapshot | null | undefined
+  payerIds: string[]
+}): Promise<{ scheduledBills: number; scheduledWarranties: number }> {
+  const supabase = params.supabase
+  const payerIds = (params.payerIds || []).map((v) => String(v || '').trim()).filter(Boolean)
+
+  const today = (() => {
+    const d = new Date()
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  })()
+
+  let scheduledBills = 0
+  let scheduledWarranties = 0
+
+  for (const payerId of payerIds) {
+    try {
+      const bills = supabase
+        ? (await listBills(supabase, payerId, params.entitlements || null)).data
+        : await loadLocalBills(payerId)
+
+      for (const b of bills || []) {
+        try {
+          if (!b?.id || !b?.due_date) continue
+          if (!isBillUnpaid((b as any)?.status)) continue
+          await scheduleBillReminders({ ...(b as any), space_id: payerId } as any, undefined, payerId)
+          scheduledBills += 1
+        } catch {}
+      }
+    } catch {}
+
+    try {
+      const warranties = supabase
+        ? (await listWarranties(supabase, payerId, params.entitlements || null)).data
+        : await loadLocalWarranties(payerId)
+
+      for (const w of warranties || []) {
+        try {
+          const exp = String((w as any)?.expires_at || '').trim().slice(0, 10)
+          if (!w?.id || !exp) continue
+          if (exp < today) continue
+          await scheduleWarrantyReminders({ ...(w as any), space_id: payerId } as any, undefined, payerId)
+          scheduledWarranties += 1
+        } catch {}
+      }
+    } catch {}
+  }
+
+  return { scheduledBills, scheduledWarranties }
 }
 
 function SettingsScreen() {
@@ -16381,32 +16710,84 @@ function SettingsScreen() {
     }
   }, [space?.id, spacesCtx.current?.id])
 
+  const remindersSignatureRef = useRef<string>('')
+
+  const computeRemindersSignature = useCallback(async (): Promise<string> => {
+    try {
+      const payerId = String(spacesCtx.current?.id || '').trim() || String(space?.id || '').trim() || 'default'
+      const scheduled = await Notifications.getAllScheduledNotificationsAsync().catch(() => [] as any[])
+      const schedParts: string[] = []
+
+      for (const req of Array.isArray(scheduled) ? scheduled : []) {
+        try {
+          const data: any = (req as any)?.content?.data || {}
+          const targetSpace = data?.space_id
+          if (targetSpace && String(targetSpace) !== payerId) continue
+
+          const billId = data?.bill_id ? String(data.bill_id) : ''
+          const warrantyId = data?.warranty_id ? String(data.warranty_id) : ''
+          const inboxId = data?.inbox_id ? String(data.inbox_id) : ''
+          const kind = billId ? 'bill' : warrantyId ? 'warranty' : inboxId ? 'inbox' : ''
+          const id = billId || warrantyId || inboxId
+          if (!kind || !id) continue
+
+          const trigger: any = (req as any)?.trigger || null
+          const when = trigger?.date
+            ? String(trigger.date)
+            : (typeof trigger?.seconds === 'number' ? `seconds:${Math.round(trigger.seconds)}` : '')
+          const ident = String((req as any)?.identifier || '')
+          schedParts.push(`${kind}:${id}|${when}|${ident}`)
+        } catch {}
+      }
+      schedParts.sort()
+
+      const allKeys = await AsyncStorage.getAllKeys().catch(() => [] as string[])
+      const billPrefix = `billbox.reminders.bill.${payerId}.`
+      const warrantyPrefix = `billbox.reminders.warranty.${payerId}.`
+      const inboxPrefix = `billbox.reminders.inbox.${payerId}.`
+      const keys = (allKeys || []).filter((k) => k.startsWith(billPrefix) || k.startsWith(warrantyPrefix) || k.startsWith(inboxPrefix))
+      keys.sort()
+
+      const pairs = keys.length ? await AsyncStorage.multiGet(keys).catch(() => []) : []
+      const kvParts: string[] = []
+      for (const [k, v] of pairs as any) {
+        kvParts.push(`${String(k || '')}=${String(v || '')}`)
+      }
+      kvParts.sort()
+
+      return `${payerId}|s:${schedParts.join(';')}|k:${kvParts.join(';')}`
+    } catch {
+      return ''
+    }
+  }, [space?.id, spacesCtx.current?.id])
+
   useEffect(() => {
     if (spacesCtx.loading || !space) return
     void refreshRemindersStatus()
   }, [refreshRemindersStatus, space, spacesCtx.loading])
 
-  const sendTestNotification = useCallback(async () => {
-    await ensureNotificationConfig()
-    const ok = await requestPermissionIfNeeded()
-    if (!ok) {
-      try { await Linking.openSettings() } catch {}
-      return
-    }
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: tr('Reminders & notifications'),
-          body: tr('Test notification'),
-          data: { playSound: true },
-        },
-        trigger: { seconds: 5 } as any,
-      })
-      Alert.alert(tr('Scheduled'), tr('Test notification in ~5 seconds.'))
-    } catch {
-      Alert.alert(tr('Error'), tr('Unable to save.'))
-    }
-  }, [])
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true
+      const tick = async (force = false) => {
+        if (!alive) return
+        const nextSig = await computeRemindersSignature()
+        if (!alive) return
+        if (force || (nextSig && nextSig !== remindersSignatureRef.current)) {
+          remindersSignatureRef.current = nextSig
+          await refreshRemindersStatus()
+        }
+      }
+      void tick(true)
+      const id = setInterval(() => {
+        void tick(false)
+      }, 4000)
+      return () => {
+        alive = false
+        clearInterval(id)
+      }
+    }, [computeRemindersSignature, refreshRemindersStatus]),
+  )
   const [renameTarget, setRenameTarget] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renameVisible, setRenameVisible] = useState(false)
@@ -16424,6 +16805,14 @@ function SettingsScreen() {
   }, [])
 
   const [payerAvatars, setPayerAvatars] = useState<Record<string, string | null>>({})
+
+  const initialsFromName = useCallback((name: string) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+    const first = parts[0]?.[0] || ''
+    const second = parts.length > 1 ? (parts[1]?.[0] || '') : (parts[0]?.[1] || '')
+    const out = (first + second).toUpperCase()
+    return out || '•'
+  }, [])
 
   useEffect(() => {
     ;(async () => {
@@ -16478,6 +16867,27 @@ function SettingsScreen() {
     }
   }, [payerAvatarKey])
 
+  const openPayerAvatarMenu = useCallback((payerId: string, displayName: string) => {
+    const pid = String(payerId || '').trim()
+    if (!pid) return
+    const title = displayName || payerLabelFromSpaceId(pid)
+
+    const buttons: any[] = [
+      {
+        text: tr('Change photo'),
+        onPress: () => { void pickPayerAvatar(pid) },
+      },
+      {
+        text: tr('Remove photo'),
+        onPress: () => { void removePayerAvatar(pid) },
+        style: 'default',
+      },
+      { text: tr('Cancel'), style: 'cancel' },
+    ]
+
+    Alert.alert(title, '', buttons)
+  }, [payerAvatars, pickPayerAvatar, removePayerAvatar])
+
   const languageOptions = useMemo(() => {
     const opts: Array<{ code: Lang; key: string }> = [
       { code: 'de', key: 'german' },
@@ -16501,6 +16911,21 @@ function SettingsScreen() {
       infoEmail: 'info@getbillbox.com',
     }
   }, [])
+
+  const InlineAction = ({ label, iconName, tone, onPress }: { label: string; iconName: any; tone?: 'default' | 'danger'; onPress: () => void }) => {
+    const color = tone === 'danger' ? '#B91C1C' : themeColors.primary
+    return (
+      <Pressable
+        onPress={onPress}
+        style={({ pressed }) => [styles.settingsInlineAction, pressed && { opacity: 0.85 }]}
+        hitSlop={8}
+        accessibilityRole="button"
+      >
+        <Ionicons name={iconName} size={16} color={color} />
+        <Text style={[styles.settingsInlineActionText, { color }]}>{label}</Text>
+      </Pressable>
+    )
+  }
 
   const saveRename = useCallback(async () => {
     if (!renameTarget) return
@@ -16606,41 +17031,41 @@ function SettingsScreen() {
             if (!p1) return null
 
             return (
-              <View style={{ borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: themeSpacing.xs }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
+              <View style={styles.settingsProfilesBox}>
+                {/* Profile 1 */}
+                <View style={styles.settingsProfileRow}>
+                  <View style={styles.settingsProfileRowLeft}>
                     <Pressable
-                      onPress={() => { void pickPayerAvatar('personal') }}
-                      style={({ pressed }) => [
-                        { width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },
-                        pressed && { opacity: 0.9 },
-                      ]}
+                      onPress={() => openPayerAvatarMenu('personal', p1.name || p1Slot)}
+                      style={({ pressed }) => [styles.settingsProfileAvatar, pressed && { opacity: 0.9 }]}
                       hitSlop={8}
                       accessibilityLabel={tr('Change photo')}
                     >
-                      {p1Avatar ? <Image source={{ uri: p1Avatar }} style={{ width: 34, height: 34 }} /> : <Ionicons name="person-outline" size={16} color={themeColors.textMuted} />}
+                      {p1Avatar ? (
+                        <Image source={{ uri: p1Avatar }} style={styles.settingsProfileAvatarImg} />
+                      ) : (
+                        <Text style={styles.settingsProfileAvatarInitials}>{initialsFromName(p1.name || p1Slot)}</Text>
+                      )}
                     </Pressable>
-                    <Text style={{ fontWeight: '600' }}>{p1Slot}</Text>
+
+                    <Pressable
+                      onPress={() => {
+                        if (p1Active) return
+                        spacesCtx.setCurrent(p1.id)
+                      }}
+                      style={({ pressed }) => [styles.settingsProfileTextWrap, pressed && !p1Active ? { opacity: 0.85 } : null]}
+                      hitSlop={8}
+                    >
+                      <Text style={styles.settingsProfileName} numberOfLines={1}>{p1.name || p1Slot}</Text>
+                      <Text style={styles.settingsProfileSlot}>{p1Slot}</Text>
+                    </Pressable>
                   </View>
                   {p1Active ? <Badge label={tr('Active')} tone="success" /> : null}
                 </View>
-                <Pressable
-                  onPress={() => {
-                    if (p1Active) return
-                    spacesCtx.setCurrent(p1.id)
-                  }}
-                  style={({ pressed }) => [
-                    { marginTop: 2, opacity: pressed && !p1Active ? 0.85 : 1 },
-                  ]}
-                  hitSlop={8}
-                >
-                  <Text style={[styles.bodyText, { fontWeight: '800' }]}>{p1.name || '—'}</Text>
-                </Pressable>
 
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                  <AppButton
+                <View style={styles.settingsInlineActionsRow}>
+                  <InlineAction
                     label={tr('Rename')}
-                    variant="secondary"
                     iconName="create-outline"
                     onPress={() => {
                       setRenameTarget(p1.id)
@@ -16648,18 +17073,10 @@ function SettingsScreen() {
                       setRenameVisible(true)
                     }}
                   />
-                  {p1Avatar ? (
-                    <AppButton
-                      label={tr('Remove photo')}
-                      variant="ghost"
-                      iconName="trash-outline"
-                      onPress={() => { void removePayerAvatar('personal') }}
-                    />
-                  ) : null}
-                  <AppButton
+                  <InlineAction
                     label={tr('Remove')}
-                    variant="ghost"
                     iconName="trash-outline"
+                    tone="danger"
                     onPress={() => {
                       setRemoveTarget({ id: p1.id, displayName: p1.name || p1Slot, slotLabel: p1Slot })
                       setRemoveVisible(true)
@@ -16667,102 +17084,91 @@ function SettingsScreen() {
                   />
                 </View>
 
-                <View style={{ marginTop: themeSpacing.sm, paddingTop: themeSpacing.xs, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: themeColors.border }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: themeSpacing.sm }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: themeSpacing.sm }}>
-                      <Pressable
-                        onPress={p2 ? () => { void pickPayerAvatar('personal2') } : undefined}
-                        style={({ pressed }) => [
-                          { width: 34, height: 34, borderRadius: 17, overflow: 'hidden', backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, alignItems: 'center', justifyContent: 'center' },
-                          !p2 ? { opacity: 0.6 } : null,
-                          pressed && p2 ? { opacity: 0.9 } : null,
-                        ]}
-                        hitSlop={8}
-                        accessibilityLabel={tr('Change photo')}
-                      >
-                        {p2Avatar ? <Image source={{ uri: p2Avatar }} style={{ width: 34, height: 34 }} /> : <Ionicons name="person-outline" size={16} color={themeColors.textMuted} />}
-                      </Pressable>
-                      <Text style={{ fontWeight: '600' }}>{p2Slot}</Text>
-                    </View>
-                    {p2Active ? <Badge label={tr('Active')} tone="success" /> : null}
-                  </View>
+                <View style={styles.settingsProfilesDivider} />
 
-                  {!p2 ? (
-                    <View style={{ marginTop: 4 }}>
-                      <Text style={styles.mutedText}>{p2Locked ? tr('Locked (Več only)') : tr('Not created yet')}</Text>
-                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                        {p2Locked ? (
-                          <AppButton
-                            label={tr('Upgrade to Več')}
-                            variant="secondary"
-                            iconName="arrow-up-circle-outline"
-                            onPress={() => {
-                              if (IS_EXPO_GO) {
-                                Alert.alert(tr('Upgrade'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.'))
-                                return
-                              }
-                              navigation.navigate('Payments', { focusPlan: 'pro' })
-                            }}
-                          />
-                        ) : (
-                          <AppButton
-                            label={tr('Create Profil 2')}
-                            variant="secondary"
-                            iconName="add-outline"
-                            onPress={() => {
-                              setCreatingPayer2(true)
-                              setPayer2NameDraft('Profil 2')
-                            }}
-                          />
-                        )}
-                      </View>
-                    </View>
-                  ) : (
-                    <View style={{ marginTop: 4 }}>
-                      <Pressable
-                        onPress={() => {
-                          if (p2Active) return
-                          spacesCtx.setCurrent(p2.id)
-                        }}
-                        style={({ pressed }) => [
-                          { opacity: pressed && !p2Active ? 0.85 : 1 },
-                        ]}
-                        hitSlop={8}
-                      >
-                        <Text style={[styles.bodyText, { fontWeight: '800' }]}>{p2.name || '—'}</Text>
-                      </Pressable>
-                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
-                        <AppButton
-                          label={tr('Rename')}
-                          variant="secondary"
-                          iconName="create-outline"
-                          onPress={() => {
-                            setRenameTarget(p2.id)
-                            setRenameDraft(p2.name || '')
-                            setRenameVisible(true)
-                          }}
-                        />
-                        {p2Avatar ? (
-                          <AppButton
-                            label={tr('Remove photo')}
-                            variant="ghost"
-                            iconName="trash-outline"
-                            onPress={() => { void removePayerAvatar('personal2') }}
-                          />
-                        ) : null}
-                        <AppButton
-                          label={tr('Remove')}
-                          variant="ghost"
-                          iconName="trash-outline"
-                          onPress={() => {
-                            setRemoveTarget({ id: p2.id, displayName: p2.name || p2Slot, slotLabel: p2Slot })
-                            setRemoveVisible(true)
-                          }}
-                        />
-                      </View>
-                    </View>
-                  )}
+                {/* Profile 2 */}
+                <View style={styles.settingsProfileRow}>
+                  <View style={styles.settingsProfileRowLeft}>
+                    <Pressable
+                      onPress={p2 ? () => openPayerAvatarMenu('personal2', p2.name || p2Slot) : undefined}
+                      style={({ pressed }) => [styles.settingsProfileAvatar, !p2 ? { opacity: 0.6 } : null, pressed && p2 ? { opacity: 0.9 } : null]}
+                      hitSlop={8}
+                      accessibilityLabel={tr('Change photo')}
+                    >
+                      {p2Avatar ? (
+                        <Image source={{ uri: p2Avatar }} style={styles.settingsProfileAvatarImg} />
+                      ) : (
+                        <Text style={styles.settingsProfileAvatarInitials}>{initialsFromName((p2 as any)?.name || p2Slot)}</Text>
+                      )}
+                    </Pressable>
+
+                    <Pressable
+                      onPress={() => {
+                        if (!p2) return
+                        if (p2Active) return
+                        spacesCtx.setCurrent(p2.id)
+                      }}
+                      style={({ pressed }) => [styles.settingsProfileTextWrap, pressed && p2 && !p2Active ? { opacity: 0.85 } : null]}
+                      hitSlop={8}
+                    >
+                      <Text style={styles.settingsProfileName} numberOfLines={1}>{(p2 as any)?.name || (p2Locked ? tr('Locked (Več only)') : tr('Not created yet'))}</Text>
+                      <Text style={styles.settingsProfileSlot}>{p2Slot}</Text>
+                    </Pressable>
+                  </View>
+                  {p2Active ? <Badge label={tr('Active')} tone="success" /> : null}
                 </View>
+
+                {!p2 ? (
+                  <View style={{ marginTop: themeSpacing.xs }}>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap }}>
+                      {p2Locked ? (
+                        <AppButton
+                          label={tr('Upgrade to Več')}
+                          variant="secondary"
+                          iconName="arrow-up-circle-outline"
+                          onPress={() => {
+                            if (IS_EXPO_GO) {
+                              Alert.alert(tr('Upgrade'), tr('Purchases are disabled in Expo Go preview. Use a store/dev build to upgrade.'))
+                              return
+                            }
+                            navigation.navigate('Payments', { focusPlan: 'pro' })
+                          }}
+                        />
+                      ) : (
+                        <AppButton
+                          label={tr('Create Profil 2')}
+                          variant="secondary"
+                          iconName="add-outline"
+                          onPress={() => {
+                            setCreatingPayer2(true)
+                            setPayer2NameDraft('Profil 2')
+                          }}
+                        />
+                      )}
+                    </View>
+                  </View>
+                ) : (
+                  <View style={styles.settingsInlineActionsRow}>
+                    <InlineAction
+                      label={tr('Rename')}
+                      iconName="create-outline"
+                      onPress={() => {
+                        setRenameTarget(p2.id)
+                        setRenameDraft(p2.name || '')
+                        setRenameVisible(true)
+                      }}
+                    />
+                    <InlineAction
+                      label={tr('Remove')}
+                      iconName="trash-outline"
+                      tone="danger"
+                      onPress={() => {
+                        setRemoveTarget({ id: p2.id, displayName: p2.name || p2Slot, slotLabel: p2Slot })
+                        setRemoveVisible(true)
+                      }}
+                    />
+                  </View>
+                )}
               </View>
             )
           })()}
@@ -16886,12 +17292,12 @@ function SettingsScreen() {
         <Surface elevated>
           <SectionHeader title={tr('Reminders & notifications')} />
           <Text style={styles.mutedText}>
+            {tr('Standard reminders are scheduled automatically for all unpaid bills and all active warranties (across profiles).')}{'\n'}
             {tr('Bills: 3 days before at 10:00 and on due date at 09:00.')} {'\n'}
             {tr('Warranties: 30 days before and 7 days before (10:00).')}
           </Text>
           <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>
-            {tr('Reminders are configured per bill or warranty in Details → Reminders.')}{'\n'}
-            {tr('If Configured is 0, open a bill/warranty and tap “Schedule defaults”.')}
+            {tr('You can adjust reminders later in bill or warranty details.')}
           </Text>
 
           {remindersStatus ? (
@@ -16924,6 +17330,7 @@ function SettingsScreen() {
                 if (remindersEnabled) {
                   await setRemindersEnabled(false)
                   await cancelAllReminders()
+                  await clearAllReminderMetadata()
                   try { await Notifications.setBadgeCountAsync(0) } catch {}
                   setRemindersEnabledState(false)
                   setRemindersStatus(null)
@@ -16938,22 +17345,12 @@ function SettingsScreen() {
                 }
                 await setRemindersEnabled(true)
                 setRemindersEnabledState(true)
+                try {
+                  const payerIds = (spacesCtx.spaces || []).filter((s) => isPayerSpaceId((s as any)?.id)).map((s) => String((s as any)?.id || '').trim()).filter(Boolean)
+                  await rescheduleDefaultRemindersForAllPayers({ supabase, entitlements, payerIds })
+                } catch {}
                 void refreshRemindersStatus()
               }}
-            />
-
-            <AppButton
-              label={tr('Refresh status')}
-              variant="secondary"
-              iconName="refresh-outline"
-              onPress={() => { void refreshRemindersStatus() }}
-            />
-
-            <AppButton
-              label={tr('Test notification')}
-              variant="secondary"
-              iconName="notifications-outline"
-              onPress={() => { void sendTestNotification() }}
             />
 
             {remindersStatus?.items?.length ? (
@@ -17442,6 +17839,41 @@ function PaymentReminderOverlay() {
   )
 }
 
+function RemindersAutoRescheduler() {
+  const supabase = useMemo(() => getSupabase(), [])
+  const spacesCtx = useSpacesContext()
+  const { snapshot: entitlements } = useEntitlements()
+  const ranRef = useRef(false)
+
+  useEffect(() => {
+    if (ranRef.current) return
+    if (spacesCtx.loading) return
+
+    ranRef.current = true
+    ;(async () => {
+      try {
+        const enabled = await getRemindersEnabled()
+        if (!enabled) return
+
+        // Do not prompt for permissions automatically; only maintain schedules if already granted.
+        const perm = await Notifications.getPermissionsAsync().catch(() => null as any)
+        if (!perm?.granted) return
+
+        const payerIds = (spacesCtx.spaces || [])
+          .filter((s) => isPayerSpaceId((s as any)?.id))
+          .map((s) => String((s as any)?.id || '').trim())
+          .filter(Boolean)
+        if (!payerIds.length) return
+
+        await ensureNotificationConfig()
+        await rescheduleDefaultRemindersForAllPayers({ supabase, entitlements, payerIds })
+      } catch {}
+    })()
+  }, [entitlements, spacesCtx.loading, spacesCtx.spaces, supabase])
+
+  return null
+}
+
 export default function App() {
   const supabase = useMemo(() => getSupabase(), [])
   const [loggedIn, setLoggedIn] = useState(false)
@@ -17528,6 +17960,7 @@ export default function App() {
           <SpaceProvider>
             <ThemedAppShell>
               <AppNavigation loggedIn={loggedIn} setLoggedIn={setLoggedIn} lang={lang} setLang={setLangAndPersist} authLoading={authLoading} />
+              <RemindersAutoRescheduler />
               <PaymentReminderOverlay />
             </ThemedAppShell>
           </SpaceProvider>
@@ -17658,6 +18091,83 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 16, fontWeight: '600', color: '#111827' },
   bodyText: { fontSize: 14, color: '#374151' },
   mutedText: { fontSize: 12, color: '#9CA3AF' },
+
+  settingsProfilesBox: {
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    paddingVertical: themeSpacing.sm,
+    paddingHorizontal: themeSpacing.sm,
+    gap: themeSpacing.xs,
+  },
+  settingsProfilesDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: themeColors.border,
+    marginVertical: themeSpacing.xs,
+  },
+  settingsProfileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: themeSpacing.sm,
+  },
+  settingsProfileRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: themeSpacing.sm,
+    flex: 1,
+    minWidth: 0,
+  },
+  settingsProfileAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    overflow: 'hidden',
+    backgroundColor: '#F1F5F9',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  settingsProfileAvatarImg: {
+    width: 36,
+    height: 36,
+  },
+  settingsProfileAvatarInitials: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: themeColors.text,
+  },
+  settingsProfileTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  settingsProfileName: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: themeColors.text,
+  },
+  settingsProfileSlot: {
+    fontSize: 12,
+    color: themeColors.textMuted,
+    marginTop: 1,
+  },
+  settingsInlineActionsRow: {
+    flexDirection: 'row',
+    gap: themeSpacing.md,
+    marginTop: 2,
+    flexWrap: 'wrap',
+  },
+  settingsInlineAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+  },
+  settingsInlineActionText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
   listContent: { paddingBottom: themeSpacing.xxl + themeSpacing.xl },
 
   brandEmptyWrap: { marginTop: themeSpacing.lg, alignItems: 'center', gap: themeSpacing.md },
@@ -17759,9 +18269,25 @@ const styles = StyleSheet.create({
   payQrThumbPlaceholder: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   payRightColumn: { alignItems: 'center', justifyContent: 'flex-start', gap: 10 },
   payQrIconWrap: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
+  payQrInlineWrap: {
+    width: 118,
+    height: 118,
+    borderRadius: 14,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: themeColors.border,
+  },
+  payQrInlineImage: { width: 118, height: 118 },
+  payQrInlinePlaceholder: { width: 118, height: 118, alignItems: 'center', justifyContent: 'center' },
+  payQrInlineUnavailable: { backgroundColor: '#F8FAFC' },
+  payQrInlineUnavailableText: { marginTop: 6, fontSize: 11, fontWeight: '800', color: themeColors.textMuted },
   payInfoRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 2 },
   payInfoLabelToPay: { fontSize: 13, fontWeight: '700', color: '#2563EB' },
   payInfoLabelDue: { fontSize: 13, fontWeight: '700', color: '#DC2626' },
+  payInfoLabelProfile: { fontSize: 13, fontWeight: '700', color: '#64748B' },
   payInfoValue: { fontSize: 13, color: '#374151', fontWeight: '600' },
   payCopyMiniRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
   payCopyMiniBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
@@ -17795,12 +18321,19 @@ const styles = StyleSheet.create({
   reportXLabelCell: { flex: 1 },
   reportXLabelText: { fontSize: 10, color: '#64748B', textAlign: 'center' },
   reportGridLine: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#E2E8F0' },
-  reportLineChart: { height: 160, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, borderRadius: 12, backgroundColor: '#FFFFFF' },
-  reportLineSegment: { position: 'absolute', height: 2, backgroundColor: themeColors.primary, borderRadius: 2 },
-  reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: themeColors.primary },
   reportLineChart: { height: 160, borderRadius: 12, backgroundColor: '#F8FAFC', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
   reportLineSegment: { position: 'absolute', height: 3, backgroundColor: '#1D4ED8', borderRadius: 3 },
   reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: '#1D4ED8' },
+  tabIconPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+  },
+  tabIconPillActive: {
+    backgroundColor: 'rgba(37, 99, 235, 0.10)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(37, 99, 235, 0.22)',
+  },
   reportTableRowAlt: { backgroundColor: '#F8FAFC' },
   reportTableRowCard: { padding: themeSpacing.sm, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border, backgroundColor: '#FFFFFF' },
   reportRowTitle: { fontSize: 13, fontWeight: '700', color: '#111827' },
