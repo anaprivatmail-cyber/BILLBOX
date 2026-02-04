@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   ScrollView,
   StyleProp,
   StyleSheet,
@@ -117,17 +118,21 @@ export function AppButton({
   onPress,
   iconName,
   disabled,
+  loading,
   variant = 'primary',
   style,
   labelStyle,
+  throttleMs,
 }: {
   label: string
-  onPress?: () => void
+  onPress?: () => void | Promise<void>
   iconName?: keyof typeof Ionicons.glyphMap
   disabled?: boolean
+  loading?: boolean
   variant?: ButtonVariant
   style?: StyleProp<ViewStyle>
   labelStyle?: StyleProp<TextStyle>
+  throttleMs?: number
 }) {
   const colors = useThemeColors()
   const styles = useMemo(() => makeStyles(colors), [colors])
@@ -138,18 +143,72 @@ export function AppButton({
     return { bg: colors.primary, border: colors.primary, text: '#FFFFFF' }
   }, [variant])
 
+  const lockMs = typeof throttleMs === 'number' ? throttleMs : 650
+  const [pressLocked, setPressLocked] = useState(false)
+  const lockTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false
+      if (lockTimeoutRef.current) {
+        clearTimeout(lockTimeoutRef.current)
+        lockTimeoutRef.current = null
+      }
+    }
+  }, [])
+
+  const effectiveDisabled = Boolean(disabled || loading || pressLocked || !onPress)
+
+  const handlePress = useCallback(() => {
+    if (effectiveDisabled || !onPress) return
+
+    if (mountedRef.current) setPressLocked(true)
+    const startedAt = Date.now()
+
+    const release = () => {
+      const elapsed = Date.now() - startedAt
+      const remaining = Math.max(0, lockMs - elapsed)
+      if (lockTimeoutRef.current) clearTimeout(lockTimeoutRef.current)
+      lockTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current) setPressLocked(false)
+      }, remaining)
+    }
+
+    try {
+      const result = onPress()
+      if (result && typeof (result as any)?.then === 'function') {
+        Promise.resolve(result)
+          .catch((err) => {
+            // Avoid unhandled promise rejections crashing the app.
+            console.warn('AppButton onPress failed', err)
+          })
+          .finally(release)
+      } else {
+        release()
+      }
+    } catch (err) {
+      console.warn('AppButton onPress threw', err)
+      release()
+    }
+  }, [effectiveDisabled, lockMs, onPress])
+
   return (
     <TouchableOpacity
-      onPress={disabled ? undefined : onPress}
+      onPress={effectiveDisabled ? undefined : handlePress}
       activeOpacity={0.85}
       style={[
         styles.button,
-        { backgroundColor: palette.bg, borderColor: palette.border, opacity: disabled ? 0.6 : 1 },
-        variant === 'primary' && !disabled ? styles.buttonPrimaryShadow : null,
+        { backgroundColor: palette.bg, borderColor: palette.border, opacity: effectiveDisabled ? 0.6 : 1 },
+        variant === 'primary' && !effectiveDisabled ? styles.buttonPrimaryShadow : null,
         style,
       ]}
     >
-      {iconName ? <Ionicons name={iconName} size={16} color={palette.text} /> : null}
+      {loading ? (
+        <ActivityIndicator size="small" color={palette.text} />
+      ) : iconName ? (
+        <Ionicons name={iconName} size={16} color={palette.text} />
+      ) : null}
       <Text style={[styles.buttonLabel, { color: palette.text }, labelStyle]}>{tr(label)}</Text>
     </TouchableOpacity>
   )

@@ -2648,6 +2648,12 @@ function BillDetailsScreen() {
   const [billLoadError, setBillLoadError] = useState<string | null>(null)
   const spaceIdOverride = typeof route.params?.spaceIdOverride === 'string' ? String(route.params.spaceIdOverride) : null
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
+  const [attachmentViewerVisible, setAttachmentViewerVisible] = useState(false)
+  const [attachmentViewerTitle, setAttachmentViewerTitle] = useState<string>('')
+  const [attachmentViewerUri, setAttachmentViewerUri] = useState<string | null>(null)
+  const [attachmentViewerKind, setAttachmentViewerKind] = useState<'image' | 'pdf' | 'other'>('other')
+  const [attachmentViewerBusy, setAttachmentViewerBusy] = useState(false)
+  const [attachmentViewerError, setAttachmentViewerError] = useState<string | null>(null)
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [invoiceSaving, setInvoiceSaving] = useState(false)
@@ -2858,48 +2864,64 @@ function BillDetailsScreen() {
     await refresh()
   }
 
-  async function openAttachment(path: string, uri?: string) {
-    async function openLocalUri(targetUri: string) {
-      const hasScheme = /^[a-z]+:/.test(targetUri)
-      const fileUri = hasScheme ? targetUri : `file://${targetUri}`
-      if (Platform.OS === 'android' && fileUri.startsWith('file://')) {
-        const contentUri = await FileSystem.getContentUriAsync(fileUri)
-        await Linking.openURL(contentUri)
-      } else {
-        await Linking.openURL(fileUri)
-      }
+  const WebViewImpl = useMemo(() => {
+    try {
+      // Keep optional so the app doesn't hard-crash if WebView is missing in some environments.
+      return require('react-native-webview')?.WebView || null
+    } catch {
+      return null
     }
+  }, [])
 
-    if (supabase) {
-      const url = await getSignedUrl(supabase!, path)
-      if (!url) {
-        Alert.alert(tr('Open failed'), tr('Could not get URL'))
+  const inferAttachmentKind = useCallback((nameOrPath: string): 'image' | 'pdf' | 'other' => {
+    const n = String(nameOrPath || '').toLowerCase()
+    if (n.endsWith('.pdf')) return 'pdf'
+    if (/(\.(png|jpg|jpeg|webp|gif|bmp|heic|heif))$/.test(n)) return 'image'
+    return 'other'
+  }, [])
+
+  const openExternalUri = useCallback(async (targetUri: string) => {
+    const hasScheme = /^[a-z]+:/.test(targetUri)
+    const fileUri = hasScheme ? targetUri : `file://${targetUri}`
+    if (Platform.OS === 'android' && fileUri.startsWith('file://')) {
+      const contentUri = await FileSystem.getContentUriAsync(fileUri)
+      await Linking.openURL(contentUri)
+    } else {
+      await Linking.openURL(fileUri)
+    }
+  }, [])
+
+  async function previewAttachment(item: AttachmentItem) {
+    const kind = inferAttachmentKind(item?.name || item?.path)
+    setAttachmentViewerTitle(String(item?.name || tr('View attachment')))
+    setAttachmentViewerKind(kind)
+    setAttachmentViewerVisible(true)
+    setAttachmentViewerUri(null)
+    setAttachmentViewerError(null)
+    setAttachmentViewerBusy(true)
+
+    try {
+      if (supabase) {
+        const url = await getSignedUrl(supabase!, item.path)
+        if (!url) {
+          setAttachmentViewerError(tr('Could not get URL'))
+          return
+        }
+        setAttachmentViewerUri(String(url))
         return
       }
-      try {
-        await Linking.openURL(url)
-      } catch {
-        try {
-          const fileName = path.split('/').pop() || `attachment-${Date.now()}`
-          const target = `${FileSystem.cacheDirectory}${fileName}`
-          const download = await FileSystem.downloadAsync(url, target)
-          if (download?.uri) await openLocalUri(download.uri)
-          else Alert.alert(tr('Open failed'), tr('Could not open this file.'))
-        } catch {
-          Alert.alert(tr('Open failed'), tr('Could not open this file.'))
-        }
-      }
-      return
-    }
 
-    if (!uri) {
-      Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
-      return
-    }
-    try {
-      await openLocalUri(uri)
+      const localUri = String(item?.uri || '').trim()
+      if (!localUri) {
+        setAttachmentViewerError(tr('Could not open this file.'))
+        return
+      }
+      const hasScheme = /^[a-z]+:/.test(localUri)
+      setAttachmentViewerUri(hasScheme ? localUri : `file://${localUri}`)
     } catch {
-      Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+      setAttachmentViewerError(tr('Could not open this file.'))
+    } finally {
+      setAttachmentViewerBusy(false)
     }
   }
 
@@ -3185,7 +3207,7 @@ function BillDetailsScreen() {
                       label={tr('Open')}
                       variant="secondary"
                       iconName="open-outline"
-                      onPress={()=>openAttachment(item.path, item.uri)}
+                      onPress={() => previewAttachment(item)}
                     />
                     <AppButton
                       label={tr('Delete')}
@@ -3254,6 +3276,146 @@ function BillDetailsScreen() {
             </View>
           </Surface>
         </View>
+      </Modal>
+
+      <Modal
+        visible={attachmentViewerVisible}
+        transparent={false}
+        animationType="slide"
+        onRequestClose={() => setAttachmentViewerVisible(false)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#0B1220' }}>
+          <View
+            style={{
+              paddingHorizontal: themeLayout.screenPadding,
+              paddingVertical: themeSpacing.sm,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: themeLayout.gap,
+              borderBottomWidth: StyleSheet.hairlineWidth,
+              borderBottomColor: 'rgba(255,255,255,0.12)',
+            }}
+          >
+            <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '800', flex: 1 }} numberOfLines={1}>
+              {attachmentViewerTitle || tr('View attachment')}
+            </Text>
+            <AppButton
+              label={tr('Close')}
+              variant="ghost"
+              iconName="close-outline"
+              onPress={() => setAttachmentViewerVisible(false)}
+            />
+          </View>
+
+          <View style={{ flex: 1, backgroundColor: '#0B1220' }}>
+            {attachmentViewerBusy ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <ActivityIndicator size="large" color="#FFFFFF" />
+                <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)', marginTop: themeSpacing.sm }]}>
+                  {tr('Loading…')}
+                </Text>
+              </View>
+            ) : attachmentViewerError ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }] }>
+                <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>{attachmentViewerError}</Text>
+                {attachmentViewerUri ? (
+                  <View style={{ marginTop: themeSpacing.sm }}>
+                    <AppButton
+                      label={tr('Open')}
+                      variant="secondary"
+                      iconName="open-outline"
+                      onPress={async () => {
+                        try {
+                          await openExternalUri(attachmentViewerUri)
+                        } catch {
+                          Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+                        }
+                      }}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            ) : !attachmentViewerUri ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)' }]}>{tr('Open failed')}</Text>
+              </View>
+            ) : attachmentViewerKind === 'image' ? (
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
+                maximumZoomScale={3}
+                minimumZoomScale={1}
+              >
+                <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
+                  <Image
+                    source={{ uri: attachmentViewerUri }}
+                    style={{ flex: 1, width: '100%', height: '100%' }}
+                    resizeMode="contain"
+                  />
+                </View>
+              </ScrollView>
+            ) : attachmentViewerKind === 'pdf' ? (
+              WebViewImpl ? (
+                <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
+                  <WebViewImpl
+                    source={{ uri: attachmentViewerUri }}
+                    originWhitelist={['*']}
+                    startInLoadingState
+                    renderLoading={() => (
+                      <View style={[styles.centered, { flex: 1 }]}>
+                        <ActivityIndicator size="large" color={themeColors.primary} />
+                      </View>
+                    )}
+                    style={{ flex: 1 }}
+                    allowFileAccess
+                    allowUniversalAccessFromFileURLs
+                  />
+                </View>
+              ) : (
+                <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                  <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
+                    {tr('Could not open this file.')}
+                  </Text>
+                  <View style={{ marginTop: themeSpacing.sm }}>
+                    <AppButton
+                      label={tr('Open')}
+                      variant="secondary"
+                      iconName="open-outline"
+                      onPress={async () => {
+                        try {
+                          await openExternalUri(attachmentViewerUri)
+                        } catch {
+                          Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+                        }
+                      }}
+                    />
+                  </View>
+                </View>
+              )
+            ) : (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
+                  {tr('Could not open this file.')}
+                </Text>
+                <View style={{ marginTop: themeSpacing.sm }}>
+                  <AppButton
+                    label={tr('Open')}
+                    variant="secondary"
+                    iconName="open-outline"
+                    onPress={async () => {
+                      try {
+                        await openExternalUri(attachmentViewerUri)
+                      } catch {
+                        Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+                      }
+                    }}
+                  />
+                </View>
+              </View>
+            )}
+          </View>
+        </SafeAreaView>
       </Modal>
     </Screen>
   )
@@ -5561,10 +5723,16 @@ function ScanBillScreen() {
   }, [])
   useEffect(() => {
     const payload = route.params?.inboxPrefill
-    if (payload && payload.fields) {
+    if (payload) {
+      // Inbox can be opened repeatedly while the Scan tab stays mounted.
+      // Start from a clean draft so OCR/autofill can actually populate fields.
+      try { clearExtraction() } catch {}
+      try { lastAutoExtractUriRef.current = '' } catch {}
+      try { setPendingAttachment(null) } catch {}
+
       setOpenedFromInboxPrefill(true)
       pendingScrollToDraftRef.current = true
-      const f = payload.fields as ExtractedFields
+      const f = (payload.fields || {}) as ExtractedFields
       const raw = String((f as any)?.rawText || '')
       const classification = (f as any)?._classification || null
       const clsConf = typeof (classification as any)?.confidence === 'number' ? (classification as any).confidence : null
@@ -5596,7 +5764,13 @@ function ScanBillScreen() {
       if (f.currency) setCurrency(f.currency)
       if (f.due_date) setDueDate(f.due_date)
       if (payload.attachmentPath) {
-        setPendingAttachment({ uri: payload.attachmentPath, name: payload.attachmentPath.split('/').pop() || 'document', type: payload.mimeType || 'application/octet-stream' })
+        const rawName = String(payload.attachmentName || '').trim()
+        const fallbackName = String(payload.attachmentPath).split('?')[0].split('#')[0].split('/').pop() || 'document'
+        setPendingAttachment({
+          uri: payload.attachmentPath,
+          name: rawName || fallbackName,
+          type: payload.mimeType || 'application/octet-stream',
+        })
       }
       setUseDataActive(true)
       setCameraVisible(false)
@@ -7170,11 +7344,12 @@ function InboxScreen() {
     return { kind, billScore, warrantyScore }
   }
 
-  const syncServerInbox = useCallback(async () => {
+  const syncServerInbox = useCallback(async (opts?: { runAutoOcr?: boolean }) => {
     if (!supabase) return
     // Email inbox is a Več-only feature; do not sync on other plans.
     if (entitlements.plan !== 'pro') return
     if (!serverSpaceId) return
+    const runAutoOcr = opts?.runAutoOcr ?? true
     try {
       const { data, error } = await supabase
         .from('inbox_items')
@@ -7234,7 +7409,7 @@ function InboxScreen() {
         newlyAdded.push(added)
       }
 
-      if (newlyAdded.length && entitlements?.canUseOCR) {
+      if (newlyAdded.length && entitlements?.canUseOCR && runAutoOcr) {
         for (const it of newlyAdded) {
           try {
             const meta = (it as any).meta || {}
@@ -7330,19 +7505,38 @@ function InboxScreen() {
     return !error
   }, [supabase, serverSpaceId])
 
-  const refresh = useCallback(async () => {
+  const refreshInFlightRef = useRef(false)
+
+  const refresh = useCallback(async (opts?: { runAutoOcr?: boolean; alive?: () => boolean }) => {
     if (spaceLoading || !space) return
-    await syncServerInbox()
-    const list = await listInbox(inboxSpaceKey)
-    setItems(list)
+    if (refreshInFlightRef.current) return
+    refreshInFlightRef.current = true
+    try {
+      await syncServerInbox({ runAutoOcr: opts?.runAutoOcr })
+      const list = await listInbox(inboxSpaceKey)
+      if (opts?.alive && !opts.alive()) return
+      setItems(list)
+    } finally {
+      refreshInFlightRef.current = false
+    }
   }, [spaceLoading, space, inboxSpaceKey, syncServerInbox])
 
   useFocusEffect(useCallback(() => {
-    refresh()
+    let alive = true
+    const isAlive = () => alive
+
+    // Initial focus refresh: allow auto-OCR for newly added items.
+    void refresh({ runAutoOcr: true, alive: isAlive })
+
+    // Background refresh: keep it lightweight (no auto-OCR) to avoid piling heavy work.
     const id = setInterval(() => {
-      void refresh()
-    }, 20000)
-    return () => clearInterval(id)
+      void refresh({ runAutoOcr: false, alive: isAlive })
+    }, 30000)
+
+    return () => {
+      alive = false
+      clearInterval(id)
+    }
   }, [refresh]))
 
   useEffect(() => {
@@ -7372,7 +7566,7 @@ function InboxScreen() {
         meta: { source: 'device' },
       })
       await scheduleInboxReviewReminder(item.id, item.name, inboxSpaceKey)
-      await refresh()
+      await refresh({ runAutoOcr: false })
       Alert.alert(tr('Inbox'), tr('Added to Inbox.'))
     } catch (e: any) {
       Alert.alert(tr('Import failed'), e?.message || tr('Could not import this file.'))
@@ -7434,6 +7628,7 @@ function InboxScreen() {
             id: item.id,
             fields: item.extractedFields || {},
             attachmentPath: cached?.uri || sourceUri,
+            attachmentName: item.name,
             mimeType: item.mimeType,
             inboxStatus: item.status,
           },
@@ -13133,8 +13328,37 @@ function ReportsScreen() {
         supplier: String(b.supplier || '').trim() || tr('Unknown'),
         date: getBillDateForMode(b, modeForDate),
         amount: billCurrency(b) === 'EUR' ? `EUR ${getAmountNumber(b).toFixed(2)}` : `${getAmountNumber(b).toFixed(2)} ${billCurrency(b)}`,
+        status: isBillUnpaid(b.status) ? 'unpaid' : b.status === 'paid' ? 'paid' : b.status === 'archived' ? 'archived' : 'unpaid',
       }))
   }, [billCurrency, dateMode, filtered, getAmountNumber, getBillDateForMode, isPro, tr])
+
+  const periodSummary = useMemo(() => {
+    const keyFn = groupBy === 'year' ? yyyyKey : yyyymmKey
+    const modeForDate = isPro ? dateMode : 'due'
+    const grouped: Record<
+      string,
+      { totalEur: number; unpaidEur: number; paidEur: number; archivedEur: number; count: number }
+    > = {}
+
+    for (const b of filtered) {
+      const iso = getBillDateForMode(b, modeForDate)
+      const key = keyFn(iso) || '—'
+      const eur = billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0
+
+      grouped[key] = grouped[key] || { totalEur: 0, unpaidEur: 0, paidEur: 0, archivedEur: 0, count: 0 }
+      grouped[key].totalEur += eur
+      grouped[key].count += 1
+
+      if (isBillUnpaid(b.status)) grouped[key].unpaidEur += eur
+      else if (b.status === 'paid') grouped[key].paidEur += eur
+      else if (b.status === 'archived') grouped[key].archivedEur += eur
+    }
+
+    const keys = Object.keys(grouped).sort()
+    const rows = keys.map((k) => ({ key: k, ...grouped[k] }))
+    const maxTotalEur = rows.reduce((m, r) => Math.max(m, r.totalEur || 0), 0)
+    return { rows, maxTotalEur }
+  }, [billCurrency, dateMode, filtered, getAmountNumber, getBillDateForMode, groupBy, isPro])
 
   const lineSeries = useMemo(() => {
     if (isPro && selectedStatusList.length > 1) {
@@ -13215,6 +13439,11 @@ function ReportsScreen() {
 
     Alert.alert(tr('Reports'), lines.join('\n\n'))
   }, [billCurrency, filtered, getAmountNumber, tr])
+
+  const tableDateLabel = useMemo(() => {
+    const mode = isPro ? dateMode : 'due'
+    return mode === 'invoice' ? tr('Invoice') : mode === 'created' ? tr('Created') : tr('Due')
+  }, [dateMode, isPro, tr])
 
   const reportPayload = useMemo(() => {
     const isAdvanced = isPro
@@ -13338,6 +13567,29 @@ function ReportsScreen() {
           .replace(/'/g, '&#039;')
       }
 
+      const computedPeriodSummary = (() => {
+        const keyFn = groupBy === 'year' ? yyyyKey : yyyymmKey
+        const modeForDate = isPro ? dateMode : 'due'
+        const grouped: Record<string, { totalEur: number; unpaidEur: number; paidEur: number; archivedEur: number; count: number }> = {}
+
+        for (const b of filtered) {
+          const iso = getBillDateForMode(b, modeForDate)
+          const key = keyFn(iso) || '—'
+          const eur = billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0
+          grouped[key] = grouped[key] || { totalEur: 0, unpaidEur: 0, paidEur: 0, archivedEur: 0, count: 0 }
+          grouped[key].totalEur += eur
+          grouped[key].count += 1
+          if (isBillUnpaid(b.status)) grouped[key].unpaidEur += eur
+          else if (b.status === 'paid') grouped[key].paidEur += eur
+          else if (b.status === 'archived') grouped[key].archivedEur += eur
+        }
+
+        const keys = Object.keys(grouped).sort()
+        const rows = keys.map((k) => ({ key: k, ...grouped[k] }))
+        const maxTotalEur = rows.reduce((m, r) => Math.max(m, r.totalEur || 0), 0)
+        return { rows, maxTotalEur }
+      })()
+
       const chartSvg = (() => {
         const points = series.points
         if (!points.length) return ''
@@ -13452,6 +13704,24 @@ function ReportsScreen() {
           </svg>
         `
       })()
+
+      function svgToDataUri(svg: string): string {
+        const clean = String(svg || '').trim()
+        if (!clean) return ''
+        return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(clean)}`
+      }
+
+      function chartStackHtml(svg: string): string {
+        const clean = String(svg || '').trim()
+        if (!clean) return ''
+        const dataUri = svgToDataUri(clean)
+        return `
+          <div class="chartStack">
+            <div class="chartLayer">${clean}</div>
+            ${dataUri ? `<img class="chartLayer" src="${dataUri}" alt="chart" />` : ''}
+          </div>
+        `
+      }
       const tableHtml = tableRows.map((r) => `
         <tr>
           <td>${escapeHtml(r.supplier)}</td>
@@ -13460,33 +13730,74 @@ function ReportsScreen() {
         </tr>
       `).join('')
 
-      const billsListHtml = tableRows.map((r) => `<li><b>${escapeHtml(r.supplier)}</b> — ${escapeHtml(r.date || '—')} — ${escapeHtml(r.amount)}</li>`).join('')
+      const summaryTableHtml = (() => {
+        const rows = computedPeriodSummary.rows
+        if (!rows.length) return ''
 
-      const viewSectionHtml = (() => {
-        if (selectedView === 'table') {
-          return `
-            <div class="card">
-              <div class="k" style="margin-bottom:8px;">${tr('Table')}</div>
-              ${tableHtml
-                ? `<table><thead><tr><th>${tr('Supplier')}</th><th>${escapeHtml(dateModeLabel)}</th><th style=\"text-align:right;\">${tr('Amount')}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
-                : `<div class="k">${tr('No bills in this range.')}</div>`
-              }
-            </div>
-          `
-        }
+        const statusCols = selectedStatusList
+          .filter((s) => s === 'unpaid' || s === 'paid' || s === 'archived')
+          .map((s) => ({
+            key: s,
+            label: s === 'unpaid' ? tr('Unpaid') : s === 'paid' ? tr('Paid') : tr('Archived'),
+          }))
 
-        return `
-          <div class="card">
-            <div class="k" style="margin-bottom:8px;">${groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend')}</div>
-            ${chartSvg || `<div class="k">${tr('No bills in this range.')}</div>`}
-            ${lineSvg ? `<div style="margin-top:12px;">${lineSvg}</div>` : ''}
-          </div>
-          <div class="card">
-            <div class="k" style="margin-bottom:8px;">${tr('Bills in range')}</div>
-            ${billsListHtml ? `<ul style="margin:0; padding-left: 18px;">${billsListHtml}</ul>` : `<div class="k">${tr('No bills in this range.')}</div>`}
-          </div>
-        `
+        const head = `<tr>
+          <th>${escapeHtml(tr('Period'))}</th>
+          <th style="text-align:right;">${escapeHtml(tr('Total amount (EUR)'))}</th>
+          ${statusCols
+            .map((c) => `<th style="text-align:right;">${escapeHtml(c.label)} (EUR)</th>`)
+            .join('')}
+        </tr>`
+
+        const body = rows
+          .map((r) => {
+            const periodLabel = `${formatPeriodLabel(r.key)} (${r.count})`
+            const cols = statusCols
+              .map((c) => {
+                const v =
+                  c.key === 'unpaid'
+                    ? r.unpaidEur
+                    : c.key === 'paid'
+                      ? r.paidEur
+                      : r.archivedEur
+                return `<td style="text-align:right;">EUR ${escapeHtml(v.toFixed(2))}</td>`
+              })
+              .join('')
+            return `
+              <tr>
+                <td>${escapeHtml(periodLabel)}</td>
+                <td style="text-align:right;">EUR ${escapeHtml(r.totalEur.toFixed(2))}</td>
+                ${cols}
+              </tr>
+            `
+          })
+          .join('')
+
+        return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`
       })()
+
+      const detailsTableHtml = tableHtml
+        ? `<table><thead><tr><th>${escapeHtml(tr('Supplier'))}</th><th>${escapeHtml(dateModeLabel)}</th><th style="text-align:right;">${escapeHtml(tr('Amount'))}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
+        : ''
+
+      const exportBodyHtml = `
+        <div class="card">
+          <div class="k" style="margin-bottom:8px;">${escapeHtml(groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend'))}</div>
+          ${chartSvg ? chartStackHtml(chartSvg) : `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
+          ${lineSvg ? `<div style="margin-top:12px;">${chartStackHtml(lineSvg)}</div>` : ''}
+          ${eurOnlyNote ? `<div class="k" style="margin-top:10px;">${escapeHtml(eurOnlyNote)}</div>` : ''}
+        </div>
+
+        <div class="card">
+          <div class="k" style="margin-bottom:8px;">${escapeHtml(tr('Summary'))}</div>
+          ${summaryTableHtml || `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
+        </div>
+
+        <div class="card">
+          <div class="k" style="margin-bottom:8px;">${escapeHtml(tr('Table'))}</div>
+          ${detailsTableHtml || `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
+        </div>
+      `
       const html = `
         <html>
           <head>
@@ -13502,6 +13813,11 @@ function ReportsScreen() {
               table { width: 100%; border-collapse: collapse; }
               th, td { border-bottom: 1px solid #e2e8f0; padding: 8px 6px; text-align: left; font-size: 12px; }
               th { color: #334155; }
+              .chartStack { position: relative; width: 520px; height: 220px; max-width: 100%; margin: 0 auto; }
+              .chartLayer { position: absolute; top: 0; left: 0; width: 520px; height: 220px; max-width: 100%; }
+              .chartLayer svg { width: 520px; height: 220px; max-width: 100%; }
+              .chartLayer img { width: 520px; height: 220px; max-width: 100%; }
+              @media print { .card { page-break-inside: avoid; } }
             </style>
           </head>
           <body>
@@ -13525,7 +13841,7 @@ function ReportsScreen() {
               <div class="row"><div class="k">${tr('Total amount (EUR)')}</div><div class="v">EUR ${totals.totalAmountEur.toFixed(2)}</div></div>
               <div class="row"><div class="k">${tr('Unpaid total (EUR)')}</div><div class="v">EUR ${totals.unpaidTotalEur.toFixed(2)}</div></div>
             </div>
-            ${viewSectionHtml}
+            ${exportBodyHtml}
           </body>
         </html>
       `
@@ -13904,19 +14220,50 @@ function ReportsScreen() {
               {tableRows.length === 0 ? (
                 <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
               ) : (
-                <View style={{ gap: 10 }}>
-                  <View style={styles.reportTableHeaderRow}>
-                    <Text style={[styles.mutedText, { flex: 1 }]}>{tr('Supplier')}</Text>
-                    <Text style={[styles.mutedText, { width: 96 }]}>{tr('Due')}</Text>
-                    <Text style={[styles.mutedText, { width: 120, textAlign: 'right' }]}>{tr('Amount')}</Text>
-                  </View>
-                  {tableRows.map((row, idx) => (
-                    <View key={row.id} style={[styles.reportTableRow, idx % 2 === 1 ? styles.reportTableRowAlt : null]}>
-                      <Text style={[styles.bodyText, { flex: 1 }]} numberOfLines={1}>{row.supplier}</Text>
-                      <Text style={[styles.mutedText, { width: 96 }]}>{row.date || '—'}</Text>
-                      <Text style={[styles.bodyText, { width: 120, textAlign: 'right', fontWeight: '700' }]}>{row.amount}</Text>
+                <View style={{ gap: themeSpacing.sm }}>
+                  {periodSummary.rows.length ? (
+                    <View style={{ gap: themeSpacing.sm }}>
+                      {periodSummary.rows.map((r, idx) => {
+                        const pct = periodSummary.maxTotalEur > 0 ? (r.totalEur / periodSummary.maxTotalEur) * 100 : 0
+                        const secondary = `${tr('{count} bills', { count: r.count })}${r.unpaidEur > 0 ? ` • ${tr('Unpaid')}: EUR ${r.unpaidEur.toFixed(2)}` : ''}`
+                        return (
+                          <View key={r.key} style={styles.reportTableRowCard}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: themeSpacing.sm }}>
+                              <Text style={styles.reportRowTitle}>{formatPeriodLabel(r.key)}</Text>
+                              <Text style={styles.reportRowTitle}>EUR {r.totalEur.toFixed(2)}</Text>
+                            </View>
+                            <Text style={styles.mutedText}>{secondary}</Text>
+                            <View style={styles.reportRowBarTrack}>
+                              <View
+                                style={[
+                                  styles.reportRowBarFill,
+                                  {
+                                    width: `${Math.max(0, Math.min(100, pct))}%`,
+                                    backgroundColor: reportPalette[idx % reportPalette.length],
+                                  },
+                                ]}
+                              />
+                            </View>
+                          </View>
+                        )
+                      })}
                     </View>
-                  ))}
+                  ) : null}
+
+                  <View style={{ gap: 10 }}>
+                    <View style={styles.reportTableHeaderRow}>
+                      <Text style={[styles.mutedText, { flex: 1 }]}>{tr('Supplier')}</Text>
+                      <Text style={[styles.mutedText, { width: 96 }]}>{tableDateLabel}</Text>
+                      <Text style={[styles.mutedText, { width: 120, textAlign: 'right' }]}>{tr('Amount')}</Text>
+                    </View>
+                    {tableRows.map((row, idx) => (
+                      <View key={row.id} style={[styles.reportTableRow, idx % 2 === 1 ? styles.reportTableRowAlt : null]}>
+                        <Text style={[styles.bodyText, { flex: 1 }]} numberOfLines={1}>{row.supplier}</Text>
+                        <Text style={[styles.mutedText, { width: 96 }]}>{row.date || '—'}</Text>
+                        <Text style={[styles.bodyText, { width: 120, textAlign: 'right', fontWeight: '700' }]}>{row.amount}</Text>
+                      </View>
+                    ))}
+                  </View>
                 </View>
               )}
             </View>
@@ -14731,6 +15078,7 @@ function PayScreen() {
   const [qrBill, setQrBill] = useState<Bill | null>(null)
   const [qrDataUri, setQrDataUri] = useState<string | null>(null)
   const [qrBusy, setQrBusy] = useState(false)
+  const qrOpenInFlightRef = useRef(false)
   const [qrThumbs, setQrThumbs] = useState<Record<string, string>>({})
   const [qrThumbErrors, setQrThumbErrors] = useState<Record<string, boolean>>({})
   const qrThumbInFlight = useRef<Record<string, boolean>>({})
@@ -15374,7 +15722,7 @@ function PayScreen() {
         if (!payload) continue
         qrThumbInFlight.current[b.id] = true
         try {
-          const uri = await makeQrDataUri(payload, { width: 160, margin: 1 })
+          const uri = await makeQrDataUri(payload, { width: 240, margin: 1 })
           if (cancelled) return
           setQrThumbs((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: uri }))
           setQrThumbErrors((prev) => (prev[b.id] ? { ...prev, [b.id]: false } : prev))
@@ -15421,14 +15769,18 @@ function PayScreen() {
   }
 
   function openPaymentQr(bill: Bill) {
+    if (qrOpenInFlightRef.current) return
+    qrOpenInFlightRef.current = true
     const payload = buildPaymentQrPayload(bill)
     if (!payload) {
       const currency = String(bill.currency || 'EUR').toUpperCase()
       if (currency !== 'EUR') {
         Alert.alert(tr('QR unavailable'), tr('QR supports EUR only.'))
+        qrOpenInFlightRef.current = false
         return
       }
       Alert.alert(tr('QR unavailable'), tr('Missing IBAN, amount, or creditor name.'))
+      qrOpenInFlightRef.current = false
       return
     }
     setQrBill(bill)
@@ -15447,6 +15799,7 @@ function PayScreen() {
         setQrDataUri(null)
       } finally {
         setQrBusy(false)
+        qrOpenInFlightRef.current = false
       }
     })()
   }
@@ -15661,7 +16014,7 @@ function PayScreen() {
                   const payerLabel = payerNameById[payerId] || tr(payerLabelFromSpaceId(payerId))
                   return (
                     <Surface key={item.id} elevated style={styles.billRowCard}>
-                      <View style={styles.billRowHeader}>
+                      <View style={[styles.billRowHeader, { flexWrap: 'nowrap' }]}>
                         <View style={{ flex: 1 }}>
                           <Text style={styles.cardTitle}>{item.supplier}</Text>
                           <View style={styles.payInfoRow}>
@@ -15682,32 +16035,7 @@ function PayScreen() {
                               color={themeColors.primary}
                             />
                           </Pressable>
-                        </View>
-                      </View>
-                      <View style={styles.billActionsRow}>
-                        <Chip text={payerLabel} tone="neutral" />
-                        <Chip
-                          text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
-                          tone={isOverdue ? 'warning' : 'neutral'}
-                        />
-                        <View style={styles.payCopyMiniRow}>
-                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
-                            <Text style={styles.payCopyMiniText}>{tr('Reference')}</Text>
-                          </Pressable>
-                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.iban, 'IBAN not found.') }>
-                            <Text style={styles.payCopyMiniText}>IBAN</Text>
-                          </Pressable>
-                          <Pressable
-                            style={styles.payCopyMiniBtn}
-                            onPress={() => copyTextOrWarn(parts.amount ? `${parts.amount} ${parts.currency || ''}`.trim() : '', 'Amount not found.')}
-                          >
-                            <Text style={styles.payCopyMiniText}>{tr('Amount')}</Text>
-                          </Pressable>
-                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.') }>
-                            <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
-                          </Pressable>
-                        </View>
-                        <View style={{ marginLeft: 'auto', alignItems: 'center', gap: 6 }}>
+
                           {selected[item.id] ? (
                             canQr ? (
                               <Pressable
@@ -15734,12 +16062,30 @@ function PayScreen() {
                               </View>
                             )
                           ) : null}
-                          <AppButton
-                            label={tr('Pay (copy details)')}
-                            variant="primary"
-                            iconName="copy-outline"
-                            onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
-                          />
+                        </View>
+                      </View>
+                      <View style={styles.billActionsRow}>
+                        <Chip text={payerLabel} tone="neutral" />
+                        <Chip
+                          text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
+                          tone={isOverdue ? 'warning' : 'neutral'}
+                        />
+                        <View style={styles.payCopyMiniRow}>
+                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
+                            <Text style={styles.payCopyMiniText}>{tr('Reference')}</Text>
+                          </Pressable>
+                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.iban, 'IBAN not found.') }>
+                            <Text style={styles.payCopyMiniText}>IBAN</Text>
+                          </Pressable>
+                          <Pressable
+                            style={styles.payCopyMiniBtn}
+                            onPress={() => copyTextOrWarn(parts.amount ? `${parts.amount} ${parts.currency || ''}`.trim() : '', 'Amount not found.')}
+                          >
+                            <Text style={styles.payCopyMiniText}>{tr('Amount')}</Text>
+                          </Pressable>
+                          <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.') }>
+                            <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
+                          </Pressable>
                         </View>
                         <AppButton
                           label={tr('Mark as paid')}
@@ -15803,7 +16149,7 @@ function PayScreen() {
                 const payerLabel = payerNameById[payerId] || tr(payerLabelFromSpaceId(payerId))
                 return (
                 <Surface elevated style={styles.billRowCard}>
-                  <View style={styles.billRowHeader}>
+                  <View style={[styles.billRowHeader, { flexWrap: 'nowrap' }]}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.cardTitle}>{item.supplier}</Text>
                       <View style={styles.payInfoRow}>
@@ -15824,32 +16170,7 @@ function PayScreen() {
                           color={themeColors.primary}
                         />
                       </Pressable>
-                    </View>
-                  </View>
-                  <View style={styles.billActionsRow}>
-                    <Chip text={payerLabel} tone="neutral" />
-                    <Chip
-                      text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
-                      tone={isOverdue ? 'warning' : 'neutral'}
-                    />
-                    <View style={styles.payCopyMiniRow}>
-                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
-                        <Text style={styles.payCopyMiniText}>{tr('Reference')}</Text>
-                      </Pressable>
-                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.iban, 'IBAN not found.') }>
-                        <Text style={styles.payCopyMiniText}>IBAN</Text>
-                      </Pressable>
-                      <Pressable
-                        style={styles.payCopyMiniBtn}
-                        onPress={() => copyTextOrWarn(parts.amount ? `${parts.amount} ${parts.currency || ''}`.trim() : '', 'Amount not found.')}
-                      >
-                        <Text style={styles.payCopyMiniText}>{tr('Amount')}</Text>
-                      </Pressable>
-                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.') }>
-                        <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
-                      </Pressable>
-                    </View>
-                    <View style={{ marginLeft: 'auto', alignItems: 'center', gap: 6 }}>
+
                       {selected[item.id] ? (
                         canQr ? (
                           <Pressable
@@ -15876,12 +16197,30 @@ function PayScreen() {
                           </View>
                         )
                       ) : null}
-                      <AppButton
-                        label={tr('Pay (copy details)')}
-                        variant="primary"
-                        iconName="copy-outline"
-                        onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.')}
-                      />
+                    </View>
+                  </View>
+                  <View style={styles.billActionsRow}>
+                    <Chip text={payerLabel} tone="neutral" />
+                    <Chip
+                      text={(item as any).pay_date ? `${tr('Planned')}: ${(item as any).pay_date}` : d === today ? tr('Due today') : d && d < today ? tr('Overdue') : tr('Upcoming')}
+                      tone={isOverdue ? 'warning' : 'neutral'}
+                    />
+                    <View style={styles.payCopyMiniRow}>
+                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.reference, 'Reference not found.') }>
+                        <Text style={styles.payCopyMiniText}>{tr('Reference')}</Text>
+                      </Pressable>
+                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.iban, 'IBAN not found.') }>
+                        <Text style={styles.payCopyMiniText}>IBAN</Text>
+                      </Pressable>
+                      <Pressable
+                        style={styles.payCopyMiniBtn}
+                        onPress={() => copyTextOrWarn(parts.amount ? `${parts.amount} ${parts.currency || ''}`.trim() : '', 'Amount not found.')}
+                      >
+                        <Text style={styles.payCopyMiniText}>{tr('Amount')}</Text>
+                      </Pressable>
+                      <Pressable style={styles.payCopyMiniBtn} onPress={() => copyTextOrWarn(parts.all, 'Nothing to copy.') }>
+                        <Text style={styles.payCopyMiniText}>{tr('All')}</Text>
+                      </Pressable>
                     </View>
                     <AppButton
                       label={tr('Mark as paid')}
@@ -16353,8 +16692,8 @@ function MainTabs() {
   const bottomInset = Math.max(insets.bottom, 0)
   // Ensure icons/labels are never clipped by system navigation bars.
   // Keep a generous minimum padding on Android where insets can be reported as 0.
-  const bottomPadding = Math.max(bottomInset, 6)
-  const barHeight = 56 + bottomPadding
+  const bottomPadding = Math.max(bottomInset, 10)
+  const barHeight = 58 + bottomPadding
   const { lang } = useLangContext()
 
   return (
@@ -16403,10 +16742,14 @@ function MainTabs() {
             height: barHeight,
           },
           tabBarItemStyle: {
-            paddingVertical: 4,
+            paddingVertical: 6,
           },
           tabBarIconStyle: {
-            marginTop: 0,
+            height: 34,
+            width: '100%',
+            alignItems: 'center',
+            justifyContent: 'center',
+            overflow: 'visible',
           },
           tabBarIcon: ({ color, focused }) => {
             const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
@@ -16424,7 +16767,7 @@ function MainTabs() {
                 style={[
                   styles.tabIconPill,
                   focused ? styles.tabIconPillActive : null,
-                  { transform: [{ translateY: focused ? -2 : 0 }] },
+                  { transform: [{ scale: focused ? 1.04 : 1 }] },
                 ]}
               >
                 <Ionicons name={iconName} size={iconSize} color={color} />
@@ -16769,19 +17112,23 @@ function SettingsScreen() {
   useFocusEffect(
     useCallback(() => {
       let alive = true
+      let tickInFlight = false
       const tick = async (force = false) => {
         if (!alive) return
+        if (tickInFlight) return
+        tickInFlight = true
         const nextSig = await computeRemindersSignature()
         if (!alive) return
         if (force || (nextSig && nextSig !== remindersSignatureRef.current)) {
           remindersSignatureRef.current = nextSig
           await refreshRemindersStatus()
         }
+        tickInFlight = false
       }
       void tick(true)
       const id = setInterval(() => {
         void tick(false)
-      }, 4000)
+      }, 10000)
       return () => {
         alive = false
         clearInterval(id)
@@ -17074,12 +17421,21 @@ function SettingsScreen() {
                     }}
                   />
                   <InlineAction
-                    label={tr('Remove')}
-                    iconName="trash-outline"
-                    tone="danger"
+                    label={tr('More')}
+                    iconName="ellipsis-horizontal"
                     onPress={() => {
-                      setRemoveTarget({ id: p1.id, displayName: p1.name || p1Slot, slotLabel: p1Slot })
-                      setRemoveVisible(true)
+                      const title = p1.name || p1Slot
+                      Alert.alert(title, '', [
+                        {
+                          text: tr('Remove'),
+                          style: 'destructive',
+                          onPress: () => {
+                            setRemoveTarget({ id: p1.id, displayName: p1.name || p1Slot, slotLabel: p1Slot })
+                            setRemoveVisible(true)
+                          },
+                        },
+                        { text: tr('Cancel'), style: 'cancel' },
+                      ])
                     }}
                   />
                 </View>
@@ -17159,12 +17515,21 @@ function SettingsScreen() {
                       }}
                     />
                     <InlineAction
-                      label={tr('Remove')}
-                      iconName="trash-outline"
-                      tone="danger"
+                      label={tr('More')}
+                      iconName="ellipsis-horizontal"
                       onPress={() => {
-                        setRemoveTarget({ id: p2.id, displayName: p2.name || p2Slot, slotLabel: p2Slot })
-                        setRemoveVisible(true)
+                        const title = p2.name || p2Slot
+                        Alert.alert(title, '', [
+                          {
+                            text: tr('Remove'),
+                            style: 'destructive',
+                            onPress: () => {
+                              setRemoveTarget({ id: p2.id, displayName: p2.name || p2Slot, slotLabel: p2Slot })
+                              setRemoveVisible(true)
+                            },
+                          },
+                          { text: tr('Cancel'), style: 'cancel' },
+                        ])
                       }}
                     />
                   </View>
@@ -17291,15 +17656,6 @@ function SettingsScreen() {
 
         <Surface elevated>
           <SectionHeader title={tr('Reminders & notifications')} />
-          <Text style={styles.mutedText}>
-            {tr('Standard reminders are scheduled automatically for all unpaid bills and all active warranties (across profiles).')}{'\n'}
-            {tr('Bills: 3 days before at 10:00 and on due date at 09:00.')} {'\n'}
-            {tr('Warranties: 30 days before and 7 days before (10:00).')}
-          </Text>
-          <Text style={[styles.mutedText, { marginTop: themeSpacing.xs }]}>
-            {tr('You can adjust reminders later in bill or warranty details.')}
-          </Text>
-
           {remindersStatus ? (
             <View style={{ marginTop: themeSpacing.xs }}>
               <InlineInfo
@@ -17328,12 +17684,31 @@ function SettingsScreen() {
               }
               onPress={async ()=>{
                 if (remindersEnabled) {
-                  await setRemindersEnabled(false)
-                  await cancelAllReminders()
-                  await clearAllReminderMetadata()
-                  try { await Notifications.setBadgeCountAsync(0) } catch {}
-                  setRemindersEnabledState(false)
-                  setRemindersStatus(null)
+                  const info = [
+                    tr('Standard reminders are scheduled automatically for all unpaid bills and all active warranties (across profiles).'),
+                    tr('Default reminders: 3 days before at 10:00 and on due date at 09:00.'),
+                    tr('Warranties: 30 days before and 7 days before (10:00).'),
+                    '',
+                    tr('You can adjust reminders later in bill or warranty details.'),
+                  ].join('\n')
+
+                  Alert.alert(tr('Cancel reminders'), info, [
+                    { text: tr('Cancel'), style: 'cancel' },
+                    {
+                      text: tr('Cancel reminders'),
+                      style: 'destructive',
+                      onPress: () => {
+                        void (async () => {
+                          await setRemindersEnabled(false)
+                          await cancelAllReminders()
+                          await clearAllReminderMetadata()
+                          try { await Notifications.setBadgeCountAsync(0) } catch {}
+                          setRemindersEnabledState(false)
+                          setRemindersStatus(null)
+                        })()
+                      },
+                    },
+                  ])
                   return
                 }
 
@@ -18270,9 +18645,9 @@ const styles = StyleSheet.create({
   payRightColumn: { alignItems: 'center', justifyContent: 'flex-start', gap: 10 },
   payQrIconWrap: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF', borderWidth: StyleSheet.hairlineWidth, borderColor: themeColors.border },
   payQrInlineWrap: {
-    width: 118,
-    height: 118,
-    borderRadius: 14,
+    width: 144,
+    height: 144,
+    borderRadius: 16,
     overflow: 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
@@ -18280,8 +18655,8 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: themeColors.border,
   },
-  payQrInlineImage: { width: 118, height: 118 },
-  payQrInlinePlaceholder: { width: 118, height: 118, alignItems: 'center', justifyContent: 'center' },
+  payQrInlineImage: { width: 144, height: 144 },
+  payQrInlinePlaceholder: { width: 144, height: 144, alignItems: 'center', justifyContent: 'center' },
   payQrInlineUnavailable: { backgroundColor: '#F8FAFC' },
   payQrInlineUnavailableText: { marginTop: 6, fontSize: 11, fontWeight: '800', color: themeColors.textMuted },
   payInfoRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 2 },
@@ -18325,9 +18700,12 @@ const styles = StyleSheet.create({
   reportLineSegment: { position: 'absolute', height: 3, backgroundColor: '#1D4ED8', borderRadius: 3 },
   reportLineDot: { position: 'absolute', width: 8, height: 8, borderRadius: 4, backgroundColor: '#1D4ED8' },
   tabIconPill: {
+    width: 46,
+    height: 32,
     paddingHorizontal: 10,
-    paddingVertical: 5,
     borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   tabIconPillActive: {
     backgroundColor: 'rgba(37, 99, 235, 0.10)',
