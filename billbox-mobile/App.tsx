@@ -74,6 +74,8 @@ async function ensureLocalReadableFile(
     return { uri: sourceUri, cachedUri: sourceUri, size: null }
   }
 
+  const isRemoteHttp = /^https?:\/\//i.test(sourceUri)
+
   const extFromName = (n?: string) => {
     const match = String(n || '').match(/(\.[a-z0-9]{2,5})$/i)
     return match ? match[1] : ''
@@ -84,12 +86,19 @@ async function ensureLocalReadableFile(
     if (t.includes('png')) return '.png'
     if (t.includes('webp')) return '.webp'
     if (t.includes('jpg') || t.includes('jpeg')) return '.jpg'
+    if (t.includes('csv')) return '.csv'
+    if (t.includes('text/plain')) return '.txt'
     return ''
   }
   const ext = extFromName(fileName) || extFromMime(mimeType) || ''
   const cachedUri = `${FileSystem.cacheDirectory || FileSystem.documentDirectory || ''}billbox_import_${Date.now()}${ext}`
 
   const tryCopy = async () => {
+    if (isRemoteHttp) {
+      const res = await FileSystem.downloadAsync(sourceUri, cachedUri)
+      if (!res?.uri) throw new Error('download_failed')
+      return
+    }
     await FileSystem.copyAsync({ from: sourceUri, to: cachedUri })
   }
 
@@ -97,6 +106,7 @@ async function ensureLocalReadableFile(
     await tryCopy()
   } catch (e) {
     if (opts?.allowBase64Fallback) {
+      // Fallback for tricky local URIs (e.g., content://). Remote HTTP should be handled via downloadAsync above.
       const data = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 })
       await FileSystem.writeAsStringAsync(cachedUri, data, { encoding: FileSystem.EncodingType.Base64 })
     } else {
@@ -1190,6 +1200,43 @@ function sanitizeCurrency(input: any): string {
   if (!raw) return 'EUR'
   if (/^[A-Z]{3}$/.test(raw)) return raw
   return 'EUR'
+}
+
+function getOptionalWebViewImplShared(): any {
+  try {
+    // Keep optional so the app doesn't hard-crash if WebView is missing in some environments.
+    return require('react-native-webview')?.WebView || null
+  } catch {
+    return null
+  }
+}
+
+function inferAttachmentKindShared(nameOrPath: string): 'image' | 'pdf' | 'other' {
+  const n = String(nameOrPath || '').toLowerCase()
+  if (n.endsWith('.pdf')) return 'pdf'
+  if (/\.(png|jpg|jpeg|webp|gif|bmp|heic|heif)$/.test(n)) return 'image'
+  return 'other'
+}
+
+function buildPdfViewerUriShared(resolvedUri: string): string | null {
+  const uri = String(resolvedUri || '').trim()
+  if (!uri) return null
+  // Android WebView typically can't render PDFs directly; Google Docs viewer works for public HTTP(S) URLs.
+  if (/^https?:\/\//i.test(uri)) {
+    return `https://docs.google.com/gview?embedded=1&url=${encodeURIComponent(uri)}`
+  }
+  return uri
+}
+
+async function openExternalUriShared(targetUri: string): Promise<void> {
+  const hasScheme = /^[a-z]+:/.test(targetUri)
+  const fileUri = hasScheme ? targetUri : `file://${targetUri}`
+  if (Platform.OS === 'android' && fileUri.startsWith('file://')) {
+    const contentUri = await FileSystem.getContentUriAsync(fileUri)
+    await Linking.openURL(contentUri)
+  } else {
+    await Linking.openURL(fileUri)
+  }
 }
 
 function sanitizeBillForRoute(input: any): Bill | null {
@@ -2651,10 +2698,12 @@ function BillDetailsScreen() {
   const [attachmentViewerVisible, setAttachmentViewerVisible] = useState(false)
   const [attachmentViewerTitle, setAttachmentViewerTitle] = useState<string>('')
   const [attachmentViewerUri, setAttachmentViewerUri] = useState<string | null>(null)
+  const [attachmentViewerExternalUri, setAttachmentViewerExternalUri] = useState<string | null>(null)
   const [attachmentViewerKind, setAttachmentViewerKind] = useState<'image' | 'pdf' | 'other'>('other')
   const [attachmentViewerBusy, setAttachmentViewerBusy] = useState(false)
   const [attachmentViewerError, setAttachmentViewerError] = useState<string | null>(null)
   const [linkedWarranty, setLinkedWarranty] = useState<Warranty | null>(null)
+  const [creatingWarranty, setCreatingWarranty] = useState(false)
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [invoiceSaving, setInvoiceSaving] = useState(false)
   const [defaultReminderInfo, setDefaultReminderInfo] = useState<string | null>(null)
@@ -2669,6 +2718,7 @@ function BillDetailsScreen() {
     confirmLabel?: string
     onConfirm: () => void | Promise<void>
   } | null>(null)
+  const autoOpenAttachmentHandledRef = useRef<string | null>(null)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
 
   const showDetailNotice = useCallback((message: string, durationMs = 2200) => {
@@ -2691,6 +2741,90 @@ function BillDetailsScreen() {
   }, [])
 
   const effectiveSpaceId = spaceIdOverride || spaceId || space?.id || 'default'
+
+  const openWarrantyCreationFromBill = useCallback(async () => {
+    if (!bill) return
+    if (creatingWarranty) return
+    setCreatingWarranty(true)
+    try {
+      // If already linked, just open it.
+      if (linkedWarranty?.id) {
+        navigation.navigate('Warranty Details', { warrantyId: linkedWarranty.id })
+        return
+      }
+
+      const billId = String(bill.id || '').trim()
+      if (!billId) {
+        navigation.navigate('Warranties')
+        return
+      }
+
+      // Enforce 1:1 rule (one bill -> max one warranty)
+      try {
+        const s0 = getSupabase()
+        if (s0) {
+          const { data } = await listWarranties(s0, effectiveSpaceId)
+          const existing = (data || []).find((w: any) => w.bill_id === billId) || null
+          if (existing?.id) {
+            showDetailNotice(tr('Opening the existing warranty for this bill.'))
+            navigation.navigate('Warranty Details', { warrantyId: existing.id })
+            return
+          }
+        } else {
+          const locals = await loadLocalWarranties(effectiveSpaceId)
+          const existing = (locals || []).find((w: any) => w.bill_id === billId) || null
+          if ((existing as any)?.id) {
+            showDetailNotice(tr('Opening the existing warranty for this bill.'))
+            navigation.navigate('Warranty Details', { warrantyId: (existing as any).id })
+            return
+          }
+        }
+      } catch {}
+
+      const itemName = String(bill.supplier || bill.creditor_name || bill.invoice_number || tr('Bill')).trim() || tr('Bill')
+      const supplierName = String(bill.supplier || bill.creditor_name || '').trim() || null
+      const purchaseDateIso = toISODateOnly((bill as any)?.created_at) || String((bill as any)?.due_date || '').trim() || null
+
+      const s = getSupabase()
+      let createdId: string | null = null
+      if (s) {
+        const { data, error } = await createWarranty(s, {
+          item_name: itemName,
+          supplier: supplierName,
+          purchase_date: purchaseDateIso,
+          bill_id: billId,
+          space_id: effectiveSpaceId,
+        })
+        if (error) {
+          // If remote create fails, fall back to the Warranties screen prefilled.
+          console.warn('[Warranty] create from bill failed', { message: error.message, billId, spaceId: effectiveSpaceId })
+        } else {
+          createdId = data?.id || null
+        }
+      } else {
+        const local = await addLocalWarranty(effectiveSpaceId, {
+          item_name: itemName,
+          supplier: supplierName,
+          purchase_date: purchaseDateIso,
+          bill_id: billId,
+        })
+        createdId = local.id
+      }
+
+      if (createdId) {
+        showDetailNotice(tr('Linked to this bill.'))
+        navigation.navigate('Warranty Details', { warrantyId: createdId })
+        return
+      }
+
+      // Robust fallback: open the warranty creation form, prefilled with this bill.
+      navigation.navigate('Warranties', { prefillBillId: billId, prefillSpaceId: effectiveSpaceId })
+    } catch (e: any) {
+      Alert.alert(tr('Create warranty failed'), e?.message || tr('Unknown error'))
+    } finally {
+      setCreatingWarranty(false)
+    }
+  }, [bill, creatingWarranty, effectiveSpaceId, linkedWarranty?.id, navigation, showDetailNotice, tr])
 
   useEffect(() => {
     let cancelled = false
@@ -2761,6 +2895,7 @@ function BillDetailsScreen() {
     setDefaultReminderInfo(null)
     setReminderInfo(null)
     setSelectedReminderDelayDays(null)
+    autoOpenAttachmentHandledRef.current = null
   }, [bill?.id])
 
   useEffect(() => {
@@ -2865,30 +3000,19 @@ function BillDetailsScreen() {
   }
 
   const WebViewImpl = useMemo(() => {
-    try {
-      // Keep optional so the app doesn't hard-crash if WebView is missing in some environments.
-      return require('react-native-webview')?.WebView || null
-    } catch {
-      return null
-    }
+    return getOptionalWebViewImplShared()
   }, [])
 
   const inferAttachmentKind = useCallback((nameOrPath: string): 'image' | 'pdf' | 'other' => {
-    const n = String(nameOrPath || '').toLowerCase()
-    if (n.endsWith('.pdf')) return 'pdf'
-    if (/(\.(png|jpg|jpeg|webp|gif|bmp|heic|heif))$/.test(n)) return 'image'
-    return 'other'
+    return inferAttachmentKindShared(nameOrPath)
+  }, [])
+
+  const buildPdfViewerUri = useCallback((resolvedUri: string) => {
+    return buildPdfViewerUriShared(resolvedUri)
   }, [])
 
   const openExternalUri = useCallback(async (targetUri: string) => {
-    const hasScheme = /^[a-z]+:/.test(targetUri)
-    const fileUri = hasScheme ? targetUri : `file://${targetUri}`
-    if (Platform.OS === 'android' && fileUri.startsWith('file://')) {
-      const contentUri = await FileSystem.getContentUriAsync(fileUri)
-      await Linking.openURL(contentUri)
-    } else {
-      await Linking.openURL(fileUri)
-    }
+    await openExternalUriShared(targetUri)
   }, [])
 
   async function previewAttachment(item: AttachmentItem) {
@@ -2897,33 +3021,63 @@ function BillDetailsScreen() {
     setAttachmentViewerKind(kind)
     setAttachmentViewerVisible(true)
     setAttachmentViewerUri(null)
+    setAttachmentViewerExternalUri(null)
     setAttachmentViewerError(null)
     setAttachmentViewerBusy(true)
 
     try {
+      let resolved: string | null = null
       if (supabase) {
         const url = await getSignedUrl(supabase!, item.path)
         if (!url) {
           setAttachmentViewerError(tr('Could not get URL'))
           return
         }
-        setAttachmentViewerUri(String(url))
-        return
+        resolved = String(url)
+      } else {
+        const localUri = String(item?.uri || '').trim()
+        if (!localUri) {
+          setAttachmentViewerError(tr('Could not open this file.'))
+          return
+        }
+        const hasScheme = /^[a-z]+:/.test(localUri)
+        resolved = hasScheme ? localUri : `file://${localUri}`
       }
 
-      const localUri = String(item?.uri || '').trim()
-      if (!localUri) {
-        setAttachmentViewerError(tr('Could not open this file.'))
-        return
+      setAttachmentViewerExternalUri(resolved)
+
+      // Prefer in-app fullscreen viewer where possible.
+      if (kind === 'pdf' && WebViewImpl) {
+        const viewerUri = buildPdfViewerUri(resolved)
+        const resolvedIsHttp = /^https?:\/\//i.test(String(resolved || ''))
+        if (resolvedIsHttp && viewerUri) {
+          setAttachmentViewerUri(viewerUri)
+        } else {
+          setAttachmentViewerUri(null)
+          setAttachmentViewerError(tr('Preview is unavailable. Tap Open to view this file.'))
+        }
+      } else {
+        setAttachmentViewerUri(resolved)
       }
-      const hasScheme = /^[a-z]+:/.test(localUri)
-      setAttachmentViewerUri(hasScheme ? localUri : `file://${localUri}`)
     } catch {
       setAttachmentViewerError(tr('Could not open this file.'))
     } finally {
       setAttachmentViewerBusy(false)
     }
   }
+
+  useEffect(() => {
+    const path = String(route.params?.autoOpenAttachmentPath || '').trim()
+    if (!path) return
+    if (autoOpenAttachmentHandledRef.current === path) return
+    const match = (attachments || []).find((a) => String(a?.path || '') === path) || null
+    if (!match) return
+    autoOpenAttachmentHandledRef.current = path
+    void previewAttachment(match)
+    try {
+      navigation.setParams({ autoOpenAttachmentPath: null })
+    } catch {}
+  }, [attachments, navigation, route.params?.autoOpenAttachmentPath])
 
   async function remove(path: string) {
     showDangerConfirm(
@@ -3030,48 +3184,8 @@ function BillDetailsScreen() {
               variant="secondary"
               iconName="shield-checkmark-outline"
               style={{ marginTop: themeSpacing.sm }}
-              onPress={async () => {
-                try {
-                  // Enforce 1:1 rule (one bill -> max one warranty)
-                  try {
-                    const s0 = getSupabase()
-                    if (s0) {
-                      const { data } = await listWarranties(s0, effectiveSpaceId)
-                      const existing = (data || []).find((w: any) => w.bill_id === bill.id) || null
-                      if (existing?.id) {
-                        showDetailNotice(tr('Opening the existing warranty for this bill.'))
-                        navigation.navigate('Warranty Details', { warrantyId: existing.id })
-                        return
-                      }
-                    } else {
-                      const locals = await loadLocalWarranties(effectiveSpaceId)
-                      const existing = (locals || []).find((w: any) => w.bill_id === bill.id) || null
-                      if ((existing as any)?.id) {
-                        showDetailNotice(tr('Opening the existing warranty for this bill.'))
-                        navigation.navigate('Warranty Details', { warrantyId: (existing as any).id })
-                        return
-                      }
-                    }
-                  } catch {}
-
-                  const s = getSupabase()
-                  let createdId: string | null = null
-                  if (s) {
-                    const { data, error } = await createWarranty(s, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id, space_id: effectiveSpaceId })
-                    if (error) { Alert.alert(tr('Warranty error'), error.message); return }
-                    createdId = data?.id || null
-                  } else {
-                    const local = await addLocalWarranty(effectiveSpaceId, { item_name: bill.supplier, supplier: bill.supplier, purchase_date: bill.due_date, bill_id: bill.id })
-                    createdId = local.id
-                  }
-                  if (createdId) {
-                    showDetailNotice(tr('Linked to this bill.'))
-                    navigation.navigate('Warranty Details', { warrantyId: createdId })
-                  }
-                } catch (e: any) {
-                  Alert.alert(tr('Create warranty failed'), e?.message || tr('Unknown error'))
-                }
-              }}
+              onPress={openWarrantyCreationFromBill}
+              disabled={creatingWarranty}
             />
           )}
         </Surface>
@@ -3300,12 +3414,28 @@ function BillDetailsScreen() {
             <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '800', flex: 1 }} numberOfLines={1}>
               {attachmentViewerTitle || tr('View attachment')}
             </Text>
-            <AppButton
-              label={tr('Close')}
-              variant="ghost"
-              iconName="close-outline"
-              onPress={() => setAttachmentViewerVisible(false)}
-            />
+            <View style={{ flexDirection: 'row', gap: themeSpacing.xs }}>
+              {(attachmentViewerExternalUri || attachmentViewerUri) ? (
+                <AppButton
+                  label={tr('Open')}
+                  variant="ghost"
+                  iconName="open-outline"
+                  onPress={async () => {
+                    try {
+                      await openExternalUri(String(attachmentViewerExternalUri || attachmentViewerUri || ''))
+                    } catch {
+                      Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+                    }
+                  }}
+                />
+              ) : null}
+              <AppButton
+                label={tr('Close')}
+                variant="ghost"
+                iconName="close-outline"
+                onPress={() => setAttachmentViewerVisible(false)}
+              />
+            </View>
           </View>
 
           <View style={{ flex: 1, backgroundColor: '#0B1220' }}>
@@ -3319,7 +3449,7 @@ function BillDetailsScreen() {
             ) : attachmentViewerError ? (
               <View style={[styles.centered, { padding: themeSpacing.lg }] }>
                 <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>{attachmentViewerError}</Text>
-                {attachmentViewerUri ? (
+                {(attachmentViewerExternalUri || attachmentViewerUri) ? (
                   <View style={{ marginTop: themeSpacing.sm }}>
                     <AppButton
                       label={tr('Open')}
@@ -3327,7 +3457,7 @@ function BillDetailsScreen() {
                       iconName="open-outline"
                       onPress={async () => {
                         try {
-                          await openExternalUri(attachmentViewerUri)
+                          await openExternalUri(String(attachmentViewerExternalUri || attachmentViewerUri || ''))
                         } catch {
                           Alert.alert(tr('Open failed'), tr('Could not open this file.'))
                         }
@@ -3341,20 +3471,50 @@ function BillDetailsScreen() {
                 <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)' }]}>{tr('Open failed')}</Text>
               </View>
             ) : attachmentViewerKind === 'image' ? (
-              <ScrollView
-                style={{ flex: 1 }}
-                contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
-                maximumZoomScale={3}
-                minimumZoomScale={1}
-              >
-                <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
-                  <Image
-                    source={{ uri: attachmentViewerUri }}
-                    style={{ flex: 1, width: '100%', height: '100%' }}
-                    resizeMode="contain"
+              WebViewImpl ? (
+                <View style={{ flex: 1, backgroundColor: '#000000' }}>
+                  <WebViewImpl
+                    originWhitelist={['*']}
+                    source={{
+                      html: (() => {
+                        const raw = String(attachmentViewerUri || '')
+                        const esc = raw
+                          .replace(/&/g, '&amp;')
+                          .replace(/"/g, '&quot;')
+                          .replace(/</g, '&lt;')
+                          .replace(/>/g, '&gt;')
+                        return `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" /><style>html,body{margin:0;padding:0;background:#0B1220;height:100%;overflow:hidden;} .wrap{height:100%;width:100%;display:flex;align-items:center;justify-content:center;} img{max-width:100%;max-height:100%;object-fit:contain;}</style></head><body><div class="wrap"><img src="${esc}" /></div></body></html>`
+                      })(),
+                    }}
+                    startInLoadingState
+                    renderLoading={() => (
+                      <View style={[styles.centered, { flex: 1 }]}>
+                        <ActivityIndicator size="large" color="#FFFFFF" />
+                      </View>
+                    )}
+                    style={{ flex: 1, backgroundColor: '#0B1220' }}
+                    allowFileAccess
+                    allowUniversalAccessFromFileURLs
+                    setBuiltInZoomControls
+                    setDisplayZoomControls={false}
                   />
                 </View>
-              </ScrollView>
+              ) : (
+                <ScrollView
+                  style={{ flex: 1 }}
+                  contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
+                  maximumZoomScale={3}
+                  minimumZoomScale={1}
+                >
+                  <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
+                    <Image
+                      source={{ uri: attachmentViewerUri }}
+                      style={{ flex: 1, width: '100%', height: '100%' }}
+                      resizeMode="contain"
+                    />
+                  </View>
+                </ScrollView>
+              )
             ) : attachmentViewerKind === 'pdf' ? (
               WebViewImpl ? (
                 <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
@@ -3384,7 +3544,7 @@ function BillDetailsScreen() {
                       iconName="open-outline"
                       onPress={async () => {
                         try {
-                          await openExternalUri(attachmentViewerUri)
+                          await openExternalUri(String(attachmentViewerExternalUri || attachmentViewerUri || ''))
                         } catch {
                           Alert.alert(tr('Open failed'), tr('Could not open this file.'))
                         }
@@ -3405,7 +3565,7 @@ function BillDetailsScreen() {
                     iconName="open-outline"
                     onPress={async () => {
                       try {
-                        await openExternalUri(attachmentViewerUri)
+                        await openExternalUri(String(attachmentViewerExternalUri || attachmentViewerUri || ''))
                       } catch {
                         Alert.alert(tr('Open failed'), tr('Could not open this file.'))
                       }
@@ -4003,6 +4163,7 @@ function ScanBillScreen() {
   const [categoryPickerVisible, setCategoryPickerVisible] = useState(false)
   const lastAutoExtractUriRef = useRef<string>('')
   const lastOverdueWarnedRef = useRef<string>('')
+  const lastInboxPrefillKeyRef = useRef<string>('')
 
   const [lastQR, setLastQR] = useState('')
   const [torch, setTorch] = useState<'on' | 'off'>('off')
@@ -4066,6 +4227,37 @@ function ScanBillScreen() {
     if (lastAutoExtractUriRef.current === uri) return
     lastAutoExtractUriRef.current = uri
     const languageHint = getCurrentLang()
+
+    const contentType = String(pendingAttachment?.type || '').toLowerCase()
+    const name = String(pendingAttachment?.name || '').toLowerCase()
+    const isCsv = contentType.includes('csv') || name.endsWith('.csv')
+
+    if (isCsv) {
+      void (async () => {
+        try {
+          setOcrError(null)
+          setOcrBusy(true)
+          setDebugStatus('RUNNING')
+          setDebugQrFound(false)
+          setDebugAiInfo(null)
+          setDebugRequestId(null)
+          setDebugOcrMode('csv')
+          const text = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.UTF8 })
+          const res = await extractTextWithAI(text)
+          applyOcr(res?.fields || {}, String(res?.rawText || text), 'csv', { csv: true })
+          setDebugStatus('DONE')
+        } catch (e: any) {
+          const msg = e?.message || tr('OCR failed')
+          setOcrError(msg)
+          Alert.alert(tr('OCR failed'), msg)
+          setDebugStatus('ERROR')
+        } finally {
+          setOcrBusy(false)
+        }
+      })()
+      return
+    }
+
     void extractWithOCR(uri, pendingAttachment?.type || undefined, { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
   }, [pendingAttachment?.type, pendingAttachment?.uri])
 
@@ -4142,11 +4334,29 @@ function ScanBillScreen() {
       tr('Due date is in the past'),
       tr('This bill is overdue. Do you want to update the due date?'),
       [
-        { text: tr('Change date'), onPress: () => setShowDuePicker(true) },
+        {
+          text: tr('Change date'),
+          onPress: () => {
+            if (isIOS) {
+              setShowDuePicker(true)
+              return
+            }
+            try {
+              DateTimePickerAndroid.open({
+                value: getDueDateValue(),
+                mode: 'date',
+                display: 'calendar',
+                onChange: handleDuePickerChange,
+              })
+            } catch {
+              setShowDuePicker(true)
+            }
+          },
+        },
         { text: tr('Keep date'), style: 'cancel' },
       ],
     )
-  }, [tr])
+  }, [tr, isIOS, dueDate])
 
   function pickNameCandidate(...candidates: any[]): string {
     for (const c of candidates) {
@@ -4551,6 +4761,131 @@ function ScanBillScreen() {
     // Slovenian invoices often use TR/TRR for "transakcijski račun" (bank account).
     // Only treat it as a label when it looks like a label (e.g. "TR:"), not a country code in an IBAN.
     return /(\btrr\b|\btr\s*[:\-]|transakcij\S*\s*ra\u010dun|transakcij\S*\s*racun|\bbic\b|\bswift\b|\bbanka\b|\bbank\b)/i.test(s)
+  }
+
+  function scoreIbanContext(rawText: string, iban: string): { score: number; idx: number } {
+    const s = normalizeIban(iban)
+    if (!s) return { score: -999, idx: -1 }
+    const raw = String(rawText || '')
+    const compact = raw.toUpperCase().replace(/\s+/g, '')
+    const idx = compact.indexOf(s)
+    if (idx < 0) return { score: -999, idx }
+
+    const windowStart = Math.max(0, idx - 80)
+    const windowEnd = Math.min(compact.length, idx + s.length + 80)
+    const around = compact.slice(windowStart, windowEnd)
+
+    let score = 0
+    const strong = [
+      'IBAN',
+      'TRR',
+      'TR:',
+      'TR-',
+      'RACUN',
+      'RAČUN'.toUpperCase().replace(/\s+/g, ''),
+      'ACCOUNT',
+      'BANK',
+      'SWIFT',
+      'BIC',
+      'SEPA',
+    ]
+    for (const k of strong) if (around.includes(k.replace(/\s+/g, ''))) score += 3
+
+    // Prefer pay-to context; penalize payer/customer context.
+    const payeeHints = [
+      'PREJEMNIK',
+      'RECIPIENT',
+      'PAYEE',
+      'BENEFICIARY',
+      'CREDITOR',
+      'UPRAVI',
+      'ZA PLA',
+      'ZAPLAC',
+      'PLAČ',
+      'NAKAZ',
+      'PAYMENT',
+      'TO PAY',
+    ]
+    const payerHints = [
+      'PLAČNIK',
+      'PLACNIK',
+      'PAYER',
+      'CUSTOMER',
+      'BUYER',
+      'KUPEC',
+      'ODJEM',
+      'BILLTO',
+      'SOLDTO',
+    ]
+    for (const k of payeeHints) if (around.includes(String(k).toUpperCase().replace(/\s+/g, ''))) score += 2
+    for (const k of payerHints) if (around.includes(String(k).toUpperCase().replace(/\s+/g, ''))) score -= 3
+
+    // Prefer footer: bank details are frequently in the last part of the document.
+    const pos = compact.length > 0 ? idx / compact.length : 0
+    if (pos >= 0.8) score += 4
+    else if (pos >= 0.65) score += 2
+
+    // Prefer domestic SI IBAN slightly when ambiguous.
+    if (s.startsWith('SI')) score += 1
+    return { score, idx }
+  }
+
+  function pickBestIbanCandidate(rawText: string, candidates: string[]): { iban: string; score: number } | null {
+    const uniq = Array.from(new Set((candidates || []).map((c) => normalizeIban(c)).filter(Boolean)))
+      .filter((c) => isValidIbanChecksum(c))
+    if (!uniq.length) return null
+    if (uniq.length === 1) return { iban: uniq[0], score: 999 }
+
+    const pickFromLabeledLines = (): string | null => {
+      const text = String(rawText || '').replace(/\r/g, '')
+      const lines = text.split(/\n+/).map((l) => String(l || '').trim())
+      if (!lines.length) return null
+
+      const normalizeForSearch = (s: string) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+      const labelRe = /\biban\b|\btrr\b|\btr\s*[:\-]|transakcij\S*\s*ra\u010dun|transakcij\S*\s*racun|bank\s*account|account\s*(?:no\.?|number)?|\bra\u010dun\b|\bracun\b|\bbic\b|\bswift\b/i
+
+      // Prefer labeled occurrences; score for pay-to context and penalize payer context.
+      let best: { iban: string; lineIndex: number; score: number } | null = null
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i]
+        if (!l) continue
+        if (!labelRe.test(l)) continue
+
+        const window = `${l} ${String(lines[i + 1] || '')}`
+        const hay = normalizeForSearch(window)
+        const hayRaw = String(window || '').toUpperCase()
+        const hasPayee = /(prejemnik|recipient|payee|beneficiary|creditor|upravi\S*|za\s*pla\S*|to\s*pay|payment)/i.test(hayRaw)
+        const hasPayer = /(pla\u010dnik|placnik|payer|customer|buyer|kupec|odjemalec|bill\s*to|sold\s*to)/i.test(hayRaw)
+        const labelStrength = /\biban\b/i.test(window) || /\btrr\b/i.test(window) || /\btr\s*[:\-]/i.test(window) ? 6 : 3
+        const contextScore = (hasPayee ? 4 : 0) + (hasPayer ? -6 : 0)
+        const footerBias = i / Math.max(1, lines.length)
+        const lineScore = labelStrength + contextScore + (footerBias >= 0.8 ? 2 : 0)
+        for (const iban of uniq) {
+          if (!iban) continue
+          if (hay.includes(iban)) {
+            if (!best || lineScore > best.score || (lineScore === best.score && i >= best.lineIndex)) {
+              best = { iban, lineIndex: i, score: lineScore }
+            }
+          }
+        }
+      }
+      return best ? best.iban : null
+    }
+
+    const labeledPick = pickFromLabeledLines()
+    if (labeledPick) return { iban: labeledPick, score: 1000 }
+
+    const scored = uniq
+      .map((iban) => ({ iban, ...scoreIbanContext(rawText, iban) }))
+      .sort((a, b) => (b.score - a.score) || (b.idx - a.idx))
+    const best = scored[0]
+    const second = scored[1]
+    if (!best) return null
+
+    // Only auto-pick when there is clear context evidence, otherwise keep user choice.
+    const confident = best.score >= 6 && (!second || best.score - second.score >= 2)
+    if (confident) return { iban: best.iban, score: best.score }
+    return null
   }
 
   function extractIbanCandidates(text: string, rawIban?: string): string[] {
@@ -5245,11 +5580,16 @@ function ScanBillScreen() {
     // Prefer an explicit IBAN coming from the backend (even when multiple candidates exist).
     const preferredIban = allowPaymentFields && rawIban ? (tryRepairIbanChecksum(rawIban) || null) : null
     const ibanCandidates = allowPaymentFields ? extractIbanCandidates(rawText || '', rawIban) : []
-    const foundIban = preferredIban || (ibanCandidates.length === 1 ? ibanCandidates[0] : null)
+    let foundIban = preferredIban || (ibanCandidates.length === 1 ? ibanCandidates[0] : null)
 
     const sawTrOrAccountLabel = allowPaymentFields
       ? hasTrOrAccountLabel(rawText || '') || hasTrOrAccountLabel(String(rawPaymentDetails || ''))
       : false
+
+    if (allowPaymentFields && !foundIban && ibanCandidates.length > 1) {
+      const picked = pickBestIbanCandidate(rawText || '', ibanCandidates)
+      if (picked) foundIban = picked.iban
+    }
 
     if (allowPaymentFields && ibanCandidates.length) {
       console.log('[OCR] IBAN candidates:', ibanCandidates)
@@ -5302,19 +5642,34 @@ function ScanBillScreen() {
       const rawRefNumber = fields?.reference_number ? String(fields.reference_number) : ''
       const split = splitReferenceModel(rawRef)
       const modelCandidate = normalizeReferenceModel(rawModel || split.model || '')
+      const stripModelPrefix = (model: string, value: string): string => {
+        const m = String(model || '').replace(/\s+/g, '').toUpperCase()
+        const v = normalizeReferenceNumber(value)
+        if (!m || !v) return v
+        return v.startsWith(m) ? v.slice(m.length) : v
+      }
       let ref = ''
       if (modelCandidate) {
-        ref = normalizeReferenceNumber(rawRefNumber || split.number || rawRef)
+        const splitFull = rawRef ? splitReferenceModel(normalizeReference(rawRef) || '') : { model: null, number: null }
+        const candidate =
+          normalizeReferenceNumber(rawRefNumber) ||
+          normalizeReferenceNumber(split.number || '') ||
+          normalizeReferenceNumber(splitFull.number || '') ||
+          stripModelPrefix(modelCandidate, rawRef)
+        ref = candidate
       } else {
         ref = normalizeReference(rawRef) || ''
       }
       // If the extracted reference is missing or suspicious, fall back to labeled Sklic/Reference lines.
       if (!ref || !isValidReferenceFormat(ref, modelCandidate)) {
-        if (isAiOnly && rawRef && isValidReferenceFormat(rawRef, modelCandidate)) ref = modelCandidate ? normalizeReferenceNumber(rawRef) : normalizeReference(rawRef)
-        else if (refFromDoc && isValidReferenceFormat(refFromDoc, modelCandidate)) ref = modelCandidate ? normalizeReferenceNumber(refFromDoc) : refFromDoc
+        if (isAiOnly && rawRef && isValidReferenceFormat(rawRef, modelCandidate)) {
+          ref = modelCandidate ? stripModelPrefix(modelCandidate, rawRef) : normalizeReference(rawRef)
+        } else if (refFromDoc && isValidReferenceFormat(refFromDoc, modelCandidate)) {
+          ref = modelCandidate ? stripModelPrefix(modelCandidate, refFromDoc) : refFromDoc
+        }
       }
       if (isAiOnly && rawRef && !ref) {
-        ref = modelCandidate ? normalizeReferenceNumber(rawRef) : normalizeReference(rawRef)
+        ref = modelCandidate ? stripModelPrefix(modelCandidate, rawRef) : normalizeReference(rawRef)
       }
       if (ref) {
         const fullRef = modelCandidate ? buildReferenceFromModel(modelCandidate, ref) : ref
@@ -5526,9 +5881,18 @@ function ScanBillScreen() {
 
   function applyReferenceInput(raw: string, opts?: { markEdited?: boolean }) {
     const split = splitReferenceModel(raw)
-    const number = split.number ? normalizeReferenceNumber(split.number) : normalizeReferenceNumber(raw)
     const currentModel = split.model || referenceModel
     const normalizedModel = currentModel ? normalizeReferenceModel(currentModel) : ''
+    const stripModelPrefix = (model: string, value: string): string => {
+      const m = String(model || '').replace(/\s+/g, '').toUpperCase()
+      const v = normalizeReferenceNumber(value)
+      if (!m || !v) return v
+      // If user pasted full reference into the number field, strip the model prefix.
+      return v.startsWith(m) ? v.slice(m.length) : v
+    }
+    const number = split.number
+      ? normalizeReferenceNumber(split.number)
+      : (normalizedModel ? stripModelPrefix(normalizedModel, raw) : normalizeReferenceNumber(raw))
     if (opts?.markEdited) {
       editedRef.current.reference = true
       if (split.model) editedRef.current.referenceModel = true
@@ -5668,6 +6032,37 @@ function ScanBillScreen() {
     setMissingBasicFields((prev) => ({ ...prev, invoice: false, purchaseItem: false }))
   }, [])
 
+  const confirmDraftBeforeNewBill = useCallback((next: () => void) => {
+    if (!hasBillData || saving) {
+      next()
+      return
+    }
+    Alert.alert(
+      tr('Neshranjeni osnutek'),
+      tr('Imate neshranjene podatke na računu. Želite shraniti ali zbrisati pred nadaljevanjem?'),
+      [
+        { text: tr('Prekini'), style: 'cancel' },
+        {
+          text: tr('Zbriši'),
+          style: 'destructive',
+          onPress: () => {
+            try { clearExtraction() } catch {}
+            next()
+          },
+        },
+        {
+          text: tr('Shrani'),
+          onPress: () => {
+            void (async () => {
+              const ok = await handleSaveBill(false)
+              if (ok) next()
+            })()
+          },
+        },
+      ],
+    )
+  }, [hasBillData, saving, clearExtraction, handleSaveBill])
+
   const clearExtraction = useCallback(() => {
     setManual('')
     setRawText('')
@@ -5723,121 +6118,170 @@ function ScanBillScreen() {
   }, [])
   useEffect(() => {
     const payload = route.params?.inboxPrefill
-    if (payload) {
-      // Inbox can be opened repeatedly while the Scan tab stays mounted.
-      // Start from a clean draft so OCR/autofill can actually populate fields.
-      try { clearExtraction() } catch {}
-      try { lastAutoExtractUriRef.current = '' } catch {}
-      try { setPendingAttachment(null) } catch {}
+    if (!payload) {
+      lastInboxPrefillKeyRef.current = ''
+      return
+    }
 
-      setOpenedFromInboxPrefill(true)
-      pendingScrollToDraftRef.current = true
-      const f = (payload.fields || {}) as ExtractedFields
-      const raw = String((f as any)?.rawText || '')
-      const classification = (f as any)?._classification || null
-      const clsConf = typeof (classification as any)?.confidence === 'number' ? (classification as any).confidence : null
-      const sourceHint = String((f as any)?._source || (f as any)?.mode || '')
-      const isQr = /qr/i.test(sourceHint)
-      const source: 'QR' | 'OCR' = isQr ? 'QR' : 'OCR'
+    // Guard: the Scan tab stays mounted; avoid re-processing the same payload during rerenders.
+    const payloadKey = String(payload.id || payload.attachmentPath || '') || JSON.stringify(payload.fields || {}).slice(0, 200)
+    if (lastInboxPrefillKeyRef.current === payloadKey) return
+    lastInboxPrefillKeyRef.current = payloadKey
 
-      // Never auto-archive on prefill. Archiving must be an explicit user action.
-      setArchiveOnly(false)
-
-      const cat = (classification as any)?.category
-      if (typeof cat === 'string' && cat) setCategory(cat)
-
-      const isInvoice = (classification as any)?.isInvoice
-      const billLikeOverride = /(predra\u010dun|predracun|proforma|pro\s*forma|proforma\s*rechnung|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b|\bestimate\b|devis|preventivo|\bofferta\b|\bp\u0159edra\u010dun\b|\bpr\u00e9facture\b)/i.test(raw)
-      if (isInvoice === false && (clsConf == null || clsConf >= 0.7) && !billLikeOverride) {
-        Alert.alert(tr('Inbox'), tr('This looks like a non-bill document. Please verify before saving.'))
-      } else if (clsConf != null && clsConf < 0.55) {
-        Alert.alert(tr('Scan'), tr('AI is not fully confident. Please verify the details.'))
+    {
+      const clearParam = () => {
+        if (navigation?.setParams) navigation.setParams({ inboxPrefill: null })
       }
-      const supplierName = pickNameCandidate(f.creditor_name, f.supplier)
-      if (supplierName) setSupplier(supplierName)
-      const cred = pickNameCandidate(f.creditor_name, supplierName)
-      if (cred) setCreditorName(cred)
-      applyDataToForm(source, { ...f }, raw)
-      if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
-      if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
-      if (typeof f.amount === 'number') setAmountStr(String(f.amount))
-      if (f.currency) setCurrency(f.currency)
-      if (f.due_date) setDueDate(f.due_date)
-      if (payload.attachmentPath) {
-        const rawName = String(payload.attachmentName || '').trim()
-        const fallbackName = String(payload.attachmentPath).split('?')[0].split('#')[0].split('/').pop() || 'document'
-        setPendingAttachment({
-          uri: payload.attachmentPath,
-          name: rawName || fallbackName,
-          type: payload.mimeType || 'application/octet-stream',
-        })
-      }
-      setUseDataActive(true)
-      setCameraVisible(false)
-      setTorch('off')
-      if (payload.id) setInboxSourceId(payload.id)
-      if (navigation?.setParams) navigation.setParams({ inboxPrefill: null })
+
+      const loadPrefill = () => {
+        // Inbox can be opened repeatedly while the Scan tab stays mounted.
+        // Start from a clean draft so OCR/autofill can actually populate fields.
+        try { clearExtraction() } catch {}
+        try { lastAutoExtractUriRef.current = '' } catch {}
+        try { setPendingAttachment(null) } catch {}
+
+        setOpenedFromInboxPrefill(true)
+        pendingScrollToDraftRef.current = true
+        const f = (payload.fields || {}) as ExtractedFields
+        const raw = String((f as any)?.rawText || '')
+        const classification = (f as any)?._classification || null
+        const clsConf = typeof (classification as any)?.confidence === 'number' ? (classification as any).confidence : null
+        const sourceHint = String((f as any)?._source || (f as any)?.mode || '')
+        const isQr = /qr/i.test(sourceHint)
+        const source: 'QR' | 'OCR' = isQr ? 'QR' : 'OCR'
+
+        // Never auto-archive on prefill. Archiving must be an explicit user action.
+        setArchiveOnly(false)
+
+        const cat = (classification as any)?.category
+        if (typeof cat === 'string' && cat) setCategory(cat)
+
+        const isInvoice = (classification as any)?.isInvoice
+        const billLikeOverride = /(predra\u010dun|predracun|proforma|pro\s*forma|proforma\s*rechnung|\bangebot\b|ponudba|ponuda|\boffer\b|\bquotation\b|\bquote\b|\bestimate\b|devis|preventivo|\bofferta\b|\bp\u0159edra\u010dun\b|\bpr\u00e9facture\b)/i.test(raw)
+        if (isInvoice === false && (clsConf == null || clsConf >= 0.7) && !billLikeOverride) {
+          Alert.alert(tr('Inbox'), tr('This looks like a non-bill document. Please verify before saving.'))
+        } else if (clsConf != null && clsConf < 0.55) {
+          Alert.alert(tr('Scan'), tr('AI is not fully confident. Please verify the details.'))
+        }
+        const supplierName = pickNameCandidate(f.creditor_name, f.supplier)
+        if (supplierName) setSupplier(supplierName)
+        const cred = pickNameCandidate(f.creditor_name, supplierName)
+        if (cred) setCreditorName(cred)
+        applyDataToForm(source, { ...f }, raw)
+        if (f.payment_details) setPaymentDetails(String(f.payment_details || ''))
+        if (f.invoice_number) setInvoiceNumber(String(f.invoice_number || ''))
+        if (typeof f.amount === 'number') setAmountStr(String(f.amount))
+        if (f.currency) setCurrency(f.currency)
+        if (f.due_date) setDueDate(f.due_date)
+        if (payload.attachmentPath) {
+          const rawName = String(payload.attachmentName || '').trim()
+          const fallbackName = String(payload.attachmentPath).split('?')[0].split('#')[0].split('/').pop() || 'document'
+          setPendingAttachment({
+            uri: payload.attachmentPath,
+            name: rawName || fallbackName,
+            type: payload.mimeType || 'application/octet-stream',
+          })
+        }
+        setUseDataActive(true)
+        setCameraVisible(false)
+        setTorch('off')
+        if (payload.id) setInboxSourceId(payload.id)
+        clearParam()
 
       // Jump to the first part of the Add bill form (bill draft summary).
       // Delay slightly so layout has time to measure offsets.
-      setTimeout(() => {
-        if (!pendingScrollToDraftRef.current) return
-        const y = Number(billDraftYOffsetRef.current || 0)
-        if (!Number.isFinite(y) || y <= 0) return
-        scrollToBillDraft(true)
-        pendingScrollToDraftRef.current = false
-      }, 60)
+        setTimeout(() => {
+          if (!pendingScrollToDraftRef.current) return
+          const y = Number(billDraftYOffsetRef.current || 0)
+          if (!Number.isFinite(y) || y <= 0) return
+          scrollToBillDraft(true)
+          pendingScrollToDraftRef.current = false
+        }, 60)
+      }
+
+      // If we already have a draft, ask before overwriting it with inbox data.
+      if (!hasBillData || saving) {
+        loadPrefill()
+        return
+      }
+      Alert.alert(
+        tr('Neshranjeni osnutek'),
+        tr('Imate neshranjene podatke na računu. Želite shraniti ali zbrisati pred nadaljevanjem?'),
+        [
+          { text: tr('Prekini'), style: 'cancel', onPress: clearParam },
+          {
+            text: tr('Zbriši'),
+            style: 'destructive',
+            onPress: () => {
+              try { clearExtraction() } catch {}
+              loadPrefill()
+            },
+          },
+          {
+            text: tr('Shrani'),
+            onPress: () => {
+              void (async () => {
+                const ok = await handleSaveBill(false)
+                if (ok) loadPrefill()
+                else lastInboxPrefillKeyRef.current = ''
+              })()
+            },
+          },
+        ],
+      )
     }
-  }, [route, navigation, scrollToBillDraft])
+  }, [route, navigation, scrollToBillDraft, hasBillData, saving, clearExtraction, handleSaveBill])
   useEffect(() => { (async ()=>{ if (!permission?.granted) await requestPermission() })() }, [permission])
   async function pickImage() {
     if (!entitlements.canUseOCR) {
       showUpgradeAlert('ocr')
       return
     }
-    try {
-      setOcrBusyAction('photo')
-      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 })
-      if (res.canceled) return
-      const asset = res.assets?.[0]
-      if (!asset?.uri) return
+    const run = async () => {
+      try {
+        setOcrBusyAction('photo')
+        const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 })
+        if (res.canceled) return
+        const asset = res.assets?.[0]
+        if (!asset?.uri) return
 
-      resetInvoiceAndItemAutofillForNewAttachment()
-      const logMeta = {
-        originalUri: asset.uri,
-        mimeType: asset.mimeType || 'image/jpeg',
-        fileName: asset.fileName || 'photo.jpg',
-        fileSize: (asset as any)?.fileSize ?? null,
-        platform: Platform.OS,
-      }
-      console.log('[Import] pickImage', logMeta)
-      const cached = await ensureLocalReadableFile(asset.uri, asset.fileName || 'photo.jpg', asset.mimeType || 'image/jpeg', { allowBase64Fallback: false })
-      console.log('[Import] cached image', { cachedUri: cached.uri, size: cached.size })
-      setPendingAttachment({ uri: cached.uri, name: asset.fileName || 'photo.jpg', type: (asset.mimeType || 'image/jpeg') })
-      // Try QR decode first (web via ZXing), with up to 3 retries; fallback to OCR
-      const decoded = await decodeImageQR(cached.uri, 3)
-      if (decoded) {
-        const isPaymentQr = handleDecodedText(decoded)
-        if (!isPaymentQr) {
+        resetInvoiceAndItemAutofillForNewAttachment()
+        const logMeta = {
+          originalUri: asset.uri,
+          mimeType: asset.mimeType || 'image/jpeg',
+          fileName: asset.fileName || 'photo.jpg',
+          fileSize: (asset as any)?.fileSize ?? null,
+          platform: Platform.OS,
+        }
+        console.log('[Import] pickImage', logMeta)
+        const cached = await ensureLocalReadableFile(asset.uri, asset.fileName || 'photo.jpg', asset.mimeType || 'image/jpeg', { allowBase64Fallback: false })
+        console.log('[Import] cached image', { cachedUri: cached.uri, size: cached.size })
+        setPendingAttachment({ uri: cached.uri, name: asset.fileName || 'photo.jpg', type: (asset.mimeType || 'image/jpeg') })
+        // Try QR decode first (web via ZXing), with up to 3 retries; fallback to OCR
+        const decoded = await decodeImageQR(cached.uri, 3)
+        if (decoded) {
+          const isPaymentQr = handleDecodedText(decoded)
+          if (!isPaymentQr) {
+            const languageHint = getCurrentLang()
+            await extractWithOCR(cached.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
+          }
+        } else {
           const languageHint = getCurrentLang()
           await extractWithOCR(cached.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
         }
-      } else {
-        const languageHint = getCurrentLang()
-        await extractWithOCR(cached.uri, asset.mimeType || 'image/jpeg', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
+      } catch (e: any) {
+        console.warn('[Import] pickImage failed', {
+          message: e?.message,
+          stack: e?.stack,
+          platform: Platform.OS,
+        })
+        const msg = isDebugBuild() ? (e?.message || String(e)) : tr('Could not read the selected file.')
+        Alert.alert(tr('Import failed'), msg)
+      } finally {
+        setOcrBusyAction(null)
       }
-    } catch (e: any) {
-      console.warn('[Import] pickImage failed', {
-        message: e?.message,
-        stack: e?.stack,
-        platform: Platform.OS,
-      })
-      const msg = isDebugBuild() ? (e?.message || String(e)) : tr('Could not read the selected file.')
-      Alert.alert(tr('Import failed'), msg)
     }
-    finally {
-      setOcrBusyAction(null)
-    }
+    confirmDraftBeforeNewBill(() => { void run() })
   }
 
   async function pickPdfForOCR() {
@@ -5845,7 +6289,7 @@ function ScanBillScreen() {
       showUpgradeAlert('ocr')
       return
     }
-    try {
+    const run = async () => {
       setOcrBusyAction('pdf')
       const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true })
       if (res.canceled) return
@@ -5866,6 +6310,9 @@ function ScanBillScreen() {
       setPendingAttachment({ uri: cached.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
       const languageHint = getCurrentLang()
       await extractWithOCR(cached.uri, file.mimeType || 'application/pdf', { preferQr: true, allowAi: true, aiMode: 'document', languageHint })
+    }
+    try {
+      confirmDraftBeforeNewBill(() => { void run() })
     } catch (e: any) {
       console.warn('[Import] pickPdf failed', {
         message: e?.message,
@@ -6261,6 +6708,24 @@ function ScanBillScreen() {
     if ([y, m, d].some((part) => Number.isNaN(part))) return new Date()
     return new Date(y, m - 1, d)
   }
+
+  const openDueDatePicker = useCallback(() => {
+    if (isIOS) {
+      setShowDuePicker(true)
+      return
+    }
+    try {
+      DateTimePickerAndroid.open({
+        value: getDueDateValue(),
+        mode: 'date',
+        display: 'calendar',
+        onChange: handleDuePickerChange,
+      })
+    } catch {
+      // Fallback: mount inline picker if the Android dialog fails for any reason.
+      setShowDuePicker(true)
+    }
+  }, [isIOS, dueDate])
 
   function handleDuePickerChange(_event: any, selectedDate?: Date) {
     if (!selectedDate) {
@@ -6678,6 +7143,16 @@ function ScanBillScreen() {
                     onPress={() => setTorch((prev) => (prev === 'on' ? 'off' : 'on'))}
                   />
                   <AppButton
+                    label={tr('Prekini')}
+                    variant="ghost"
+                    iconName="close-outline"
+                    onPress={() => {
+                      setCameraVisible(false)
+                      setLastQR('')
+                      setTorch('off')
+                    }}
+                  />
+                  <AppButton
                     label={(ocrBusy && ocrBusyAction === 'photo') ? tr('Extracting…') : tr('Import photo')}
                     variant="outline"
                     iconName="image-outline"
@@ -6910,10 +7385,10 @@ function ScanBillScreen() {
                       label={dueDate ? tr('Change date') : tr('Pick date')}
                       variant="secondary"
                       iconName="calendar-outline"
-                      onPress={() => setShowDuePicker(true)}
+                      onPress={openDueDatePicker}
                     />
                   </View>
-                  {showDuePicker && (
+                  {isIOS && showDuePicker && (
                     <View style={styles.datePickerContainer}>
                       <DateTimePicker
                         value={getDueDateValue()}
@@ -7199,6 +7674,14 @@ function InboxScreen() {
   const [importing, setImporting] = useState(false)
   const [highlightId, setHighlightId] = useState<string | null>(null)
 
+  const [attachmentViewerVisible, setAttachmentViewerVisible] = useState(false)
+  const [attachmentViewerTitle, setAttachmentViewerTitle] = useState<string>('')
+  const [attachmentViewerUri, setAttachmentViewerUri] = useState<string | null>(null)
+  const [attachmentViewerExternalUri, setAttachmentViewerExternalUri] = useState<string | null>(null)
+  const [attachmentViewerKind, setAttachmentViewerKind] = useState<'image' | 'pdf' | 'other'>('other')
+  const [attachmentViewerBusy, setAttachmentViewerBusy] = useState(false)
+  const [attachmentViewerError, setAttachmentViewerError] = useState<string | null>(null)
+
   const payerSpaces = useMemo(() => {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
   }, [spacesCtx.spaces])
@@ -7273,6 +7756,7 @@ function InboxScreen() {
     if (m.includes('jpeg') || m.includes('jpg')) return '.jpg'
     if (m.includes('heic')) return '.heic'
     if (m.includes('tiff') || m.includes('tif')) return '.tif'
+    if (m.includes('csv')) return '.csv'
     return ''
   }
 
@@ -7601,39 +8085,21 @@ function InboxScreen() {
     try {
       setBusy(item.id)
       const sourceUri = (item as any).localPath || item.uri
-      if (kind === 'warranty') {
-        if (!entitlements.canUseOCR) {
-          showUpgradeAlert('ocr')
-          return
-        }
-        const { rawText } = await performOCR(sourceUri, { preferQr: false, allowAi: false, languageHint: getCurrentLang(), contentType: item.mimeType, filename: item.name })
-        const w = extractWarrantyFieldsFromOcr(typeof rawText === 'string' ? rawText : '')
-        const parts: string[] = []
-        if (w.itemName) parts.push(`${tr('Item')}: ${w.itemName}`)
-        if (w.supplier) parts.push(`${tr('Supplier')}: ${w.supplier}`)
-        if (w.purchaseDate) parts.push(`${tr('Purchase date')}: ${w.purchaseDate}`)
-        if (w.expiresAt) parts.push(`${tr('Valid until')}: ${w.expiresAt}`)
-        if (w.durationMonths) parts.push(`${tr('Duration')}: ${w.durationMonths} ${tr('months')}`)
-        const nextNotes = parts.join('\n') || tr('Warranty document')
-        await updateInboxItem(inboxSpaceKey, item.id, { extractedFields: { _kind: 'warranty', ...w, rawText }, notes: nextNotes, status: item.status || 'new' })
-        await scheduleInboxReviewReminder(item.id, item.name, inboxSpaceKey)
-        await refresh()
-        Alert.alert(tr('Scan complete'), nextNotes)
-      } else {
-        // Open the exact same Add bill form flow used by "Dodaj račun".
-        // The Scan screen will auto-run OCR/AI extraction from the staged attachment.
-        const cached = await ensureLocalReadableFile(sourceUri, item.name || 'document', item.mimeType, { allowBase64Fallback: true })
-        navigation.navigate('Scan', {
-          inboxPrefill: {
-            id: item.id,
-            fields: item.extractedFields || {},
-            attachmentPath: cached?.uri || sourceUri,
-            attachmentName: item.name,
-            mimeType: item.mimeType,
-            inboxStatus: item.status,
-          },
-        })
-      }
+      // Always open the exact same Add bill form flow used by "Dodaj račun".
+      // The Scan tab will auto-run OCR/AI extraction from the staged attachment.
+      const cached = await ensureLocalReadableFile(sourceUri, item.name || 'document', item.mimeType, { allowBase64Fallback: true })
+      const extracted = (item as any)?.extractedFields
+      const fieldsForBill = extracted && (extracted as any)?._kind === 'warranty' ? {} : (extracted || {})
+      navigation.navigate('Scan', {
+        inboxPrefill: {
+          id: item.id,
+          fields: fieldsForBill,
+          attachmentPath: cached?.uri || sourceUri,
+          attachmentName: item.name,
+          mimeType: item.mimeType,
+          inboxStatus: item.status,
+        },
+      })
     } catch (e: any) {
       const msg = e?.message || tr('Could not read this document.')
       const code = e?.code || null
@@ -7664,11 +8130,44 @@ function InboxScreen() {
   }
 
   async function openItem(item: InboxItem) {
+    const WebViewImpl = getOptionalWebViewImplShared()
+
     try {
-      const uri = (item as any).localPath || item.uri
-      await Linking.openURL(uri)
+      const localOrRemote = String((item as any).localPath || item.uri || '').trim()
+      if (!localOrRemote) {
+        Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+        return
+      }
+
+      const kind = inferAttachmentKindShared(item?.name || localOrRemote)
+      setAttachmentViewerTitle(String(item?.name || tr('View attachment')))
+      setAttachmentViewerKind(kind)
+      setAttachmentViewerVisible(true)
+      setAttachmentViewerUri(null)
+      setAttachmentViewerExternalUri(null)
+      setAttachmentViewerError(null)
+      setAttachmentViewerBusy(true)
+
+      const hasScheme = /^[a-z]+:/.test(localOrRemote)
+      const resolved = hasScheme ? localOrRemote : `file://${localOrRemote}`
+      setAttachmentViewerExternalUri(resolved)
+
+      if (kind === 'pdf' && WebViewImpl) {
+        const viewerUri = buildPdfViewerUriShared(resolved)
+        const resolvedIsHttp = /^https?:\/\//i.test(String(resolved || ''))
+        if (resolvedIsHttp && viewerUri) {
+          setAttachmentViewerUri(viewerUri)
+        } else {
+          setAttachmentViewerUri(null)
+          setAttachmentViewerError(tr('Preview is unavailable. Tap Open to view this file.'))
+        }
+      } else {
+        setAttachmentViewerUri(resolved)
+      }
     } catch {
-      Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+      setAttachmentViewerError(tr('Could not open this file.'))
+    } finally {
+      setAttachmentViewerBusy(false)
     }
   }
 
@@ -7832,6 +8331,172 @@ function InboxScreen() {
           />
         </View>
       </View>
+
+      <Modal
+        visible={attachmentViewerVisible}
+        transparent={false}
+        animationType="slide"
+        onRequestClose={() => setAttachmentViewerVisible(false)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#0B1220' }}>
+          <View
+            style={{
+              paddingHorizontal: themeLayout.screenPadding,
+              paddingVertical: themeSpacing.sm,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: themeLayout.gap,
+              borderBottomWidth: StyleSheet.hairlineWidth,
+              borderBottomColor: 'rgba(255,255,255,0.12)',
+            }}
+          >
+            <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '800', flex: 1 }} numberOfLines={1}>
+              {attachmentViewerTitle || tr('View attachment')}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: themeSpacing.xs }}>
+              {(attachmentViewerExternalUri || attachmentViewerUri) ? (
+                <AppButton
+                  label={tr('Open')}
+                  variant="ghost"
+                  iconName="open-outline"
+                  onPress={async () => {
+                    try {
+                      await openExternalUriShared(String(attachmentViewerExternalUri || attachmentViewerUri || ''))
+                    } catch {
+                      Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+                    }
+                  }}
+                />
+              ) : null}
+              <AppButton
+                label={tr('Close')}
+                variant="ghost"
+                iconName="close-outline"
+                onPress={() => setAttachmentViewerVisible(false)}
+              />
+            </View>
+          </View>
+
+          <View style={{ flex: 1, backgroundColor: '#0B1220' }}>
+            {attachmentViewerBusy ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <ActivityIndicator size="large" color="#FFFFFF" />
+                <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)', marginTop: themeSpacing.sm }]}>
+                  {tr('Loading…')}
+                </Text>
+              </View>
+            ) : attachmentViewerError ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }] }>
+                <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>{attachmentViewerError}</Text>
+                {(attachmentViewerExternalUri || attachmentViewerUri) ? (
+                  <View style={{ marginTop: themeSpacing.sm }}>
+                    <AppButton
+                      label={tr('Open')}
+                      variant="secondary"
+                      iconName="open-outline"
+                      onPress={async () => {
+                        try {
+                          await openExternalUriShared(String(attachmentViewerExternalUri || attachmentViewerUri || ''))
+                        } catch {
+                          Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+                        }
+                      }}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            ) : !attachmentViewerUri ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)' }]}>{tr('Open failed')}</Text>
+              </View>
+            ) : attachmentViewerKind === 'image' ? (
+              (() => {
+                let WebViewImpl: any = null
+                try { WebViewImpl = require('react-native-webview')?.WebView || null } catch {}
+                return WebViewImpl ? (
+                  <View style={{ flex: 1, backgroundColor: '#000000' }}>
+                    <WebViewImpl
+                      originWhitelist={['*']}
+                      source={{
+                        html: (() => {
+                          const raw = String(attachmentViewerUri || '')
+                          const esc = raw
+                            .replace(/&/g, '&amp;')
+                            .replace(/"/g, '&quot;')
+                            .replace(/</g, '&lt;')
+                            .replace(/>/g, '&gt;')
+                          return `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" /><style>html,body{margin:0;padding:0;background:#0B1220;height:100%;overflow:hidden;} .wrap{height:100%;width:100%;display:flex;align-items:center;justify-content:center;} img{max-width:100%;max-height:100%;object-fit:contain;}</style></head><body><div class="wrap"><img src="${esc}" /></div></body></html>`
+                        })(),
+                      }}
+                      startInLoadingState
+                      renderLoading={() => (
+                        <View style={[styles.centered, { flex: 1 }]}>
+                          <ActivityIndicator size="large" color="#FFFFFF" />
+                        </View>
+                      )}
+                      style={{ flex: 1, backgroundColor: '#0B1220' }}
+                      allowFileAccess
+                      allowUniversalAccessFromFileURLs
+                      setBuiltInZoomControls
+                      setDisplayZoomControls={false}
+                    />
+                  </View>
+                ) : (
+                  <ScrollView
+                    style={{ flex: 1 }}
+                    contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
+                    maximumZoomScale={3}
+                    minimumZoomScale={1}
+                  >
+                    <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
+                      <Image
+                        source={{ uri: attachmentViewerUri }}
+                        style={{ flex: 1, width: '100%', height: '100%' }}
+                        resizeMode="contain"
+                      />
+                    </View>
+                  </ScrollView>
+                )
+              })()
+            ) : attachmentViewerKind === 'pdf' ? (
+              (() => {
+                let WebViewImpl: any = null
+                try { WebViewImpl = require('react-native-webview')?.WebView || null } catch {}
+                return WebViewImpl ? (
+                  <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
+                    <WebViewImpl
+                      source={{ uri: attachmentViewerUri }}
+                      originWhitelist={['*']}
+                      startInLoadingState
+                      renderLoading={() => (
+                        <View style={[styles.centered, { flex: 1 }]}>
+                          <ActivityIndicator size="large" color={themeColors.primary} />
+                        </View>
+                      )}
+                      style={{ flex: 1 }}
+                      allowFileAccess
+                      allowUniversalAccessFromFileURLs
+                    />
+                  </View>
+                ) : (
+                  <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                    <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
+                      {tr('Could not open this file.')}
+                    </Text>
+                  </View>
+                )
+              })()
+            ) : (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
+                  {tr('Could not open this file.')}
+                </Text>
+              </View>
+            )}
+          </View>
+        </SafeAreaView>
+      </Modal>
     </Screen>
   )
 }
@@ -9229,64 +9894,10 @@ function BillsListScreen() {
   ])
 
   const exportAttachmentsCsv = useCallback(async () => {
-    if (!entitlements.exportsEnabled) {
-      Alert.alert(tr('Export'), entitlements.status === 'trial_expired' ? tr('Free trial expired. Choose a plan to continue.') : tr('Export is available on Več.'))
-      showUpgradeAlert('export')
-      return
-    }
-    if (!selectedBillIds.length) {
-      Alert.alert(tr('Required field'), tr('Please select at least one bill.'))
-      return
-    }
-
-    const rows: any[] = []
-    for (const b of selectedBills) {
-      let list: any[] = []
-      try {
-        list = supabase
-          ? await listRemoteAttachments(supabase!, 'bills', b.id, (b as any).__spaceId || spaceId)
-          : await listLocalAttachments((b as any).__spaceId || spaceId, 'bills', b.id)
-      } catch {
-        list = []
-      }
-      for (const a of list || []) {
-        rows.push([
-          b.id,
-          b.supplier,
-          b.due_date,
-          a.name,
-          a.path,
-        ])
-      }
-    }
-
-    if (!rows.length) {
-      Alert.alert(tr('Export'), tr('No attachments found for the selected bills.'))
-      return
-    }
-
-    function csvEscape(v: any) {
-      const s = v === null || v === undefined ? '' : String(v)
-      return `"${s.replace(/"/g, '""')}"`
-    }
-
-    const header = ['bill_id', 'supplier', 'due_date', 'attachment_name', 'attachment_path']
-    const csv = [header]
-      .concat(rows)
-      .map((r: any[]) => r.map(csvEscape).join(','))
-      .join('\n')
-    const file = `${FileSystem.cacheDirectory}billbox-attachments.csv`
-    await FileSystem.writeAsStringAsync(file, csv)
-    if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(file)
-    else Alert.alert(tr('CSV saved'), file)
+    // Accounting import: generate one CSV per bill based on the bill form fields.
+    await exportBillsCsvPerBillZipSelected()
   }, [
-    entitlements.exportsEnabled,
-    entitlements.status,
-    selectedBillIds,
-    selectedBills,
-    showToast,
-    spaceId,
-    supabase,
+    exportBillsCsvPerBillZipSelected,
   ])
 
   const exportBillsCsvSelected = useCallback(async () => {
@@ -9433,29 +10044,23 @@ function BillsListScreen() {
         return
       }
 
-      const open = async (att: AttachmentItem) => {
-        if (supabase) {
-          const url = await getSignedUrl(supabase!, att.path)
-          if (url) Linking.openURL(url)
-          else Alert.alert(tr('Open failed'), tr('Could not get URL'))
-          return
-        }
-        if (att?.uri) {
-          Linking.openURL(att.uri)
-          return
-        }
-        Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
+      const openInDetails = async (att: AttachmentItem) => {
+        navigation.navigate('Bill Details', {
+          billId: String(bill.id || ''),
+          spaceIdOverride: billSpaceId,
+          autoOpenAttachmentPath: String(att?.path || ''),
+        })
       }
 
       if (atts.length === 1) {
-        await open(atts[0])
+        await openInDetails(atts[0])
         return
       }
 
       const buttons = atts.slice(0, 6).map((a) => ({
         text: String(a?.name || a?.path || tr('Open')),
         onPress: () => {
-          void open(a)
+          void openInDetails(a)
         },
       }))
       buttons.push({ text: tr('Cancel'), style: 'cancel' as const })
@@ -9463,7 +10068,7 @@ function BillsListScreen() {
     } catch {
       Alert.alert(tr('Open failed'), tr('Unknown error'))
     }
-  }, [spaceId, supabase, tr])
+  }, [navigation, spaceId, supabase, tr])
 
   const openSelectedBillAttachments = useCallback(async () => {
     if (!selectedBills.length) {
@@ -10046,17 +10651,6 @@ function BillsListScreen() {
             </View>
 
             <Divider style={{ marginTop: themeSpacing.sm, marginBottom: themeSpacing.sm }} />
-            <Text style={styles.formSectionTitle}>{tr('View attachments')}</Text>
-            <View style={styles.exportPickerActions}>
-              <AppButton
-                label={tr('View attachments')}
-                iconName="open-outline"
-                variant="secondary"
-                disabled={!selectedBillIds.length}
-                onPress={openSelectedBillAttachments}
-              />
-            </View>
-            <Divider style={{ marginTop: themeSpacing.sm, marginBottom: themeSpacing.sm }} />
             <Text style={styles.formSectionTitle}>{tr('Export attachments')}</Text>
             <View style={styles.exportPickerActions}>
               <AppButton
@@ -10065,20 +10659,6 @@ function BillsListScreen() {
                 variant="secondary"
                 disabled={!selectedBillIds.length}
                 onPress={() => exportAttachmentsZip('all')}
-              />
-              <AppButton
-                label={tr('Export bills CSV')}
-                iconName="download-outline"
-                variant="secondary"
-                disabled={!selectedBillIds.length}
-                onPress={() => exportBillsCsvSelected()}
-              />
-              <AppButton
-                label={tr('Export bills CSV (per bill)')}
-                iconName="archive-outline"
-                variant="secondary"
-                disabled={!selectedBillIds.length}
-                onPress={() => exportBillsCsvPerBillZipSelected()}
               />
               <AppButton
                 label={tr('Export PDF attachments')}
@@ -10100,6 +10680,25 @@ function BillsListScreen() {
                 variant="secondary"
                 disabled={!selectedBillIds.length}
                 onPress={() => exportAttachmentsCsv()}
+              />
+            </View>
+
+            <Divider style={{ marginTop: themeSpacing.sm, marginBottom: themeSpacing.sm }} />
+            <Text style={styles.formSectionTitle}>{tr('Export')}</Text>
+            <View style={styles.exportPickerActions}>
+              <AppButton
+                label={tr('Export bills CSV')}
+                iconName="download-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportBillsCsvSelected()}
+              />
+              <AppButton
+                label={tr('Export bills CSV (per bill)')}
+                iconName="archive-outline"
+                variant="secondary"
+                disabled={!selectedBillIds.length}
+                onPress={() => exportBillsCsvPerBillZipSelected()}
               />
             </View>
           </Surface>
@@ -11553,6 +12152,7 @@ function WarrantiesScreen() {
   const [pendingAttachment, setPendingAttachment] = useState<{ uri: string; name: string; type?: string } | null>(null)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
+  const lastWarrantyPrefillBillIdRef = useRef<string>('')
 
   const payerSpaces = useMemo(() => {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
@@ -11634,29 +12234,22 @@ function WarrantiesScreen() {
         return
       }
 
-      const open = async (att: any) => {
-        if (supabase) {
-          const url = await getSignedUrl(supabase!, att.path)
-          if (url) Linking.openURL(url)
-          else Alert.alert(tr('Open failed'), tr('Could not get URL'))
-          return
-        }
-        if (att?.uri) {
-          Linking.openURL(att.uri)
-          return
-        }
-        Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
+      const openInDetails = async (att: any) => {
+        navigation.navigate('Warranty Details', {
+          warrantyId: wid,
+          autoOpenAttachmentPath: String(att?.path || ''),
+        })
       }
 
       if (atts.length === 1) {
-        await open(atts[0])
+        await openInDetails(atts[0])
         return
       }
 
       const buttons = atts.slice(0, 6).map((a) => ({
         text: String(a?.name || a?.path || tr('Open')),
         onPress: () => {
-          void open(a)
+          void openInDetails(a)
         },
       }))
       buttons.push({ text: tr('Cancel'), style: 'cancel' as const })
@@ -11664,7 +12257,7 @@ function WarrantiesScreen() {
     } catch {
       Alert.alert(tr('Open failed'), tr('Unknown error'))
     }
-  }, [spaceId, supabase])
+  }, [navigation, spaceId, supabase])
 
   const parseDateValue = useCallback((value?: string | null): Date | null => {
     if (!value) return null
@@ -11731,6 +12324,60 @@ function WarrantiesScreen() {
     [parseDateValue]
   )
 
+  const addMonthsClamped = useCallback((base: Date, deltaMonths: number) => {
+    const b = new Date(base.getFullYear(), base.getMonth(), base.getDate())
+    const targetMonthIndex = b.getMonth() + deltaMonths
+    const targetYear = b.getFullYear() + Math.floor(targetMonthIndex / 12)
+    const targetMonth = ((targetMonthIndex % 12) + 12) % 12
+    const lastDay = new Date(targetYear, targetMonth + 1, 0).getDate()
+    const day = Math.min(b.getDate(), lastDay)
+    return new Date(targetYear, targetMonth, day)
+  }, [])
+
+  const warrantyAutoFillGuardRef = useRef(false)
+  useEffect(() => {
+    if (warrantyAutoFillGuardRef.current) return
+
+    const p = purchaseDate.trim()
+    const e = expiresAt.trim()
+    const d = durationMonths.trim()
+    const hasP = Boolean(p)
+    const hasE = Boolean(e)
+    const hasD = Boolean(d)
+    const count = (hasP ? 1 : 0) + (hasE ? 1 : 0) + (hasD ? 1 : 0)
+    if (count < 2) return
+
+    warrantyAutoFillGuardRef.current = true
+    try {
+      if (!hasD && hasP && hasE) {
+        const computed = computeDurationMonthsBetween(p, e)
+        if (computed) setDurationMonths(computed)
+        return
+      }
+
+      if (!hasE && hasP && hasD) {
+        const purchase = parseDateValue(p)
+        const months = parseInt(d, 10)
+        if (purchase && !Number.isNaN(months)) {
+          setExpiresAt(formatDateInput(addMonthsClamped(purchase, months)))
+        }
+        return
+      }
+
+      if (!hasP && hasE && hasD) {
+        const expires = parseDateValue(e)
+        const months = parseInt(d, 10)
+        if (expires && !Number.isNaN(months)) {
+          setPurchaseDate(formatDateInput(addMonthsClamped(expires, -months)))
+        }
+      }
+    } finally {
+      setTimeout(() => {
+        warrantyAutoFillGuardRef.current = false
+      }, 0)
+    }
+  }, [addMonthsClamped, computeDurationMonthsBetween, durationMonths, expiresAt, formatDateInput, parseDateValue, purchaseDate])
+
   const scrollToNewWarranty = useCallback(() => {
     try {
       scrollRef.current?.scrollTo({ y: 0, animated: true })
@@ -11738,26 +12385,7 @@ function WarrantiesScreen() {
     setLinkedBillOpen(true)
   }, [])
 
-  const computedExpiresAt = useMemo(() => {
-    const monthsRaw = durationMonths.trim()
-    if (!monthsRaw) return ''
-    const purchase = parseDateValue(purchaseDate.trim())
-    if (!purchase) return ''
-    const months = parseInt(monthsRaw, 10)
-    if (Number.isNaN(months) || months <= 0) return ''
-    const nd = new Date(purchase.getFullYear(), purchase.getMonth() + months, purchase.getDate())
-    return formatDateInput(nd)
-  }, [durationMonths, formatDateInput, parseDateValue, purchaseDate])
-
-  const computedDurationMonths = useMemo(() => {
-    const purchase = parseDateValue(purchaseDate.trim())
-    const expires = parseDateValue(expiresAt.trim())
-    if (!purchase || !expires) return ''
-    let months = (expires.getFullYear() - purchase.getFullYear()) * 12 + (expires.getMonth() - purchase.getMonth())
-    if (expires.getDate() < purchase.getDate()) months -= 1
-    months = Math.max(0, months)
-    return String(months)
-  }, [expiresAt, parseDateValue, purchaseDate])
+  // Note: durationMonths is not stored in DB; it's derived from start/end.
 
   const formatDateInput = useCallback((value: Date) => {
     const y = value.getFullYear()
@@ -11780,7 +12408,6 @@ function WarrantiesScreen() {
             setPurchaseDate(iso)
           } else {
             setExpiresAt(iso)
-            setDurationMonths('')
           }
         },
       })
@@ -11802,7 +12429,6 @@ function WarrantiesScreen() {
       setPurchaseDate(iso)
     } else {
       setExpiresAt(iso)
-      setDurationMonths('')
     }
 
     setIosPickerField(null)
@@ -11833,6 +12459,33 @@ function WarrantiesScreen() {
       setBills(collected)
     }
   })() }, [supabase, spaceLoading, space, spaceId, billSpaceIds, entitlements])
+
+  // Support navigation from a Bill details screen: open the New warranty form prefilled.
+  useEffect(() => {
+    const prefillBillId = String(route.params?.prefillBillId || '').trim()
+    if (!prefillBillId) {
+      lastWarrantyPrefillBillIdRef.current = ''
+      return
+    }
+    if (lastWarrantyPrefillBillIdRef.current === prefillBillId) return
+    lastWarrantyPrefillBillIdRef.current = prefillBillId
+
+    setLinkedBillOpen(true)
+    setSelectedBillId(prefillBillId)
+
+    const b = (bills || []).find((x) => String(x?.id || '').trim() === prefillBillId) as any
+    if (b) {
+      const supplierName = String(b.supplier || b.creditor_name || '').trim()
+      const title = String(b.supplier || b.creditor_name || b.invoice_number || tr('Bill')).trim()
+      const purchase = toISODateOnly(b.created_at) || String(b.due_date || '').trim()
+      if (title && !itemName.trim()) setItemName(title)
+      if (supplierName && !supplier.trim()) setSupplier(supplierName)
+      if (purchase && !purchaseDate.trim()) setPurchaseDate(purchase)
+    }
+
+    // Clear the param so we don't reopen on every render.
+    if (navigation?.setParams) navigation.setParams({ prefillBillId: null })
+  }, [bills, itemName, navigation, purchaseDate, route.params?.prefillBillId, supplier, tr])
 
   const linkedBillIds = useMemo(() => {
     const set = new Set<string>()
@@ -11931,57 +12584,54 @@ function WarrantiesScreen() {
     }
     const itemTrimmed = itemName.trim()
     const supplierTrimmed = supplier.trim()
-    const purchaseTrimmed = purchaseDate.trim()
-    const expiresTrimmed = expiresAt.trim()
-    const durationTrimmed = durationMonths.trim()
+    let purchaseTrimmed = purchaseDate.trim()
+    let expiresTrimmed = expiresAt.trim()
+    let durationTrimmed = durationMonths.trim()
 
     if (!itemTrimmed) { Alert.alert(tr('Validation'), tr('Enter item name')); return }
     if (!supplierTrimmed) { Alert.alert(tr('Missing supplier'), tr('Please enter the supplier name.')); return }
-    if (!purchaseTrimmed) { Alert.alert(tr('Missing purchase date'), tr('Enter purchase date.')); return }
     if (!pendingAttachment) { Alert.alert(tr('Attachment required'), tr('Warranties must include an image or PDF attachment.')); return }
 
+    // Auto-fill: if two of (purchase, expires, duration) exist, compute the third.
+    const hasPurchase = Boolean(purchaseTrimmed)
     const hasExpires = Boolean(expiresTrimmed)
     const hasDuration = Boolean(durationTrimmed)
-    if (hasExpires && hasDuration) {
-      Alert.alert(tr('Validation'), tr('Choose either Expires or Duration (not both).'))
-      return
+
+    if (!hasPurchase && hasExpires && hasDuration) {
+      const parsedExpires = parseDateValue(expiresTrimmed)
+      const months = parseInt(durationTrimmed, 10)
+      if (parsedExpires && !Number.isNaN(months)) {
+        purchaseTrimmed = formatDateInput(addMonthsClamped(parsedExpires, -months))
+        setPurchaseDate(purchaseTrimmed)
+      }
     }
-    if (!hasExpires && !hasDuration) {
-      Alert.alert(tr('Validation'), tr('Expiry or duration required.'))
-      return
+    if (!hasExpires && purchaseTrimmed && hasDuration) {
+      const parsedPurchase = parseDateValue(purchaseTrimmed)
+      const months = parseInt(durationTrimmed, 10)
+      if (parsedPurchase && !Number.isNaN(months)) {
+        expiresTrimmed = formatDateInput(addMonthsClamped(parsedPurchase, months))
+        setExpiresAt(expiresTrimmed)
+      }
     }
+    if (!hasDuration && purchaseTrimmed && expiresTrimmed) {
+      durationTrimmed = computeDurationMonthsBetween(purchaseTrimmed, expiresTrimmed)
+      if (durationTrimmed) setDurationMonths(durationTrimmed)
+    }
+
+    if (!purchaseTrimmed) { Alert.alert(tr('Missing purchase date'), tr('Enter purchase date.')); return }
+    if (!expiresTrimmed) { Alert.alert(tr('Validation'), tr('End date required.')); return }
+    if (!durationTrimmed) { Alert.alert(tr('Validation'), tr('Duration (months) required.')); return }
 
     const parsedPurchase = parseDateValue(purchaseTrimmed)
-    if (!parsedPurchase) {
-      Alert.alert(tr('Validation'), tr('Enter purchase date.'))
-      return
-    }
-
-    // Calculate expiry if duration and purchase date provided
-    let computedExpires = expiresTrimmed
-    if (!computedExpires && hasDuration) {
-      const months = parseInt(durationTrimmed, 10)
-      if (Number.isNaN(months) || months <= 0) {
-        Alert.alert(tr('Validation'), tr('Invalid duration.'))
-        return
-      }
-      const y = parsedPurchase.getFullYear()
-      const m = parsedPurchase.getMonth() + months
-      const nd = new Date(y, m, parsedPurchase.getDate())
-      computedExpires = formatDateInput(nd)
-    }
-
-    if (computedExpires) {
-      const parsedExpires = parseDateValue(computedExpires)
-      if (!parsedExpires) {
-        Alert.alert(tr('Validation'), tr('Expiry or duration required.'))
-        return
-      }
-    }
+    const parsedExpires = parseDateValue(expiresTrimmed)
+    const months = parseInt(durationTrimmed, 10)
+    if (!parsedPurchase) { Alert.alert(tr('Validation'), tr('Enter purchase date.')); return }
+    if (!parsedExpires) { Alert.alert(tr('Validation'), tr('End date required.')); return }
+    if (Number.isNaN(months) || months < 0) { Alert.alert(tr('Validation'), tr('Invalid duration.')); return }
 
     let savedWarranty: any = null
     if (supabase) {
-      const { data, error } = await createWarranty(supabase!, { item_name: itemTrimmed, supplier: supplierTrimmed || null, purchase_date: purchaseTrimmed || null, expires_at: computedExpires || null, bill_id: selectedBillId, space_id: spaceId })
+      const { data, error } = await createWarranty(supabase!, { item_name: itemTrimmed, supplier: supplierTrimmed || null, purchase_date: purchaseTrimmed || null, expires_at: expiresTrimmed || null, bill_id: selectedBillId, space_id: spaceId })
       if (error) { Alert.alert(tr('Error'), error.message); return }
       if (data) {
         const up = await uploadAttachmentFromUri(spaceId, 'warranties', data.id, pendingAttachment.uri, pendingAttachment.name, pendingAttachment.type)
@@ -11990,19 +12640,19 @@ function WarrantiesScreen() {
         savedWarranty = data
       }
     } else {
-      const local = await addLocalWarranty(spaceId, { item_name: itemTrimmed, supplier: supplierTrimmed || null, purchase_date: purchaseTrimmed || null, expires_at: computedExpires || null, bill_id: selectedBillId })
+      const local = await addLocalWarranty(spaceId, { item_name: itemTrimmed, supplier: supplierTrimmed || null, purchase_date: purchaseTrimmed || null, expires_at: expiresTrimmed || null, bill_id: selectedBillId })
       await addLocalAttachment(spaceId, 'warranties', local.id, { name: pendingAttachment.name, path: `${local.id}/${pendingAttachment.name}`, created_at: new Date().toISOString(), uri: pendingAttachment.uri })
       setItems((prev:any)=>[local, ...prev])
       savedWarranty = local
     }
 
     // Auto-schedule the 1-month-before reminder when expiry is set.
-    if (savedWarranty && computedExpires) {
+    if (savedWarranty && expiresTrimmed) {
       try {
         await ensureNotificationConfig()
         const ok = await requestPermissionIfNeeded()
         if (ok) {
-          await scheduleWarrantyReminders({ ...savedWarranty, expires_at: computedExpires, item_name: itemTrimmed || tr('Warranty') } as any, undefined, spaceId)
+          await scheduleWarrantyReminders({ ...savedWarranty, expires_at: expiresTrimmed, item_name: itemTrimmed || tr('Warranty') } as any, undefined, spaceId)
         }
       } catch {}
     }
@@ -12021,76 +12671,6 @@ function WarrantiesScreen() {
       { text: tr('Cancel'), style: 'cancel' },
       { text: tr('Delete'), style: 'destructive', onPress: async () => { await deleteAllAttachmentsForRecord(spaceId, 'warranties', id); if (supabase) { const { error } = await deleteWarranty(supabase!, id, spaceId); if (error) Alert.alert(tr('Error'), error.message) } else { await deleteLocalWarranty(spaceId, id) } setItems(prev=>prev.filter(w=>w.id!==id)) } }
     ])
-  }
-
-  async function ocrPendingAttachment(att: { uri: string; name: string; type?: string }) {
-    const base = getFunctionsBase()
-    if (!base) {
-      Alert.alert(tr('OCR unavailable'), tr('Missing EXPO_PUBLIC_FUNCTIONS_BASE'))
-      return
-    }
-
-    try {
-      const fileResp = await fetch(att.uri)
-      const blob = await fileResp.blob()
-      const supa = getSupabase()
-      let authHeader: Record<string, string> = {}
-      if (supa) {
-        try {
-          const { data } = await supa.auth.getSession()
-          const token = data?.session?.access_token
-          if (token) authHeader = { Authorization: `Bearer ${token}` }
-        } catch {}
-      }
-
-      const contentType = blob.type || att.type || 'application/octet-stream'
-      const resp = await fetch(`${base}/.netlify/functions/ocr`, {
-        method: 'POST',
-        headers: { 'Content-Type': contentType, ...authHeader },
-        body: blob,
-      })
-      const data = await resp.json()
-      if (!resp.ok || !data?.ok) throw new Error(data?.error || `${tr('OCR failed')} (${resp.status})`)
-
-      const f = data.fields || {}
-      const rawText = typeof data?.rawText === 'string' ? data.rawText : ''
-      const extracted = extractWarrantyFieldsFromOcr(rawText)
-
-      const supplierCandidate = extracted.supplier || f.supplier
-      const itemCandidate = extracted.itemName
-      const purchaseCandidate = extracted.purchaseDate || f.due_date
-      const expiresCandidate = extracted.expiresAt
-      const durationCandidate = extracted.durationMonths
-
-      if (!supplier.trim() && supplierCandidate) setSupplier(String(supplierCandidate))
-      if (!itemName.trim() && itemCandidate) setItemName(String(itemCandidate))
-      if (!purchaseDate.trim() && purchaseCandidate) setPurchaseDate(String(purchaseCandidate))
-
-      if (!expiresAt.trim() && expiresCandidate) {
-        setExpiresAt(String(expiresCandidate))
-        if (durationMonths.trim()) setDurationMonths('')
-      }
-      if (!durationMonths.trim() && durationCandidate && !expiresCandidate) {
-        setDurationMonths(String(durationCandidate))
-        if (expiresAt.trim()) setExpiresAt('')
-      }
-
-      if (!selectedBillId) {
-        Alert.alert(tr('OCR extracted'), tr('Select a linked bill, then press “Save warranty”.'))
-        return
-      }
-
-      const existingLinked = (items || []).find((w: any) => w.bill_id === selectedBillId) || null
-      if (existingLinked) {
-        Alert.alert(tr('Already linked'), tr('This bill already has a warranty. Opening the existing warranty.'))
-        navigation.navigate('Warranty Details', { warrantyId: (existingLinked as any).id })
-        return
-      }
-
-      Alert.alert(tr('OCR extracted'), contentType.includes('pdf') ? tr('Fields prefilling from PDF. Review and press “Save warranty”.') : tr('Fields prefilling from photo. Review and press “Save warranty”.'))
-    } catch (e: any) {
-      Alert.alert(tr('OCR error'), e?.message || tr('OCR failed'))
-    }
   }
 
   async function ocrPhoto() {
@@ -12138,11 +12718,9 @@ function WarrantiesScreen() {
 
       if (!expiresAt.trim() && expiresCandidate) {
         setExpiresAt(String(expiresCandidate))
-        if (durationMonths.trim()) setDurationMonths('')
       }
-      if (!durationMonths.trim() && durationCandidate && !expiresCandidate) {
+      if (!durationMonths.trim() && durationCandidate) {
         setDurationMonths(String(durationCandidate))
-        if (expiresAt.trim()) setExpiresAt('')
       }
       setPendingAttachment({ uri: asset.uri, name: asset.fileName || 'photo.jpg', type: asset.type || 'image/jpeg' })
 
@@ -12215,11 +12793,9 @@ function WarrantiesScreen() {
 
       if (!expiresAt.trim() && expiresCandidate) {
         setExpiresAt(String(expiresCandidate))
-        if (durationMonths.trim()) setDurationMonths('')
       }
-      if (!durationMonths.trim() && durationCandidate && !expiresCandidate) {
+      if (!durationMonths.trim() && durationCandidate) {
         setDurationMonths(String(durationCandidate))
-        if (expiresAt.trim()) setExpiresAt('')
       }
 
       setPendingAttachment({ uri: file.uri, name: file.name || 'document.pdf', type: 'application/pdf' })
@@ -12405,13 +12981,13 @@ function WarrantiesScreen() {
           <View style={{ gap: themeSpacing.sm }}>
             <View style={{ flexDirection: 'row', gap: themeSpacing.sm }}>
               <AppInput
-                placeholder={tr('Item name')}
+                placeholder={`${tr('Item name')} *`}
                 value={itemName}
                 onChangeText={setItemName}
                 style={{ flex: 1 }}
               />
               <AppInput
-                placeholder={tr('Supplier')}
+                placeholder={`${tr('Supplier')} *`}
                 value={supplier}
                 onChangeText={setSupplier}
                 style={{ flex: 1 }}
@@ -12419,7 +12995,7 @@ function WarrantiesScreen() {
             </View>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeSpacing.sm }}>
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
-                <Text style={styles.mutedText}>{tr('Start date')}</Text>
+                <Text style={styles.mutedText}>{`${tr('Start date')} *`}</Text>
                 <Pressable
                   onPress={() => openDatePicker('purchase')}
                   style={({ pressed }) => [styles.dateButton, pressed && { opacity: 0.92 }]}
@@ -12431,7 +13007,7 @@ function WarrantiesScreen() {
               </View>
 
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
-                <Text style={styles.mutedText}>{tr('End date')}</Text>
+                <Text style={styles.mutedText}>{`${tr('End date')} *`}</Text>
                 <Pressable
                   onPress={() => openDatePicker('expires')}
                   style={({ pressed }) => [styles.dateButton, pressed && { opacity: 0.92 }]}
@@ -12444,7 +13020,7 @@ function WarrantiesScreen() {
 
               <View style={{ flexGrow: 1, flexBasis: 160, minWidth: 160, gap: themeSpacing.xs }}>
                 <AppInput
-                  placeholder={tr('Duration (months)')}
+                  placeholder={`${tr('Duration (months)')} *`}
                   value={durationMonths}
                   onChangeText={setDurationMonths}
                   keyboardType="numeric"
@@ -12665,10 +13241,83 @@ function WarrantyDetailsScreen() {
   const warrantyId: string | null = route.params?.warrantyId || null
   const [warranty, setWarranty] = useState<Warranty | null>(null)
   const [attachments, setAttachments] = useState<AttachmentItem[]>([])
+  const [attachmentViewerVisible, setAttachmentViewerVisible] = useState(false)
+  const [attachmentViewerTitle, setAttachmentViewerTitle] = useState<string>('')
+  const [attachmentViewerUri, setAttachmentViewerUri] = useState<string | null>(null)
+  const [attachmentViewerExternalUri, setAttachmentViewerExternalUri] = useState<string | null>(null)
+  const [attachmentViewerKind, setAttachmentViewerKind] = useState<'image' | 'pdf' | 'other'>('other')
+  const [attachmentViewerBusy, setAttachmentViewerBusy] = useState(false)
+  const [attachmentViewerError, setAttachmentViewerError] = useState<string | null>(null)
   const [linkedBill, setLinkedBill] = useState<Bill | null>(null)
   const [reminderInfo, setReminderInfo] = useState<string | null>(null)
   const [remindersEnabled, setRemindersEnabledState] = useState<boolean>(true)
   const { space, spaceId, loading: spaceLoading } = useActiveSpace()
+  const lastAutoOpenPathRef = useRef<string>('')
+
+  const WebViewImpl = useMemo(() => {
+    return getOptionalWebViewImplShared()
+  }, [])
+
+  const inferAttachmentKind = useCallback((nameOrPath: string): 'image' | 'pdf' | 'other' => {
+    return inferAttachmentKindShared(nameOrPath)
+  }, [])
+
+  const buildPdfViewerUri = useCallback((resolvedUri: string) => {
+    return buildPdfViewerUriShared(resolvedUri)
+  }, [])
+
+  const openExternalUri = useCallback(async (targetUri: string) => {
+    await openExternalUriShared(targetUri)
+  }, [])
+
+  const previewAttachment = useCallback(async (item: AttachmentItem) => {
+    const kind = inferAttachmentKind(item?.name || item?.path)
+    setAttachmentViewerTitle(String(item?.name || tr('View attachment')))
+    setAttachmentViewerKind(kind)
+    setAttachmentViewerVisible(true)
+    setAttachmentViewerUri(null)
+    setAttachmentViewerExternalUri(null)
+    setAttachmentViewerError(null)
+    setAttachmentViewerBusy(true)
+
+    try {
+      let resolved: string | null = null
+      if (supabase) {
+        const url = await getSignedUrl(supabase!, item.path)
+        if (!url) {
+          setAttachmentViewerError(tr('Could not get URL'))
+          return
+        }
+        resolved = String(url)
+      } else {
+        const localUri = String(item?.uri || '').trim()
+        if (!localUri) {
+          setAttachmentViewerError(tr('Could not open this file.'))
+          return
+        }
+        const hasScheme = /^[a-z]+:/.test(localUri)
+        resolved = hasScheme ? localUri : `file://${localUri}`
+      }
+
+      setAttachmentViewerExternalUri(resolved)
+      if (kind === 'pdf' && WebViewImpl) {
+        const viewerUri = buildPdfViewerUri(resolved)
+        const resolvedIsHttp = /^https?:\/\//i.test(String(resolved || ''))
+        if (resolvedIsHttp && viewerUri) {
+          setAttachmentViewerUri(viewerUri)
+        } else {
+          setAttachmentViewerUri(null)
+          setAttachmentViewerError(tr('Preview is unavailable. Tap Open to view this file.'))
+        }
+      } else {
+        setAttachmentViewerUri(resolved)
+      }
+    } catch {
+      setAttachmentViewerError(tr('Could not open this file.'))
+    } finally {
+      setAttachmentViewerBusy(false)
+    }
+  }, [WebViewImpl, buildPdfViewerUri, inferAttachmentKind, supabase])
 
   const parseDateValue = useCallback((value?: string | null): Date | null => {
     if (!value) return null
@@ -12762,6 +13411,19 @@ function WarrantyDetailsScreen() {
     }
   })() }, [warrantyId, supabase, spaceLoading, space, spaceId])
 
+  useEffect(() => {
+    const path = String(route.params?.autoOpenAttachmentPath || '').trim()
+    if (!path) return
+    if (lastAutoOpenPathRef.current === path) return
+    const match = (attachments || []).find((a) => String(a?.path || '').trim() === path) || null
+    if (!match) return
+    lastAutoOpenPathRef.current = path
+    void previewAttachment(match)
+    try {
+      navigation.setParams({ autoOpenAttachmentPath: null })
+    } catch {}
+  }, [attachments, navigation, previewAttachment, route.params?.autoOpenAttachmentPath])
+
   async function refresh() {
     if (!warrantyId || spaceLoading || !space) return
     if (supabase) setAttachments(await listRemoteAttachments(supabase!, 'warranties', warrantyId, spaceId))
@@ -12786,11 +13448,6 @@ function WarrantyDetailsScreen() {
     if (up.error) Alert.alert(tr('Upload failed'), up.error)
     else Alert.alert(tr('Attachment uploaded'), tr('PDF attached to warranty'))
     await refresh()
-  }
-  async function openAttachment(path: string, uri?: string) {
-    if (supabase) { const url = await getSignedUrl(supabase!, path); if (url) Linking.openURL(url); else Alert.alert(tr('Open failed'), tr('Could not get URL')) }
-    else if (uri) Linking.openURL(uri)
-    else Alert.alert(tr('Offline'), tr('Attachment stored locally. Preview is unavailable.'))
   }
   async function remove(path: string) {
     Alert.alert(tr('Delete attachment?'), tr('This file will be removed.'), [
@@ -12949,7 +13606,7 @@ function WarrantyDetailsScreen() {
                       label={tr('Open')}
                       variant="secondary"
                       iconName="open-outline"
-                      onPress={()=>openAttachment(item.path, item.uri)}
+                      onPress={() => previewAttachment(item)}
                     />
                     <AppButton
                       label={tr('Delete')}
@@ -12964,6 +13621,139 @@ function WarrantyDetailsScreen() {
           )}
         </Surface>
       </View>
+
+      <Modal
+        visible={attachmentViewerVisible}
+        transparent={false}
+        animationType="slide"
+        onRequestClose={() => setAttachmentViewerVisible(false)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#0B1220' }}>
+          <View
+            style={{
+              paddingHorizontal: themeLayout.screenPadding,
+              paddingVertical: themeSpacing.sm,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: themeLayout.gap,
+              borderBottomWidth: StyleSheet.hairlineWidth,
+              borderBottomColor: 'rgba(255,255,255,0.12)',
+            }}
+          >
+            <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '800', flex: 1 }} numberOfLines={1}>
+              {attachmentViewerTitle || tr('View attachment')}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: themeSpacing.xs }}>
+              {(attachmentViewerExternalUri || attachmentViewerUri) ? (
+                <AppButton
+                  label={tr('Open')}
+                  variant="ghost"
+                  iconName="open-outline"
+                  onPress={async () => {
+                    try {
+                      await openExternalUri(String(attachmentViewerExternalUri || attachmentViewerUri || ''))
+                    } catch {
+                      Alert.alert(tr('Open failed'), tr('Could not open this file.'))
+                    }
+                  }}
+                />
+              ) : null}
+              <AppButton
+                label={tr('Close')}
+                variant="ghost"
+                iconName="close-outline"
+                onPress={() => setAttachmentViewerVisible(false)}
+              />
+            </View>
+          </View>
+
+          <View style={{ flex: 1, backgroundColor: '#0B1220' }}>
+            {attachmentViewerBusy ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <ActivityIndicator size="large" color="#FFFFFF" />
+                <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)', marginTop: themeSpacing.sm }]}>
+                  {tr('Loading…')}
+                </Text>
+              </View>
+            ) : attachmentViewerError ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>{attachmentViewerError}</Text>
+              </View>
+            ) : !attachmentViewerUri ? (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)' }]}>{tr('Open failed')}</Text>
+              </View>
+            ) : attachmentViewerKind === 'image' ? (
+              WebViewImpl ? (
+                <View style={{ flex: 1, backgroundColor: '#000000' }}>
+                  <WebViewImpl
+                    originWhitelist={['*']}
+                    source={{
+                      html: (() => {
+                        const raw = String(attachmentViewerUri || '')
+                        const esc = raw
+                          .replace(/&/g, '&amp;')
+                          .replace(/"/g, '&quot;')
+                          .replace(/</g, '&lt;')
+                          .replace(/>/g, '&gt;')
+                        return `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" /><style>html,body{margin:0;padding:0;background:#0B1220;height:100%;overflow:hidden;} .wrap{height:100%;width:100%;display:flex;align-items:center;justify-content:center;} img{max-width:100%;max-height:100%;object-fit:contain;}</style></head><body><div class="wrap"><img src="${esc}" /></div></body></html>`
+                      })(),
+                    }}
+                    startInLoadingState
+                    renderLoading={() => (
+                      <View style={[styles.centered, { flex: 1 }]}>
+                        <ActivityIndicator size="large" color="#FFFFFF" />
+                      </View>
+                    )}
+                    style={{ flex: 1, backgroundColor: '#0B1220' }}
+                    allowFileAccess
+                    allowUniversalAccessFromFileURLs
+                    setBuiltInZoomControls
+                    setDisplayZoomControls={false}
+                  />
+                </View>
+              ) : (
+                <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                  <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
+                    {tr('Could not open this file.')}
+                  </Text>
+                </View>
+              )
+            ) : attachmentViewerKind === 'pdf' ? (
+              WebViewImpl ? (
+                <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
+                  <WebViewImpl
+                    source={{ uri: attachmentViewerUri }}
+                    originWhitelist={['*']}
+                    startInLoadingState
+                    renderLoading={() => (
+                      <View style={[styles.centered, { flex: 1 }]}>
+                        <ActivityIndicator size="large" color={themeColors.primary} />
+                      </View>
+                    )}
+                    style={{ flex: 1 }}
+                    allowFileAccess
+                    allowUniversalAccessFromFileURLs
+                  />
+                </View>
+              ) : (
+                <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                  <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
+                    {tr('Could not open this file.')}
+                  </Text>
+                </View>
+              )
+            ) : (
+              <View style={[styles.centered, { padding: themeSpacing.lg }]}>
+                <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
+                  {tr('Could not open this file.')}
+                </Text>
+              </View>
+            )}
+          </View>
+        </SafeAreaView>
+      </Modal>
     </Screen>
   )
 }
@@ -13043,6 +13833,46 @@ function ReportsScreen() {
   const payerSpaces = useMemo(() => {
     return (spacesCtx.spaces || []).filter((s) => isPayerSpaceId(s.id))
   }, [spacesCtx.spaces])
+
+  const payerAvatarKey = useCallback((payerId: string) => {
+    return `billbox.payer.avatar.${String(payerId || '').trim()}`
+  }, [])
+
+  const [payerAvatars, setPayerAvatars] = useState<Record<string, string | null>>({})
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const ids = payerSpaces.map((s) => String(s.id || '').trim()).filter(Boolean)
+        if (!ids.length) {
+          setPayerAvatars({})
+          return
+        }
+        const keys = ids.map((id) => payerAvatarKey(id))
+        const pairs = await AsyncStorage.multiGet(keys)
+        const next: Record<string, string | null> = {}
+        for (let i = 0; i < ids.length; i++) {
+          next[ids[i]] = pairs[i]?.[1] ? String(pairs[i][1]) : null
+        }
+        setPayerAvatars(next)
+      } catch {
+        setPayerAvatars({})
+      }
+    })()
+  }, [payerAvatarKey, payerSpaces])
+
+  const payerSpaceById = useMemo(() => {
+    const map: Record<string, Space | undefined> = {}
+    for (const s of payerSpaces) map[String(s.id)] = s
+    return map
+  }, [payerSpaces])
+
+  const payerDisplayName = useCallback((id: string): string => {
+    const spaceName = payerSpaceById[id]?.name
+    const trimmed = typeof spaceName === 'string' ? spaceName.trim() : ''
+    if (trimmed) return trimmed
+    return tr(payerLabelFromSpaceId(id))
+  }, [payerSpaceById, tr])
 
   const [selectedPayerIds, setSelectedPayerIds] = useState<string[]>(() => {
     const current = spaceId
@@ -13337,7 +14167,7 @@ function ReportsScreen() {
     const modeForDate = isPro ? dateMode : 'due'
     const grouped: Record<
       string,
-      { totalEur: number; unpaidEur: number; paidEur: number; archivedEur: number; count: number }
+      { totalEur: number; unpaidEur: number; paidEur: number; archivedEur: number; count: number; categories: Record<string, number> }
     > = {}
 
     for (const b of filtered) {
@@ -13345,9 +14175,13 @@ function ReportsScreen() {
       const key = keyFn(iso) || '—'
       const eur = billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0
 
-      grouped[key] = grouped[key] || { totalEur: 0, unpaidEur: 0, paidEur: 0, archivedEur: 0, count: 0 }
+      const rawCategory = (b as any)?.category
+      const category = String(rawCategory || '').trim() || tr('Unknown')
+
+      grouped[key] = grouped[key] || { totalEur: 0, unpaidEur: 0, paidEur: 0, archivedEur: 0, count: 0, categories: {} }
       grouped[key].totalEur += eur
       grouped[key].count += 1
+      grouped[key].categories[category] = (grouped[key].categories[category] || 0) + eur
 
       if (isBillUnpaid(b.status)) grouped[key].unpaidEur += eur
       else if (b.status === 'paid') grouped[key].paidEur += eur
@@ -13355,10 +14189,33 @@ function ReportsScreen() {
     }
 
     const keys = Object.keys(grouped).sort()
-    const rows = keys.map((k) => ({ key: k, ...grouped[k] }))
+    const rows = keys.map((k) => {
+      const bucket = grouped[k]
+      const topCategory = (() => {
+        const entries = Object.entries(bucket.categories || {}).sort((a, b) => b[1] - a[1])
+        return entries[0]?.[0] ? String(entries[0][0]) : ''
+      })()
+      return { key: k, ...bucket, topCategory }
+    })
     const maxTotalEur = rows.reduce((m, r) => Math.max(m, r.totalEur || 0), 0)
     return { rows, maxTotalEur }
   }, [billCurrency, dateMode, filtered, getAmountNumber, getBillDateForMode, groupBy, isPro])
+
+  const categorySummary = useMemo(() => {
+    const totals: Record<string, number> = {}
+    for (const b of filtered) {
+      const eur = billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0
+      const rawCategory = (b as any)?.category
+      const category = String(rawCategory || '').trim() || tr('Unknown')
+      totals[category] = (totals[category] || 0) + eur
+    }
+    const rows = Object.entries(totals)
+      .map(([category, totalEur]) => ({ category, totalEur }))
+      .sort((a, b) => b.totalEur - a.totalEur)
+      .slice(0, 8)
+    const maxTotalEur = rows.reduce((m, r) => Math.max(m, r.totalEur || 0), 0)
+    return { rows, maxTotalEur }
+  }, [billCurrency, filtered, getAmountNumber, tr])
 
   const lineSeries = useMemo(() => {
     if (isPro && selectedStatusList.length > 1) {
@@ -13450,7 +14307,7 @@ function ReportsScreen() {
     return {
       generated_at: new Date().toISOString(),
       plan: entitlements.plan,
-      profiles: selectedPayerIds.map((id) => ({ id, label: payerLabelFromSpaceId(id) })),
+      profiles: selectedPayerIds.map((id) => ({ id, label: payerDisplayName(id) })),
       filters: {
         start: range.start,
         end: range.end,
@@ -13543,7 +14400,7 @@ function ReportsScreen() {
     setExportBusy(true)
     setExportBusyLabel(tr('Preparing PDF…'))
     try {
-      const profileLabel = selectedPayerIds.map((id) => payerLabelFromSpaceId(id)).join(' + ')
+      const profileLabel = selectedPayerIds.map((id) => payerDisplayName(id)).join(' + ')
       const selectedView = reportsView
 
       const dateModeForExport = isPro ? dateMode : 'due'
@@ -13570,22 +14427,48 @@ function ReportsScreen() {
       const computedPeriodSummary = (() => {
         const keyFn = groupBy === 'year' ? yyyyKey : yyyymmKey
         const modeForDate = isPro ? dateMode : 'due'
-        const grouped: Record<string, { totalEur: number; unpaidEur: number; paidEur: number; archivedEur: number; count: number }> = {}
+        const grouped: Record<string, { totalEur: number; unpaidEur: number; paidEur: number; archivedEur: number; count: number; categories: Record<string, number> }> = {}
 
         for (const b of filtered) {
           const iso = getBillDateForMode(b, modeForDate)
           const key = keyFn(iso) || '—'
           const eur = billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0
-          grouped[key] = grouped[key] || { totalEur: 0, unpaidEur: 0, paidEur: 0, archivedEur: 0, count: 0 }
+          const rawCategory = (b as any)?.category
+          const category = String(rawCategory || '').trim() || tr('Unknown')
+          grouped[key] = grouped[key] || { totalEur: 0, unpaidEur: 0, paidEur: 0, archivedEur: 0, count: 0, categories: {} }
           grouped[key].totalEur += eur
           grouped[key].count += 1
+          grouped[key].categories[category] = (grouped[key].categories[category] || 0) + eur
           if (isBillUnpaid(b.status)) grouped[key].unpaidEur += eur
           else if (b.status === 'paid') grouped[key].paidEur += eur
           else if (b.status === 'archived') grouped[key].archivedEur += eur
         }
 
         const keys = Object.keys(grouped).sort()
-        const rows = keys.map((k) => ({ key: k, ...grouped[k] }))
+        const rows = keys.map((k) => {
+          const bucket = grouped[k]
+          const topCategory = (() => {
+            const entries = Object.entries(bucket.categories || {}).sort((a, b) => b[1] - a[1])
+            return entries[0]?.[0] ? String(entries[0][0]) : ''
+          })()
+          return { key: k, ...bucket, topCategory }
+        })
+        const maxTotalEur = rows.reduce((m, r) => Math.max(m, r.totalEur || 0), 0)
+        return { rows, maxTotalEur }
+      })()
+
+      const computedCategorySummary = (() => {
+        const totals: Record<string, number> = {}
+        for (const b of filtered) {
+          const eur = billCurrency(b) === 'EUR' ? getAmountNumber(b) : 0
+          const rawCategory = (b as any)?.category
+          const category = String(rawCategory || '').trim() || tr('Unknown')
+          totals[category] = (totals[category] || 0) + eur
+        }
+        const rows = Object.entries(totals)
+          .map(([category, totalEur]) => ({ category, totalEur }))
+          .sort((a, b) => b.totalEur - a.totalEur)
+          .slice(0, 8)
         const maxTotalEur = rows.reduce((m, r) => Math.max(m, r.totalEur || 0), 0)
         return { rows, maxTotalEur }
       })()
@@ -13751,7 +14634,7 @@ function ReportsScreen() {
 
         const body = rows
           .map((r) => {
-            const periodLabel = `${formatPeriodLabel(r.key)} (${r.count})`
+            const periodLabel = `${formatPeriodLabel(r.key)} (${r.count})${r.topCategory ? ` • ${escapeHtml(r.topCategory)}` : ''}`
             const cols = statusCols
               .map((c) => {
                 const v =
@@ -13776,28 +14659,60 @@ function ReportsScreen() {
         return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`
       })()
 
+      const categoryTableHtml = (() => {
+        const rows = computedCategorySummary.rows
+        if (!rows.length) return ''
+        const head = `<tr>
+          <th>${escapeHtml(tr('Category'))}</th>
+          <th style="text-align:right;">${escapeHtml(tr('Total amount (EUR)'))}</th>
+        </tr>`
+        const body = rows
+          .map((r) => `<tr><td>${escapeHtml(r.category)}</td><td style="text-align:right;">EUR ${escapeHtml(r.totalEur.toFixed(2))}</td></tr>`)
+          .join('')
+        return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`
+      })()
+
       const detailsTableHtml = tableHtml
         ? `<table><thead><tr><th>${escapeHtml(tr('Supplier'))}</th><th>${escapeHtml(dateModeLabel)}</th><th style="text-align:right;">${escapeHtml(tr('Amount'))}</th></tr></thead><tbody>${tableHtml}</tbody></table>`
         : ''
 
-      const exportBodyHtml = `
-        <div class="card">
-          <div class="k" style="margin-bottom:8px;">${escapeHtml(groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend'))}</div>
-          ${chartSvg ? chartStackHtml(chartSvg) : `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
-          ${lineSvg ? `<div style="margin-top:12px;">${chartStackHtml(lineSvg)}</div>` : ''}
-          ${eurOnlyNote ? `<div class="k" style="margin-top:10px;">${escapeHtml(eurOnlyNote)}</div>` : ''}
-        </div>
+      const exportChartsHtml = selectedView === 'chart'
+        ? `
+          <div class="card">
+            <div class="k" style="margin-bottom:8px;">${escapeHtml(groupBy === 'year' ? tr('Yearly spend') : tr('Monthly spend'))}</div>
+            ${chartSvg ? chartStackHtml(chartSvg) : `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
+            ${lineSvg ? `<div style="margin-top:12px;">${chartStackHtml(lineSvg)}</div>` : ''}
+            ${eurOnlyNote ? `<div class="k" style="margin-top:10px;">${escapeHtml(eurOnlyNote)}</div>` : ''}
+          </div>
+        `
+        : ''
 
+      const exportCategoryHtml = categoryTableHtml
+        ? `
+          <div class="card">
+            <div class="k" style="margin-bottom:8px;">${escapeHtml(tr('Categories'))}</div>
+            ${categoryTableHtml}
+          </div>
+        `
+        : ''
+
+      const exportSummaryHtml = `
         <div class="card">
           <div class="k" style="margin-bottom:8px;">${escapeHtml(tr('Summary'))}</div>
           ${summaryTableHtml || `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
         </div>
-
-        <div class="card">
-          <div class="k" style="margin-bottom:8px;">${escapeHtml(tr('Table'))}</div>
-          ${detailsTableHtml || `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
-        </div>
       `
+
+      const exportDetailsHtml = selectedView === 'table'
+        ? `
+          <div class="card">
+            <div class="k" style="margin-bottom:8px;">${escapeHtml(tr('Table'))}</div>
+            ${detailsTableHtml || `<div class="k">${escapeHtml(tr('No bills in this range.'))}</div>`}
+          </div>
+        `
+        : ''
+
+      const exportBodyHtml = `${exportChartsHtml}${exportCategoryHtml}${exportSummaryHtml}${exportDetailsHtml}`
       const html = `
         <html>
           <head>
@@ -13907,31 +14822,51 @@ function ReportsScreen() {
           <View style={styles.reportsFiltersBody}>
             <View>
               <Text style={styles.filterLabel}>{tr('Profiles')}</Text>
-              <View style={styles.filterToggleRow}>
+              <View style={styles.homeProfilesRow}>
                 {(['personal', 'personal2'] as const).map((id) => {
                   const exists = payerSpaces.some((s) => s.id === id)
                   const locked = id === 'personal2' && (!exists || entitlements.plan !== 'pro')
                   const enabled = selectedPayerIds.includes(id)
+                  const name = payerDisplayName(id)
+                  const avatarUri = payerAvatars[id] || null
                   return (
-                    <View key={id} style={styles.filterToggle}>
-                      <Switch
-                        value={enabled}
-                        onValueChange={(v) => {
-                          if (locked) {
-                            showUpgradeAlert('profile2')
-                            return
-                          }
-                          togglePayer(id, v)
-                        }}
-                        disabled={locked}
-                      />
-                      <Text style={styles.toggleLabel}>{tr(payerLabelFromSpaceId(id))}</Text>
-                      {locked ? <Text style={[styles.mutedText, { marginLeft: 6 }]}>{tr('Locked (Več only)')}</Text> : null}
-                    </View>
+                    <Pressable
+                      key={id}
+                      onPress={() => {
+                        if (locked) {
+                          showUpgradeAlert('profile2')
+                          return
+                        }
+                        togglePayer(id, !enabled)
+                      }}
+                      style={({ pressed }) => [
+                        styles.homeProfileChip,
+                        enabled ? styles.homeProfileChipActive : null,
+                        locked ? styles.homeProfileChipPlaceholder : null,
+                        pressed ? { opacity: 0.92 } : null,
+                      ]}
+                    >
+                      <View style={styles.homeProfileAvatarWrap}>
+                        {avatarUri ? (
+                          <Image source={{ uri: avatarUri }} style={styles.homeProfileAvatarImg} />
+                        ) : (
+                          <View style={styles.homeProfileAvatarFallback}>
+                            <Text style={styles.homeProfileAvatarInitials}>{initialsFromName(name)}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.homeProfileName} numberOfLines={1}>{name}</Text>
+                        <Text style={styles.homeProfileHint} numberOfLines={1}>
+                          {locked ? tr('Locked (Več only)') : enabled ? tr('Selected') : tr('Tap to select')}
+                        </Text>
+                      </View>
+                      {locked ? <Ionicons name="lock-closed-outline" size={16} color={themeColors.textMuted} /> : null}
+                    </Pressable>
                   )
                 })}
               </View>
-              <Text style={styles.helperText}>{tr('Reports can include Profil 1, Profil 2, or both.')}</Text>
+              <Text style={styles.helperText}>{tr('Reports can include one profile or both profiles.')}</Text>
             </View>
 
             <View style={styles.dateFilterSection}>
@@ -14098,7 +15033,7 @@ function ReportsScreen() {
                           <View style={{ height: 140 }}>
                             <View style={[styles.reportGridLine, { top: 0 }]} />
                             <View style={[styles.reportGridLine, { top: 70 }]} />
-                            <View style={[styles.reportGridLine, { bottom: 0 }]} />
+                            <View style={[styles.reportGridLine, { bottom: 0, height: 2, backgroundColor: '#CBD5F5' }]} />
                             <View style={[styles.reportBarsRow, series.points.length === 1 ? { justifyContent: 'center' } : null]}>
                               {series.points.map((p, idx) => (
                                 <View key={p.key} style={[styles.reportBarItem, series.points.length === 1 ? { flex: 0, width: 140 } : null]}>
@@ -14125,7 +15060,6 @@ function ReportsScreen() {
                               ))}
                             </View>
                           </View>
-                          <View style={styles.reportXAxis} />
                         </View>
                       </View>
                     </View>
@@ -14163,7 +15097,7 @@ function ReportsScreen() {
                           >
                             <View style={[styles.reportGridLine, { top: 8 }]} />
                             <View style={[styles.reportGridLine, { top: 80 }]} />
-                            <View style={[styles.reportGridLine, { bottom: 8 }]} />
+                            <View style={[styles.reportGridLine, { bottom: 8, height: 2, backgroundColor: '#CBD5F5' }]} />
                             {linePoints.map((seriesItem) => (
                               <React.Fragment key={seriesItem.id}>
                                 {seriesItem.points.map((p, idx) => {
@@ -14198,7 +15132,6 @@ function ReportsScreen() {
                               </React.Fragment>
                             ))}
                           </View>
-                          <View style={styles.reportXAxis} />
                           <View style={styles.reportXLabelsRow}>
                             {(lineSeries[0]?.points || []).map((p, idx) => (
                               <View key={p.key} style={styles.reportXLabelCell}>
@@ -14212,6 +15145,29 @@ function ReportsScreen() {
                       </View>
                     </View>
                   </View>
+
+                  {categorySummary.rows.length ? (
+                    <View style={styles.reportChartCard}>
+                      <Text style={styles.reportChartTitle}>{tr('Categories')}</Text>
+                      <Text style={styles.reportChartSubtitle}>{tr('Top categories by total amount (EUR).')}</Text>
+                      <View style={{ gap: themeSpacing.xs }}>
+                        {categorySummary.rows.map((r, idx) => {
+                          const pct = categorySummary.maxTotalEur > 0 ? (r.totalEur / categorySummary.maxTotalEur) * 100 : 0
+                          return (
+                            <View key={`${r.category}-${idx}`} style={styles.reportTableRowCard}>
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: themeSpacing.sm }}>
+                                <Text style={styles.reportRowTitle} numberOfLines={1}>{r.category}</Text>
+                                <Text style={styles.reportRowTitle}>EUR {r.totalEur.toFixed(2)}</Text>
+                              </View>
+                              <View style={styles.reportRowBarTrack}>
+                                <View style={[styles.reportRowBarFill, { width: `${Math.max(0, Math.min(100, pct))}%`, backgroundColor: reportPalette[idx % reportPalette.length] }]} />
+                              </View>
+                            </View>
+                          )
+                        })}
+                      </View>
+                    </View>
+                  ) : null}
                 </>
               )}
             </View>
@@ -14221,11 +15177,34 @@ function ReportsScreen() {
                 <Text style={styles.mutedText}>{tr('No bills in this range.')}</Text>
               ) : (
                 <View style={{ gap: themeSpacing.sm }}>
+                  {categorySummary.rows.length ? (
+                    <View style={styles.reportTableRowCard}>
+                      <Text style={styles.reportRowTitle}>{tr('Top categories')}</Text>
+                      <Text style={styles.mutedText}>{tr('Top categories by total amount (EUR).')}</Text>
+                      <View style={{ marginTop: themeSpacing.sm, gap: themeSpacing.xs }}>
+                        {categorySummary.rows.map((r, idx) => {
+                          const pct = categorySummary.maxTotalEur > 0 ? (r.totalEur / categorySummary.maxTotalEur) * 100 : 0
+                          return (
+                            <View key={`${r.category}-${idx}`} style={{ gap: 6 }}>
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: themeSpacing.sm }}>
+                                <Text style={[styles.bodyText, { flex: 1 }]} numberOfLines={1}>{r.category}</Text>
+                                <Text style={[styles.bodyText, { fontWeight: '800' }]}>EUR {r.totalEur.toFixed(2)}</Text>
+                              </View>
+                              <View style={styles.reportRowBarTrack}>
+                                <View style={[styles.reportRowBarFill, { width: `${Math.max(0, Math.min(100, pct))}%`, backgroundColor: reportPalette[idx % reportPalette.length] }]} />
+                              </View>
+                            </View>
+                          )
+                        })}
+                      </View>
+                    </View>
+                  ) : null}
+
                   {periodSummary.rows.length ? (
                     <View style={{ gap: themeSpacing.sm }}>
                       {periodSummary.rows.map((r, idx) => {
                         const pct = periodSummary.maxTotalEur > 0 ? (r.totalEur / periodSummary.maxTotalEur) * 100 : 0
-                        const secondary = `${tr('{count} bills', { count: r.count })}${r.unpaidEur > 0 ? ` • ${tr('Unpaid')}: EUR ${r.unpaidEur.toFixed(2)}` : ''}`
+                        const secondary = `${tr('{count} bills', { count: r.count })}${r.topCategory ? ` • ${tr('Category')}: ${r.topCategory}` : ''}${r.unpaidEur > 0 ? ` • ${tr('Unpaid')}: EUR ${r.unpaidEur.toFixed(2)}` : ''}`
                         return (
                           <View key={r.key} style={styles.reportTableRowCard}>
                             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: themeSpacing.sm }}>
@@ -15334,7 +16313,8 @@ function PayScreen() {
   async function makeQrDataUri(payload: string, opts: { width: number; margin?: number }) {
     const QRCode = (await import('qrcode')) as any
     const width = Math.max(96, Math.min(640, Math.floor(Number(opts.width) || 240)))
-    const margin = Math.max(0, Math.min(8, Math.floor(Number(opts.margin ?? 1) || 1)))
+    // Slightly larger quiet zone helps scanning from a phone screen.
+    const margin = Math.max(0, Math.min(8, Math.floor(Number(opts.margin ?? 2) || 2)))
     try {
       const uri = await QRCode.toDataURL(payload, {
         width,
@@ -15677,7 +16657,9 @@ function PayScreen() {
 
   useEffect(() => {
     let cancelled = false
-    const first = visibleBills.slice(0, 12)
+    // Prefetch QR thumbnails for the bills that are most likely visible on screen.
+    // Keep this bounded to avoid jank on older devices.
+    const first = visibleBills.slice(0, 24)
     if (!first.length) return
 
     ;(async () => {
@@ -15689,7 +16671,7 @@ function PayScreen() {
         if (!payload) continue
         qrThumbInFlight.current[b.id] = true
         try {
-          const uri = await makeQrDataUri(payload, { width: 128, margin: 1 })
+          const uri = await makeQrDataUri(payload, { width: 192, margin: 2 })
           if (cancelled) return
           setQrThumbs((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: uri }))
           setQrThumbErrors((prev) => (prev[b.id] ? { ...prev, [b.id]: false } : prev))
@@ -15722,7 +16704,7 @@ function PayScreen() {
         if (!payload) continue
         qrThumbInFlight.current[b.id] = true
         try {
-          const uri = await makeQrDataUri(payload, { width: 240, margin: 1 })
+          const uri = await makeQrDataUri(payload, { width: 240, margin: 2 })
           if (cancelled) return
           setQrThumbs((prev) => (prev[b.id] ? prev : { ...prev, [b.id]: uri }))
           setQrThumbErrors((prev) => (prev[b.id] ? { ...prev, [b.id]: false } : prev))
@@ -15739,26 +16721,38 @@ function PayScreen() {
     }
   }, [qrThumbs, selected, visibleBills])
 
+  function sanitizeEpcText(input: string, maxLen: number): string {
+    const cleaned = String(input || '')
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+    if (!cleaned) return ''
+    const n = Math.max(0, Math.floor(Number(maxLen) || 0))
+    if (!n) return ''
+    return cleaned.slice(0, n)
+  }
+
   function buildPaymentQrPayload(bill: Bill): string | null {
     const iban = normalizeIban(bill.iban || '')
-    if (!iban) return null
+    if (!iban || !isValidIbanChecksum(iban)) return null
     const amount = getAmountNumber(bill)
     if (!Number.isFinite(amount) || amount <= 0) return null
     const currency = String(bill.currency || 'EUR').toUpperCase()
     if (currency !== 'EUR') return null
-    const creditor = String(bill.creditor_name || bill.supplier || '').trim()
+    const creditor = sanitizeEpcText(String(bill.creditor_name || bill.supplier || ''), 70)
     if (!creditor) return null
-    const reference = String([bill.reference_model, bill.reference].filter(Boolean).join(' ').trim())
-    const purpose = String(bill.purpose || '').trim()
-    const remittance = (reference || purpose).slice(0, 140)
-    const info = reference && purpose ? purpose.slice(0, 140) : ''
+    const reference = sanitizeEpcText(String([bill.reference_model, bill.reference].filter(Boolean).join(' ').trim()), 140)
+    const purpose = sanitizeEpcText(String(bill.purpose || ''), 140)
+    const remittance = reference || purpose
+    // EPC QR: last line (information for beneficiary) is max 70 chars.
+    const info = reference && purpose ? sanitizeEpcText(purpose, 70) : ''
     const lines = [
       'BCD',
       '002',
       '1',
       'SCT',
       '',
-      creditor.slice(0, 70),
+      creditor,
       iban,
       `EUR${amount.toFixed(2)}`,
       '',
@@ -15790,7 +16784,8 @@ function PayScreen() {
 
     ;(async () => {
       try {
-        const uri = await makeQrDataUri(payload, { width: 240, margin: 1 })
+        // Generate at higher resolution, then render at 280x280 for a crisp on-screen QR.
+        const uri = await makeQrDataUri(payload, { width: 480, margin: 2 })
         setQrDataUri(uri)
       } catch (e) {
         Alert.alert(tr('QR unavailable'), tr('Could not generate QR.'))
@@ -16036,32 +17031,31 @@ function PayScreen() {
                             />
                           </Pressable>
 
-                          {selected[item.id] ? (
-                            canQr ? (
-                              <Pressable
-                                onPress={() => openPaymentQr(item)}
-                                style={({ pressed }) => [styles.payQrInlineWrap, pressed ? { opacity: 0.95 } : null]}
-                              >
-                                {qrThumbs[item.id] ? (
-                                  <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrInlineImage} />
-                                ) : qrThumbErrors[item.id] ? (
-                                  <View style={[styles.payQrInlinePlaceholder, styles.payQrInlineUnavailable]}>
-                                    <Ionicons name="alert-circle-outline" size={20} color={themeColors.textMuted} />
-                                    <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
-                                  </View>
-                                ) : (
-                                  <View style={styles.payQrInlinePlaceholder}>
-                                    <ActivityIndicator size="small" color={themeColors.primary} />
-                                  </View>
-                                )}
-                              </Pressable>
-                            ) : (
-                              <View style={[styles.payQrInlineWrap, styles.payQrInlineUnavailable]}>
-                                <Ionicons name="qr-code-outline" size={22} color={themeColors.textMuted} />
-                                <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
-                              </View>
-                            )
-                          ) : null}
+                          {canQr ? (
+                            <Pressable
+                              onPress={() => openPaymentQr(item)}
+                              style={({ pressed }) => [styles.payQrInlineWrap, pressed ? { opacity: 0.95 } : null]}
+                              accessibilityLabel={tr('Payment QR')}
+                            >
+                              {qrThumbs[item.id] ? (
+                                <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrInlineImage} />
+                              ) : qrThumbErrors[item.id] ? (
+                                <View style={[styles.payQrInlinePlaceholder, styles.payQrInlineUnavailable]}>
+                                  <Ionicons name="alert-circle-outline" size={20} color={themeColors.textMuted} />
+                                  <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                                </View>
+                              ) : (
+                                <View style={styles.payQrInlinePlaceholder}>
+                                  <ActivityIndicator size="small" color={themeColors.primary} />
+                                </View>
+                              )}
+                            </Pressable>
+                          ) : (
+                            <View style={[styles.payQrInlineWrap, styles.payQrInlineUnavailable]}>
+                              <Ionicons name="qr-code-outline" size={22} color={themeColors.textMuted} />
+                              <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                            </View>
+                          )}
                         </View>
                       </View>
                       <View style={styles.billActionsRow}>
@@ -16171,32 +17165,31 @@ function PayScreen() {
                         />
                       </Pressable>
 
-                      {selected[item.id] ? (
-                        canQr ? (
-                          <Pressable
-                            onPress={() => openPaymentQr(item)}
-                            style={({ pressed }) => [styles.payQrInlineWrap, pressed ? { opacity: 0.95 } : null]}
-                          >
-                            {qrThumbs[item.id] ? (
-                              <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrInlineImage} />
-                            ) : qrThumbErrors[item.id] ? (
-                              <View style={[styles.payQrInlinePlaceholder, styles.payQrInlineUnavailable]}>
-                                <Ionicons name="alert-circle-outline" size={20} color={themeColors.textMuted} />
-                                <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
-                              </View>
-                            ) : (
-                              <View style={styles.payQrInlinePlaceholder}>
-                                <ActivityIndicator size="small" color={themeColors.primary} />
-                              </View>
-                            )}
-                          </Pressable>
-                        ) : (
-                          <View style={[styles.payQrInlineWrap, styles.payQrInlineUnavailable]}>
-                            <Ionicons name="qr-code-outline" size={22} color={themeColors.textMuted} />
-                            <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
-                          </View>
-                        )
-                      ) : null}
+                      {canQr ? (
+                        <Pressable
+                          onPress={() => openPaymentQr(item)}
+                          style={({ pressed }) => [styles.payQrInlineWrap, pressed ? { opacity: 0.95 } : null]}
+                          accessibilityLabel={tr('Payment QR')}
+                        >
+                          {qrThumbs[item.id] ? (
+                            <Image source={{ uri: qrThumbs[item.id] }} style={styles.payQrInlineImage} />
+                          ) : qrThumbErrors[item.id] ? (
+                            <View style={[styles.payQrInlinePlaceholder, styles.payQrInlineUnavailable]}>
+                              <Ionicons name="alert-circle-outline" size={20} color={themeColors.textMuted} />
+                              <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                            </View>
+                          ) : (
+                            <View style={styles.payQrInlinePlaceholder}>
+                              <ActivityIndicator size="small" color={themeColors.primary} />
+                            </View>
+                          )}
+                        </Pressable>
+                      ) : (
+                        <View style={[styles.payQrInlineWrap, styles.payQrInlineUnavailable]}>
+                          <Ionicons name="qr-code-outline" size={22} color={themeColors.textMuted} />
+                          <Text style={styles.payQrInlineUnavailableText}>{tr('QR unavailable')}</Text>
+                        </View>
+                      )}
                     </View>
                   </View>
                   <View style={styles.billActionsRow}>
@@ -16864,7 +17857,8 @@ function SettingsScreen() {
       scheduledCount: number
     }>
   }>(null)
-  const [remindersDetailsOpen, setRemindersDetailsOpen] = useState(false)
+  const [cancelRemindersVisible, setCancelRemindersVisible] = useState(false)
+  const [cancelRemindersBusy, setCancelRemindersBusy] = useState(false)
   const spacesCtx = useSpacesContext()
   const { space } = useActiveSpace()
   const { snapshot: entitlements } = useEntitlements()
@@ -17186,11 +18180,28 @@ function SettingsScreen() {
     try {
       const pid = String(payerId || '').trim()
       if (!pid) return
+
+      const maybeCleanupOld = async () => {
+        try {
+          const old = payerAvatars[pid]
+          const docDir = String(FileSystem.documentDirectory || '')
+          const oldUri = String(old || '').trim()
+          if (!oldUri || !docDir) return
+          if (!oldUri.startsWith(docDir)) return
+          if (!/payer-avatar-/.test(oldUri)) return
+          const info = await FileSystem.getInfoAsync(oldUri).catch(() => null as any)
+          if (info?.exists) await FileSystem.deleteAsync(oldUri, { idempotent: true }).catch(() => {})
+        } catch {}
+      }
+
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.9 })
       if ((res as any)?.canceled) return
       const asset = (res as any)?.assets?.[0]
       const uri = String(asset?.uri || '').trim()
       if (!uri) return
+
+      // If we previously stored a copied avatar file, remove it to avoid orphaned files.
+      await maybeCleanupOld()
 
       const target = `${FileSystem.documentDirectory}payer-avatar-${pid}-${Date.now()}.jpg`
       try { await FileSystem.copyAsync({ from: uri, to: target }) } catch {}
@@ -17207,28 +18218,43 @@ function SettingsScreen() {
     try {
       const pid = String(payerId || '').trim()
       if (!pid) return
+
+      const existing = payerAvatars[pid]
       await AsyncStorage.removeItem(payerAvatarKey(pid))
       setPayerAvatars((prev) => ({ ...prev, [pid]: null }))
+
+      // Best-effort cleanup of copied avatar files.
+      try {
+        const docDir = String(FileSystem.documentDirectory || '')
+        const oldUri = String(existing || '').trim()
+        if (oldUri && docDir && oldUri.startsWith(docDir) && /payer-avatar-/.test(oldUri)) {
+          const info = await FileSystem.getInfoAsync(oldUri).catch(() => null as any)
+          if (info?.exists) await FileSystem.deleteAsync(oldUri, { idempotent: true }).catch(() => {})
+        }
+      } catch {}
     } catch {
       Alert.alert(tr('Error'), tr('Save failed'))
     }
-  }, [payerAvatarKey])
+  }, [payerAvatarKey, payerAvatars])
 
   const openPayerAvatarMenu = useCallback((payerId: string, displayName: string) => {
     const pid = String(payerId || '').trim()
     if (!pid) return
     const title = displayName || payerLabelFromSpaceId(pid)
+    const hasPhoto = Boolean(payerAvatars[pid])
 
     const buttons: any[] = [
       {
         text: tr('Change photo'),
         onPress: () => { void pickPayerAvatar(pid) },
       },
-      {
-        text: tr('Remove photo'),
-        onPress: () => { void removePayerAvatar(pid) },
-        style: 'default',
-      },
+      ...(hasPhoto ? [
+        {
+          text: tr('Remove photo'),
+          onPress: () => { void removePayerAvatar(pid) },
+          style: 'destructive',
+        },
+      ] : []),
       { text: tr('Cancel'), style: 'cancel' },
     ]
 
@@ -17424,18 +18450,8 @@ function SettingsScreen() {
                     label={tr('More')}
                     iconName="ellipsis-horizontal"
                     onPress={() => {
-                      const title = p1.name || p1Slot
-                      Alert.alert(title, '', [
-                        {
-                          text: tr('Remove'),
-                          style: 'destructive',
-                          onPress: () => {
-                            setRemoveTarget({ id: p1.id, displayName: p1.name || p1Slot, slotLabel: p1Slot })
-                            setRemoveVisible(true)
-                          },
-                        },
-                        { text: tr('Cancel'), style: 'cancel' },
-                      ])
+                      setRemoveTarget({ id: p1.id, displayName: p1.name || p1Slot, slotLabel: p1Slot })
+                      setRemoveVisible(true)
                     }}
                   />
                 </View>
@@ -17518,18 +18534,8 @@ function SettingsScreen() {
                       label={tr('More')}
                       iconName="ellipsis-horizontal"
                       onPress={() => {
-                        const title = p2.name || p2Slot
-                        Alert.alert(title, '', [
-                          {
-                            text: tr('Remove'),
-                            style: 'destructive',
-                            onPress: () => {
-                              setRemoveTarget({ id: p2.id, displayName: p2.name || p2Slot, slotLabel: p2Slot })
-                              setRemoveVisible(true)
-                            },
-                          },
-                          { text: tr('Cancel'), style: 'cancel' },
-                        ])
+                        setRemoveTarget({ id: p2.id, displayName: p2.name || p2Slot, slotLabel: p2Slot })
+                        setRemoveVisible(true)
                       }}
                     />
                   </View>
@@ -17629,8 +18635,12 @@ function SettingsScreen() {
           animationType="slide"
           onRequestClose={() => setLanguageModalVisible(false)}
         >
-          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
-            <Surface elevated style={styles.iosPickerSheet}>
+          <Pressable
+            style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}
+            onPress={() => setLanguageModalVisible(false)}
+          >
+            <Pressable onPress={() => {}} style={{ width: '100%' }}>
+              <Surface elevated style={styles.iosPickerSheet}>
               <SectionHeader title={tr('Language')} />
               <Text style={styles.bodyText}>{tr('Choose language')}</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
@@ -17650,28 +18660,13 @@ function SettingsScreen() {
               <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
                 <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setLanguageModalVisible(false)} />
               </View>
-            </Surface>
-          </View>
+              </Surface>
+            </Pressable>
+          </Pressable>
         </Modal>
 
         <Surface elevated>
           <SectionHeader title={tr('Reminders & notifications')} />
-          {remindersStatus ? (
-            <View style={{ marginTop: themeSpacing.xs }}>
-              <InlineInfo
-                tone="info"
-                iconName="information-circle-outline"
-                message={tr('Scheduled notifications: {count}\nConfigured bills: {bills}\nConfigured warranties: {warranties}\nInbox reminders: {inbox}', {
-                  count: remindersStatus.scheduledTotal,
-                  bills: remindersStatus.billConfiguredCount,
-                  warranties: remindersStatus.warrantyConfiguredCount,
-                  inbox: remindersStatus.inboxConfiguredCount,
-                })}
-                translate={false}
-              />
-            </View>
-          ) : null}
-
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs }}>
             <AppButton
               label={remindersEnabled ? tr('Cancel reminders') : tr('Enable reminders')}
@@ -17684,31 +18679,7 @@ function SettingsScreen() {
               }
               onPress={async ()=>{
                 if (remindersEnabled) {
-                  const info = [
-                    tr('Standard reminders are scheduled automatically for all unpaid bills and all active warranties (across profiles).'),
-                    tr('Default reminders: 3 days before at 10:00 and on due date at 09:00.'),
-                    tr('Warranties: 30 days before and 7 days before (10:00).'),
-                    '',
-                    tr('You can adjust reminders later in bill or warranty details.'),
-                  ].join('\n')
-
-                  Alert.alert(tr('Cancel reminders'), info, [
-                    { text: tr('Cancel'), style: 'cancel' },
-                    {
-                      text: tr('Cancel reminders'),
-                      style: 'destructive',
-                      onPress: () => {
-                        void (async () => {
-                          await setRemindersEnabled(false)
-                          await cancelAllReminders()
-                          await clearAllReminderMetadata()
-                          try { await Notifications.setBadgeCountAsync(0) } catch {}
-                          setRemindersEnabledState(false)
-                          setRemindersStatus(null)
-                        })()
-                      },
-                    },
-                  ])
+                  setCancelRemindersVisible(true)
                   return
                 }
 
@@ -17727,35 +18698,85 @@ function SettingsScreen() {
                 void refreshRemindersStatus()
               }}
             />
-
-            {remindersStatus?.items?.length ? (
-              <AppButton
-                label={remindersDetailsOpen ? tr('Hide details') : tr('Show details')}
-                variant="ghost"
-                iconName={remindersDetailsOpen ? 'chevron-up-outline' : 'chevron-down-outline'}
-                onPress={() => setRemindersDetailsOpen((v) => !v)}
-              />
-            ) : null}
           </View>
+        </Surface>
 
-          {remindersDetailsOpen && remindersStatus?.items?.length ? (
-            <View style={{ marginTop: themeSpacing.sm, gap: 6 }}>
-              {remindersStatus.items.slice(0, 20).map((it) => (
-                <View key={`${it.kind}:${it.id}`} style={{ paddingVertical: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: themeColors.border }}>
-                  <Text style={[styles.bodyText, { fontWeight: '700' }]} numberOfLines={2}>
-                    {it.title}
+        <Modal
+          visible={cancelRemindersVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            if (cancelRemindersBusy) return
+            setCancelRemindersVisible(false)
+          }}
+        >
+          <Pressable
+            style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}
+            onPress={() => {
+              if (cancelRemindersBusy) return
+              setCancelRemindersVisible(false)
+            }}
+          >
+            <Pressable onPress={() => {}} style={{ width: '100%' }}>
+              <Surface elevated style={styles.iosPickerSheet}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <Ionicons name="warning-outline" size={20} color="#B91C1C" />
+                  <Text style={styles.screenHeaderTitle}>{tr('Cancel reminders')}</Text>
+                </View>
+
+                <View style={{ marginTop: themeSpacing.sm, gap: 8 }}>
+                  {remindersStatus?.scheduledTotal ? (
+                    <Text style={styles.mutedText}>
+                      {tr('Scheduled notifications: {count}', { count: remindersStatus.scheduledTotal })}
+                    </Text>
+                  ) : null}
+                  <Text style={styles.bodyText}>
+                    {tr('Standard reminders are scheduled automatically for all unpaid bills and all active warranties (across profiles).')}
                   </Text>
                   <Text style={styles.mutedText}>
-                    {tr('Next reminder: {date}', { date: it.nextAt || '—' })} • {tr('Scheduled')}: {it.scheduledCount} • {tr('Configured')}: {it.savedIds}
+                    {tr('You can adjust reminders later in bill or warranty details.')}
                   </Text>
                 </View>
-              ))}
-              {remindersStatus.items.length > 20 ? (
-                <Text style={styles.mutedText}>{tr('Showing first {count}.', { count: 20 })}</Text>
-              ) : null}
-            </View>
-          ) : null}
-        </Surface>
+
+                <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
+                  <AppButton
+                    label={tr('Cancel')}
+                    variant="ghost"
+                    onPress={() => {
+                      if (cancelRemindersBusy) return
+                      setCancelRemindersVisible(false)
+                    }}
+                  />
+                  <AppButton
+                    label={tr('Cancel reminders')}
+                    iconName="trash-outline"
+                    variant="secondary"
+                    disabled={cancelRemindersBusy}
+                    style={{ backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' }}
+                    labelStyle={{ color: '#991B1B' }}
+                    onPress={() => {
+                      if (cancelRemindersBusy) return
+                      setCancelRemindersBusy(true)
+                      void (async () => {
+                        try {
+                          await setRemindersEnabled(false)
+                          await cancelAllReminders()
+                          await clearAllReminderMetadata()
+                          try { await Notifications.setBadgeCountAsync(0) } catch {}
+                          setRemindersEnabledState(false)
+                          setRemindersStatus(null)
+                        } finally {
+                          setCancelRemindersBusy(false)
+                          setCancelRemindersVisible(false)
+                        }
+                      })()
+                    }}
+                  />
+                </View>
+              </Surface>
+            </Pressable>
+          </Pressable>
+        </Modal>
 
         <Surface elevated>
           <SectionHeader title={tr('Legal')} />
@@ -17774,22 +18795,53 @@ function SettingsScreen() {
           <Text style={styles.bodyText}>{tr('Info email:')} {diagnostics.infoEmail}</Text>
         </Surface>
 
-        <Modal visible={removeVisible} transparent animationType="fade" onRequestClose={() => setRemoveVisible(false)}>
-          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
-            <Surface elevated style={styles.iosPickerSheet}>
+        <Modal
+          visible={removeVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            setRemoveVisible(false)
+            setRemoveTarget(null)
+          }}
+        >
+          <Pressable
+            style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}
+            onPress={() => {
+              setRemoveVisible(false)
+              setRemoveTarget(null)
+            }}
+          >
+            <Pressable onPress={() => {}} style={{ width: '100%' }}>
+              <Surface elevated style={styles.iosPickerSheet}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                 <Ionicons name="warning-outline" size={20} color="#c53030" />
                 <Text style={styles.screenHeaderTitle}>{tr('Remove')}</Text>
               </View>
               <View style={{ marginTop: themeSpacing.sm }}>
-                <InlineInfo
-                  tone="danger"
-                  iconName="alert-circle-outline"
-                  message={tr('This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.', { displayName: removeTarget?.displayName || '' })}
-                />
+                <View style={{
+                  borderWidth: StyleSheet.hairlineWidth,
+                  borderColor: '#FCA5A5',
+                  backgroundColor: '#FEF2F2',
+                  padding: 12,
+                  borderRadius: 12,
+                }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                    <Ionicons name="warning-outline" size={18} color="#B91C1C" style={{ marginTop: 1 }} />
+                    <Text style={[styles.bodyText, { color: '#991B1B', fontWeight: '800', flex: 1 }]}>
+                      {tr('This will delete all bills, warranties, reminders, and attachments for {displayName}.\n\nThis cannot be undone.', { displayName: removeTarget?.displayName || '' })}
+                    </Text>
+                  </View>
+                </View>
               </View>
               <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
-                <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setRemoveVisible(false)} />
+                <AppButton
+                  label={tr('Cancel')}
+                  variant="ghost"
+                  onPress={() => {
+                    setRemoveVisible(false)
+                    setRemoveTarget(null)
+                  }}
+                />
                 <AppButton
                   label={tr('Remove')}
                   iconName="trash-outline"
@@ -17809,34 +18861,55 @@ function SettingsScreen() {
                   }}
                 />
               </View>
-            </Surface>
-          </View>
+              </Surface>
+            </Pressable>
+          </Pressable>
         </Modal>
 
-        <Modal visible={renameVisible} transparent animationType="fade" onRequestClose={() => setRenameVisible(false)}>
-          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
-            <Surface elevated style={styles.iosPickerSheet}>
+        <Modal
+          visible={renameVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setRenameVisible(false)}
+        >
+          <Pressable
+            style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}
+            onPress={() => setRenameVisible(false)}
+          >
+            <Pressable onPress={() => {}} style={{ width: '100%' }}>
+              <Surface elevated style={styles.iosPickerSheet}>
               <SectionHeader title={t(lang, 'Rename {payer}', { payer: payerLabelFromSpaceId(renameTarget) })} />
               <AppInput placeholder={tr('New name')} value={renameDraft} onChangeText={setRenameDraft} />
               <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
                 <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setRenameVisible(false)} />
                 <AppButton label={tr('Save')} iconName="checkmark-outline" onPress={saveRename} />
               </View>
-            </Surface>
-          </View>
+              </Surface>
+            </Pressable>
+          </Pressable>
         </Modal>
 
-        <Modal visible={creatingPayer2} transparent animationType="fade" onRequestClose={() => setCreatingPayer2(false)}>
-          <View style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}>
-            <Surface elevated style={styles.iosPickerSheet}>
+        <Modal
+          visible={creatingPayer2}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setCreatingPayer2(false)}
+        >
+          <Pressable
+            style={[styles.iosPickerOverlay, { paddingBottom: Math.max(insets.bottom, themeLayout.screenPadding) }]}
+            onPress={() => setCreatingPayer2(false)}
+          >
+            <Pressable onPress={() => {}} style={{ width: '100%' }}>
+              <Surface elevated style={styles.iosPickerSheet}>
               <SectionHeader title={tr('Create Profil 2')} />
               <AppInput placeholder={tr('Profil 2 name')} value={payer2NameDraft} onChangeText={setPayer2NameDraft} />
               <View style={{ flexDirection: 'row', gap: themeLayout.gap, marginTop: themeSpacing.md }}>
                 <AppButton label={tr('Cancel')} variant="ghost" onPress={() => setCreatingPayer2(false)} />
                 <AppButton label={tr('Create')} iconName="add-outline" onPress={savePayer2} />
               </View>
-            </Surface>
-          </View>
+              </Surface>
+            </Pressable>
+          </Pressable>
         </Modal>
 
         {supabase && (
@@ -18668,7 +19741,7 @@ const styles = StyleSheet.create({
   payCopyMiniBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#F1F5F9', borderWidth: StyleSheet.hairlineWidth, borderColor: '#E2E8F0' },
   payCopyMiniText: { fontSize: 12, fontWeight: '700', color: '#334155' },
   qrModalCard: { width: '100%', maxWidth: 420, alignSelf: 'center', padding: themeSpacing.lg, gap: themeSpacing.sm },
-  qrImage: { width: 240, height: 240, alignSelf: 'center', borderRadius: 12, backgroundColor: '#FFFFFF' },
+  qrImage: { width: 280, height: 280, alignSelf: 'center', borderRadius: 12, backgroundColor: '#FFFFFF' },
   reportStatLabel: { fontSize: 13, color: '#4B5563' },
   reportStatValue: { fontSize: 15, fontWeight: '700', color: themeColors.text },
   reportViewToggleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: themeLayout.gap, marginTop: themeSpacing.xs },
