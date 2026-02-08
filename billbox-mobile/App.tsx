@@ -136,6 +136,21 @@ function translateStringPreserveSpace(input: string): string {
   return leading + tr(core) + trailing
 }
 
+function initialsFromName(name: string): string {
+  const s = String(name || '').trim()
+  if (!s) return '?'
+  const parts = s
+    .split(/\s+/g)
+    .map((p) => p.trim())
+    .filter(Boolean)
+  const first = parts[0] || ''
+  const second = parts.length > 1 ? parts[1] : ''
+  const a = first ? first[0] : ''
+  const b = second ? second[0] : (first.length > 1 ? first[1] : '')
+  const out = `${a}${b}`.trim().toUpperCase()
+  return out || String(s[0] || '?').toUpperCase()
+}
+
 function Text(props: any) {
   const { children, accessibilityLabel, ...rest } = props || {}
   const translatedChildren = Array.isArray(children)
@@ -1094,6 +1109,8 @@ type BillStatus = 'pending' | 'unpaid' | 'paid' | 'archived'
 
 const ARCHIVE_PURPOSE_MARKER = '[BILLBOX_ARCHIVED]'
 
+const BILLBOX_QR_PAYLOAD_MARKER = '[BILLBOX_QR_PAYLOAD]'
+
 function remapArchivedBillFromDb<T extends { status?: any; purpose?: any }>(bill: T): T {
   const status = (bill as any)?.status
   const purposeRaw = typeof (bill as any)?.purpose === 'string' ? String((bill as any).purpose) : ''
@@ -1138,6 +1155,7 @@ type Bill = {
   reference?: string | null
   reference_model?: string | null
   purpose?: string | null
+  payment_details?: string | null
   invoice_number?: string | null
   category?: string | null
   space_id?: string | null
@@ -1272,6 +1290,7 @@ function sanitizeBillForRoute(input: any): Bill | null {
       reference: (input as any)?.reference ?? null,
       reference_model: (input as any)?.reference_model ?? null,
       purpose: (input as any)?.purpose ?? null,
+      payment_details: (input as any)?.payment_details ?? null,
       invoice_number: (input as any)?.invoice_number ?? null,
       category: (input as any)?.category ?? null,
       space_id: (input as any)?.space_id ?? null,
@@ -1292,6 +1311,7 @@ type CreateBillInput = {
   reference?: string | null
   reference_model?: string | null
   purpose?: string | null
+  payment_details?: string | null
   invoice_number?: string | null
   category?: string | null
   space_id?: string | null
@@ -3471,50 +3491,20 @@ function BillDetailsScreen() {
                 <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)' }]}>{tr('Open failed')}</Text>
               </View>
             ) : attachmentViewerKind === 'image' ? (
-              WebViewImpl ? (
-                <View style={{ flex: 1, backgroundColor: '#000000' }}>
-                  <WebViewImpl
-                    originWhitelist={['*']}
-                    source={{
-                      html: (() => {
-                        const raw = String(attachmentViewerUri || '')
-                        const esc = raw
-                          .replace(/&/g, '&amp;')
-                          .replace(/"/g, '&quot;')
-                          .replace(/</g, '&lt;')
-                          .replace(/>/g, '&gt;')
-                        return `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" /><style>html,body{margin:0;padding:0;background:#0B1220;height:100%;overflow:hidden;} .wrap{height:100%;width:100%;display:flex;align-items:center;justify-content:center;} img{max-width:100%;max-height:100%;object-fit:contain;}</style></head><body><div class="wrap"><img src="${esc}" /></div></body></html>`
-                      })(),
-                    }}
-                    startInLoadingState
-                    renderLoading={() => (
-                      <View style={[styles.centered, { flex: 1 }]}>
-                        <ActivityIndicator size="large" color="#FFFFFF" />
-                      </View>
-                    )}
-                    style={{ flex: 1, backgroundColor: '#0B1220' }}
-                    allowFileAccess
-                    allowUniversalAccessFromFileURLs
-                    setBuiltInZoomControls
-                    setDisplayZoomControls={false}
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
+                maximumZoomScale={3}
+                minimumZoomScale={1}
+              >
+                <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
+                  <Image
+                    source={{ uri: attachmentViewerUri }}
+                    style={{ flex: 1, width: '100%', height: '100%' }}
+                    resizeMode="contain"
                   />
                 </View>
-              ) : (
-                <ScrollView
-                  style={{ flex: 1 }}
-                  contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
-                  maximumZoomScale={3}
-                  minimumZoomScale={1}
-                >
-                  <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
-                    <Image
-                      source={{ uri: attachmentViewerUri }}
-                      style={{ flex: 1, width: '100%', height: '100%' }}
-                      resizeMode="contain"
-                    />
-                  </View>
-                </ScrollView>
-              )
+              </ScrollView>
             ) : attachmentViewerKind === 'pdf' ? (
               WebViewImpl ? (
                 <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
@@ -4479,6 +4469,90 @@ function ScanBillScreen() {
     return String(input || '').toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/g, '')
   }
 
+  function extractReferenceToken(input: string): string {
+    const raw = String(input || '')
+    const m = raw.match(/\b(?:SI|RF)\s*\d{2}\s*[0-9A-Z\-\/]{4,}\b/i)
+    return m?.[0] ? normalizeReference(m[0]) : ''
+  }
+
+  function inferReferenceModelFromText(rawText: string, fallbackRef?: string): string {
+    const text = String(rawText || '').replace(/\r/g, '')
+    const lines = text.split(/\n+/).map((l) => String(l || '').trim()).filter(Boolean)
+    if (!lines.length) return ''
+
+    const modelRe = /\b(model|prepona|model\s*sklica|sklic\s*model)\b\s*[:\-]?\s*((?:SI|RF)\s*\d{2}|\d{2})\b/i
+    const explicitModelRe = /\b(?:SI|RF)\s*\d{2}\b/i
+    const sklicRe = /\b(sklic|referenca|reference|ref\.?|remittance)\b/i
+
+    const modelHits: Array<{ idx: number; model: string }> = []
+    const sklicIdxs: number[] = []
+
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i]
+      if (sklicRe.test(l)) sklicIdxs.push(i)
+      const mm = l.match(modelRe)
+      if (mm?.[2]) {
+        const normalized = normalizeReferenceModel(mm[2])
+        if (/^(SI|RF)\s*\d{2}$/i.test(normalized)) modelHits.push({ idx: i, model: normalized })
+        continue
+      }
+      const em = l.match(explicitModelRe)
+      if (em?.[0]) {
+        const normalized = normalizeReferenceModel(em[0])
+        if (/^(SI|RF)\s*\d{2}$/i.test(normalized)) modelHits.push({ idx: i, model: normalized })
+      }
+    }
+
+    if (!modelHits.length) {
+      const token = extractReferenceToken(fallbackRef || '')
+      const split = token ? splitReferenceModel(token) : { model: null, number: null }
+      return split.model ? normalizeReferenceModel(split.model) : ''
+    }
+
+    if (!sklicIdxs.length) {
+      // No clear Sklic/Reference lines: pick the last model in the document (often in footer).
+      modelHits.sort((a, b) => a.idx - b.idx)
+      return modelHits[modelHits.length - 1].model
+    }
+
+    // Pick the model closest to a Sklic/Reference line.
+    let best: { dist: number; idx: number; model: string } | null = null
+    for (const mh of modelHits) {
+      for (const si of sklicIdxs) {
+        const dist = Math.abs(mh.idx - si)
+        if (!best || dist < best.dist || (dist === best.dist && mh.idx > best.idx)) {
+          best = { dist, idx: mh.idx, model: mh.model }
+        }
+      }
+    }
+    return best ? best.model : ''
+  }
+
+  function cleanReferenceNumberForModel(model: string, value: string): string {
+    const modelNorm = String(model || '').trim()
+    const modelCompact = modelNorm.replace(/\s+/g, '').toUpperCase()
+    let raw = String(value || '')
+
+    // Strip label clutter that AI/OCR sometimes includes in the same field.
+    raw = raw.replace(/^.*\b(sklic|referenca|reference|ref\.?|model|prepona)\b\s*[:\-]?\s*/i, '')
+
+    let v = normalizeReferenceNumber(raw)
+    if (modelCompact && v.startsWith(modelCompact)) v = v.slice(modelCompact.length)
+
+    // SI references are practically numeric; remove leaked words.
+    if (/^SI\s*\d{2}$/i.test(modelNorm)) {
+      const runs = v.match(/[0-9][0-9\-\/]{2,}/g) || []
+      if (runs.length) {
+        runs.sort((a, b) => b.length - a.length)
+        v = runs[0]
+      } else {
+        v = v.replace(/[^0-9\-\/]/g, '')
+      }
+      v = v.replace(/^[\-\/]+|[\-\/]+$/g, '')
+    }
+    return v
+  }
+
   function splitReferenceModel(raw: string): { model: string | null; number: string | null } {
     const compact = normalizeReference(raw)
     const m = compact.match(/^(SI|RF)(\d{2})([0-9A-Z\-\/]{4,})$/i)
@@ -4893,6 +4967,14 @@ function ScanBillScreen() {
     const all = new Set<string>()
     const add = (s: string) => { if (s) all.add(s) }
 
+    const repairDigitLike = (s: string): string =>
+      String(s || '')
+        .replace(/[Oo]/g, '0')
+        .replace(/[Il]/g, '1')
+        .replace(/S/g, '5')
+        .replace(/B/g, '8')
+        .replace(/Z/g, '2')
+
     const computeIbanChecksumDigits = (countryCode: string, bban: string): string | null => {
       const cc = String(countryCode || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2)
       const b = String(bban || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
@@ -4951,20 +5033,20 @@ function ScanBillScreen() {
         .map((l) => l.trim())
         .filter(Boolean)
 
-      const labelRe = /(\biban\b|\btrr\b|\btr\b|bank\s*account|account\s*(?:no\.?|number)?|\bra\u010dun\b|\bracun\b)/i
+      const labelRe = /(\biban\b|\btrr\b|\btr\s*[:\-]|bank\s*account|account\s*(?:no\.?|number)?|\bra\u010dun\b|\bracun\b)/i
       const bankContextRe = /(\bbic\b|\bswift\b|\bsepa\b|\bbank\b|\bbanka\b|\btrr\b|\btr\b|transakcij\S*\s*ra\u010dun|transakcij\S*\s*racun|\bnlb\b|\bskb\b|\bintesa\b|\bunicredit\b|\bsparkasse\b|\botp\b|\babanka\b|\bdelavska\b)/i
       const grabFromLine = (l: string) => {
         // Allow spaces and separators; we later normalize.
-        const m = String(l || '').match(/([A-Z]{2}\s*[0-9A-Z\s\-]{9,40}|\d[\d\s\-]{12,30})/i)
+        const m = String(l || '').match(/([A-Z]{2}\s*[0-9A-Z\s\-]{9,40}|[0-9OIlSBZ][0-9OIlSBZ\s\-]{12,30})/i)
         if (m?.[1]) out.push(String(m[1]))
       }
 
       const grabSiBbanFromContext = (l: string) => {
         const line = String(l || '')
         if (!bankContextRe.test(line)) return
-        const chunks = line.match(/\b\d[\d\s\-]{13,22}\b/g) || []
+        const chunks = line.match(/\b[0-9OIlSBZ][0-9OIlSBZ\s\-]{13,22}\b/g) || []
         for (const c of chunks) {
-          const digitsOnly = String(c || '').replace(/\D/g, '')
+          const digitsOnly = repairDigitLike(String(c || '')).replace(/\D/g, '')
           if (digitsOnly.length === 15) out.push(digitsOnly)
         }
       }
@@ -5002,13 +5084,13 @@ function ScanBillScreen() {
       const builtMissingChecksum = tryBuildIbanFromMissingChecksum(acct)
       if (builtMissingChecksum) add(builtMissingChecksum)
 
-      const norm = normalizeIban(acct)
+      const norm = normalizeIban(repairDigitLike(acct))
       if (norm && norm.startsWith('SI') && /^SI\d{15}$/.test(norm)) {
         const built = tryBuildSloveniaIbanFromBbanDigits(norm.slice(2))
         if (built) add(built)
       }
 
-      const digitsOnly = String(acct || '').replace(/\D/g, '')
+      const digitsOnly = repairDigitLike(String(acct || '')).replace(/\D/g, '')
       const builtSi = tryBuildSloveniaIbanFromBbanDigits(digitsOnly)
       if (builtSi) add(builtSi)
     }
@@ -5640,8 +5722,11 @@ function ScanBillScreen() {
       const refFromDoc = extractReferenceCandidate(rawText)
       const rawModel = fields?.reference_model ? String(fields.reference_model) : ''
       const rawRefNumber = fields?.reference_number ? String(fields.reference_number) : ''
-      const split = splitReferenceModel(rawRef)
-      const modelCandidate = normalizeReferenceModel(rawModel || split.model || '')
+      const refToken = extractReferenceToken(rawRef)
+      const split = splitReferenceModel(refToken || rawRef)
+      const inferredModel = inferReferenceModelFromText(rawText || '', rawRef)
+      const modelCandidateRaw = normalizeReferenceModel(rawModel || split.model || inferredModel || '')
+      const modelCandidate = /^(SI|RF)\s*\d{2}$/i.test(modelCandidateRaw) ? modelCandidateRaw : ''
       const stripModelPrefix = (model: string, value: string): string => {
         const m = String(model || '').replace(/\s+/g, '').toUpperCase()
         const v = normalizeReferenceNumber(value)
@@ -5650,15 +5735,17 @@ function ScanBillScreen() {
       }
       let ref = ''
       if (modelCandidate) {
-        const splitFull = rawRef ? splitReferenceModel(normalizeReference(rawRef) || '') : { model: null, number: null }
-        const candidate =
+        const splitFull = rawRef ? splitReferenceModel(refToken || normalizeReference(rawRef) || '') : { model: null, number: null }
+        const candidateRaw =
           normalizeReferenceNumber(rawRefNumber) ||
           normalizeReferenceNumber(split.number || '') ||
           normalizeReferenceNumber(splitFull.number || '') ||
-          stripModelPrefix(modelCandidate, rawRef)
-        ref = candidate
+          stripModelPrefix(modelCandidate, refToken || rawRef)
+        ref = cleanReferenceNumberForModel(modelCandidate, candidateRaw)
       } else {
-        ref = normalizeReference(rawRef) || ''
+        // If the backend/AI included surrounding words, only keep the actual token.
+        const token = refToken || extractReferenceToken(rawRef)
+        ref = token || (normalizeReference(rawRef) || '')
       }
       // If the extracted reference is missing or suspicious, fall back to labeled Sklic/Reference lines.
       if (!ref || !isValidReferenceFormat(ref, modelCandidate)) {
@@ -6792,6 +6879,28 @@ function ScanBillScreen() {
       ? buildReferenceFromModel(referenceModelTrimmed, referenceNumberTrimmed)
       : normalizeReference(referenceNumberTrimmed)
 
+    const detectedQrPayload = (() => {
+      const candidate = String(rawText || '').trim()
+      if (!candidate) return ''
+      const parsed = parsePaymentQR(candidate)
+      if (!parsed) return ''
+      // Keep this bounded; QR payloads are small, OCR text is not.
+      if (candidate.length > 2500) return ''
+      return candidate
+    })()
+
+    const buildPaymentDetailsForDb = (userDetails: string, qrPayload: string): string | null => {
+      const parts: string[] = []
+      const detailsClean = String(userDetails || '').trim()
+      if (detailsClean) parts.push(detailsClean)
+      const qrClean = String(qrPayload || '').trim()
+      if (qrClean) parts.push(`${BILLBOX_QR_PAYLOAD_MARKER}\n${qrClean}`)
+      const joined = parts.filter(Boolean).join('\n\n').trim()
+      // Hard cap to avoid bloating DB rows.
+      if (!joined) return null
+      return joined.length > 8000 ? joined.slice(0, 8000) : joined
+    }
+
     if (!isArchiveOnly) {
       const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
       const paymentDetailsTrimmed = paymentDetails.trim()
@@ -6896,6 +7005,7 @@ function ScanBillScreen() {
       if (s) {
         const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
         const details = paymentDetails.trim()
+        const paymentDetailsForDb = buildPaymentDetailsForDb(details, detectedQrPayload)
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
           : effectivePurpose
@@ -6921,6 +7031,7 @@ function ScanBillScreen() {
           reference_model: referenceModelTrimmed || null,
           category: category || null,
           purpose: combinedPurpose || null,
+          payment_details: paymentDetailsForDb,
           invoice_number: invoiceTrimmed || null,
           space_id: dbSpaceId,
         })
@@ -6941,6 +7052,7 @@ function ScanBillScreen() {
               reference_model: referenceModelTrimmed || null,
               category: category || null,
               purpose: makeArchiveMarkerPurpose(combinedPurpose || ''),
+              payment_details: paymentDetailsForDb,
               invoice_number: invoiceTrimmed || null,
               space_id: dbSpaceId,
             })
@@ -6963,6 +7075,7 @@ function ScanBillScreen() {
       } else {
         const effectivePurpose = purpose.trim() || purchaseItemTrimmed || defaultPurposeFromInvoice || (payerForPurpose ? `${paymentLabel} ${payerForPurpose}` : paymentLabel)
         const details = paymentDetails.trim()
+        const paymentDetailsForDb = buildPaymentDetailsForDb(details, detectedQrPayload)
         const combinedPurpose = details
           ? (effectivePurpose ? `${effectivePurpose}\n\n${tr('Payment details')}:\n${details}` : `${tr('Payment details')}:\n${details}`)
           : effectivePurpose
@@ -6982,6 +7095,7 @@ function ScanBillScreen() {
           reference_model: referenceModelTrimmed || null,
           category: category || null,
           purpose: combinedPurpose || null,
+          payment_details: paymentDetailsForDb,
           invoice_number: invoiceTrimmed || null,
         })
         savedId = local.id
@@ -8411,54 +8525,20 @@ function InboxScreen() {
                 <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)' }]}>{tr('Open failed')}</Text>
               </View>
             ) : attachmentViewerKind === 'image' ? (
-              (() => {
-                let WebViewImpl: any = null
-                try { WebViewImpl = require('react-native-webview')?.WebView || null } catch {}
-                return WebViewImpl ? (
-                  <View style={{ flex: 1, backgroundColor: '#000000' }}>
-                    <WebViewImpl
-                      originWhitelist={['*']}
-                      source={{
-                        html: (() => {
-                          const raw = String(attachmentViewerUri || '')
-                          const esc = raw
-                            .replace(/&/g, '&amp;')
-                            .replace(/"/g, '&quot;')
-                            .replace(/</g, '&lt;')
-                            .replace(/>/g, '&gt;')
-                          return `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" /><style>html,body{margin:0;padding:0;background:#0B1220;height:100%;overflow:hidden;} .wrap{height:100%;width:100%;display:flex;align-items:center;justify-content:center;} img{max-width:100%;max-height:100%;object-fit:contain;}</style></head><body><div class="wrap"><img src="${esc}" /></div></body></html>`
-                        })(),
-                      }}
-                      startInLoadingState
-                      renderLoading={() => (
-                        <View style={[styles.centered, { flex: 1 }]}>
-                          <ActivityIndicator size="large" color="#FFFFFF" />
-                        </View>
-                      )}
-                      style={{ flex: 1, backgroundColor: '#0B1220' }}
-                      allowFileAccess
-                      allowUniversalAccessFromFileURLs
-                      setBuiltInZoomControls
-                      setDisplayZoomControls={false}
-                    />
-                  </View>
-                ) : (
-                  <ScrollView
-                    style={{ flex: 1 }}
-                    contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
-                    maximumZoomScale={3}
-                    minimumZoomScale={1}
-                  >
-                    <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
-                      <Image
-                        source={{ uri: attachmentViewerUri }}
-                        style={{ flex: 1, width: '100%', height: '100%' }}
-                        resizeMode="contain"
-                      />
-                    </View>
-                  </ScrollView>
-                )
-              })()
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
+                maximumZoomScale={3}
+                minimumZoomScale={1}
+              >
+                <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
+                  <Image
+                    source={{ uri: attachmentViewerUri }}
+                    style={{ flex: 1, width: '100%', height: '100%' }}
+                    resizeMode="contain"
+                  />
+                </View>
+              </ScrollView>
             ) : attachmentViewerKind === 'pdf' ? (
               (() => {
                 let WebViewImpl: any = null
@@ -13685,41 +13765,20 @@ function WarrantyDetailsScreen() {
                 <Text style={[styles.mutedText, { color: 'rgba(255,255,255,0.75)' }]}>{tr('Open failed')}</Text>
               </View>
             ) : attachmentViewerKind === 'image' ? (
-              WebViewImpl ? (
-                <View style={{ flex: 1, backgroundColor: '#000000' }}>
-                  <WebViewImpl
-                    originWhitelist={['*']}
-                    source={{
-                      html: (() => {
-                        const raw = String(attachmentViewerUri || '')
-                        const esc = raw
-                          .replace(/&/g, '&amp;')
-                          .replace(/"/g, '&quot;')
-                          .replace(/</g, '&lt;')
-                          .replace(/>/g, '&gt;')
-                        return `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" /><style>html,body{margin:0;padding:0;background:#0B1220;height:100%;overflow:hidden;} .wrap{height:100%;width:100%;display:flex;align-items:center;justify-content:center;} img{max-width:100%;max-height:100%;object-fit:contain;}</style></head><body><div class="wrap"><img src="${esc}" /></div></body></html>`
-                      })(),
-                    }}
-                    startInLoadingState
-                    renderLoading={() => (
-                      <View style={[styles.centered, { flex: 1 }]}>
-                        <ActivityIndicator size="large" color="#FFFFFF" />
-                      </View>
-                    )}
-                    style={{ flex: 1, backgroundColor: '#0B1220' }}
-                    allowFileAccess
-                    allowUniversalAccessFromFileURLs
-                    setBuiltInZoomControls
-                    setDisplayZoomControls={false}
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={{ flexGrow: 1, padding: themeSpacing.sm }}
+                maximumZoomScale={3}
+                minimumZoomScale={1}
+              >
+                <View style={{ flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#FFFFFF' }}>
+                  <Image
+                    source={{ uri: attachmentViewerUri }}
+                    style={{ flex: 1, width: '100%', height: '100%' }}
+                    resizeMode="contain"
                   />
                 </View>
-              ) : (
-                <View style={[styles.centered, { padding: themeSpacing.lg }]}>
-                  <Text style={[styles.bodyText, { color: '#FFFFFF', textAlign: 'center' }]}>
-                    {tr('Could not open this file.')}
-                  </Text>
-                </View>
-              )
+              </ScrollView>
             ) : attachmentViewerKind === 'pdf' ? (
               WebViewImpl ? (
                 <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
@@ -16057,6 +16116,7 @@ function PayScreen() {
   const [qrBill, setQrBill] = useState<Bill | null>(null)
   const [qrDataUri, setQrDataUri] = useState<string | null>(null)
   const [qrBusy, setQrBusy] = useState(false)
+  const [qrPayloadSource, setQrPayloadSource] = useState<'scanned' | 'generated' | null>(null)
   const qrOpenInFlightRef = useRef(false)
   const [qrThumbs, setQrThumbs] = useState<Record<string, string>>({})
   const [qrThumbErrors, setQrThumbErrors] = useState<Record<string, boolean>>({})
@@ -16667,7 +16727,7 @@ function PayScreen() {
         if (cancelled) return
         if (qrThumbs[b.id]) continue
         if (qrThumbInFlight.current[b.id]) continue
-        const payload = buildPaymentQrPayload(b)
+        const payload = getPreferredPaymentQrPayload(b).payload
         if (!payload) continue
         qrThumbInFlight.current[b.id] = true
         try {
@@ -16700,7 +16760,7 @@ function PayScreen() {
         if (!b?.id) continue
         if (qrThumbs[b.id]) continue
         if (qrThumbInFlight.current[b.id]) continue
-        const payload = buildPaymentQrPayload(b)
+        const payload = getPreferredPaymentQrPayload(b).payload
         if (!payload) continue
         qrThumbInFlight.current[b.id] = true
         try {
@@ -16732,8 +16792,66 @@ function PayScreen() {
     return cleaned.slice(0, n)
   }
 
+  function extractStoredPaymentQrPayload(bill: Bill): string | null {
+    const rawDetails = typeof (bill as any)?.payment_details === 'string'
+      ? String((bill as any).payment_details)
+      : ''
+    const details = rawDetails.trim()
+    if (!details) return null
+
+    const tryNormalizeCandidate = (candidate: string): string | null => {
+      const v = String(candidate || '').trim()
+      if (!v) return null
+      if (parsePaymentQR(v)) return v
+
+      // Common case: payload is followed by extra notes. Try trimming from the end.
+      const lines = v.split(/\r?\n/)
+      for (let cut = lines.length; cut >= 4; cut--) {
+        const sub = lines.slice(0, cut).join('\n').trim()
+        if (parsePaymentQR(sub)) return sub
+      }
+
+      // If candidate includes a QR payload somewhere inside, try slicing from known anchors.
+      for (const anchor of ['BCD', 'UPNQR', 'https://', 'http://']) {
+        const idx = v.indexOf(anchor)
+        if (idx <= 0) continue
+        const tail = v.slice(idx).trim()
+        if (!tail) continue
+        if (parsePaymentQR(tail)) return tail
+        const tailLines = tail.split(/\r?\n/)
+        for (let cut = tailLines.length; cut >= 4; cut--) {
+          const sub = tailLines.slice(0, cut).join('\n').trim()
+          if (parsePaymentQR(sub)) return sub
+        }
+      }
+
+      return null
+    }
+
+    const idx = details.indexOf(BILLBOX_QR_PAYLOAD_MARKER)
+    if (idx >= 0) {
+      const after = details.slice(idx + BILLBOX_QR_PAYLOAD_MARKER.length)
+      const payload = after.replace(/^[\s\r\n]+/, '').trim()
+      return tryNormalizeCandidate(payload)
+    }
+
+    // Backward-compatible: if the whole field is just a QR payload.
+    return tryNormalizeCandidate(details)
+  }
+
+  function normalizeAndRepairIbanForQr(input: string): string {
+    const raw = String(input || '').toUpperCase().replace(/\s+/g, '')
+    if (!raw) return ''
+    // Keep country code letters intact; only repair the rest.
+    const cc = raw.slice(0, 2)
+    const rest = raw.slice(2)
+      .replace(/O/g, '0')
+      .replace(/[IL]/g, '1')
+    return cc + rest
+  }
+
   function buildPaymentQrPayload(bill: Bill): string | null {
-    const iban = normalizeIban(bill.iban || '')
+    const iban = normalizeAndRepairIbanForQr(bill.iban || '')
     if (!iban || !isValidIbanChecksum(iban)) return null
     const amount = getAmountNumber(bill)
     if (!Number.isFinite(amount) || amount <= 0) return null
@@ -16762,10 +16880,19 @@ function PayScreen() {
     return lines.join('\n')
   }
 
+  function getPreferredPaymentQrPayload(bill: Bill): { payload: string | null; source: 'scanned' | 'generated' | null } {
+    const stored = extractStoredPaymentQrPayload(bill)
+    if (stored) return { payload: stored, source: 'scanned' }
+    const generated = buildPaymentQrPayload(bill)
+    if (generated) return { payload: generated, source: 'generated' }
+    return { payload: null, source: null }
+  }
+
   function openPaymentQr(bill: Bill) {
     if (qrOpenInFlightRef.current) return
     qrOpenInFlightRef.current = true
-    const payload = buildPaymentQrPayload(bill)
+    const chosen = getPreferredPaymentQrPayload(bill)
+    const payload = chosen.payload
     if (!payload) {
       const currency = String(bill.currency || 'EUR').toUpperCase()
       if (currency !== 'EUR') {
@@ -16779,6 +16906,7 @@ function PayScreen() {
     }
     setQrBill(bill)
     setQrPayload(payload)
+    setQrPayloadSource(chosen.source)
     setQrDataUri(null)
     setQrBusy(true)
 
@@ -16792,6 +16920,7 @@ function PayScreen() {
         setQrPayload(null)
         setQrBill(null)
         setQrDataUri(null)
+        setQrPayloadSource(null)
       } finally {
         setQrBusy(false)
         qrOpenInFlightRef.current = false
@@ -17001,7 +17130,7 @@ function PayScreen() {
                   const dueDate = parseDateValue(item.due_date)
                   const todayDate = parseDateValue(today)
                   const isOverdue = dueDate && todayDate ? dueDate.getTime() < todayDate.getTime() : false
-                  const canQr = !!buildPaymentQrPayload(item)
+                  const canQr = !!getPreferredPaymentQrPayload(item).payload
                   const parts = buildPaymentCopyParts(item)
                   const amountNum = getAmountNumber(item)
                   const d = billTargetDate(item)
@@ -17135,7 +17264,7 @@ function PayScreen() {
                 const dueDate = parseDateValue(item.due_date)
                 const todayDate = parseDateValue(today)
                 const isOverdue = dueDate && todayDate ? dueDate.getTime() < todayDate.getTime() : false
-                const canQr = !!buildPaymentQrPayload(item)
+                const canQr = !!getPreferredPaymentQrPayload(item).payload
                 const parts = buildPaymentCopyParts(item)
                 const amountNum = getAmountNumber(item)
                 const d = billTargetDate(item)
@@ -17346,7 +17475,7 @@ function PayScreen() {
         </View>
       </Modal>
 
-      <Modal visible={!!qrPayload} transparent animationType="fade" onRequestClose={() => { setQrPayload(null); setQrBill(null) }}>
+      <Modal visible={!!qrPayload} transparent animationType="fade" onRequestClose={() => { setQrPayload(null); setQrBill(null); setQrPayloadSource(null) }}>
         <View style={[styles.iosPickerOverlay, { justifyContent: 'center' }]}>
           <Surface elevated style={styles.qrModalCard}>
             <SectionHeader title={tr('Payment QR')} />
@@ -17360,7 +17489,11 @@ function PayScreen() {
             ) : qrDataUri ? (
               <Image source={{ uri: qrDataUri }} style={styles.qrImage} />
             ) : null}
-            <Text style={styles.mutedText}>{tr('Generated from bill payment fields.')}</Text>
+            <Text style={styles.mutedText}>
+              {qrPayloadSource === 'scanned'
+                ? tr('From scanned QR code.')
+                : tr('Generated from bill payment fields.')}
+            </Text>
             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: themeLayout.gap, marginTop: themeSpacing.sm }}>
               {qrDataUri ? (
                 <>
@@ -17368,7 +17501,7 @@ function PayScreen() {
                   <AppButton label={tr('Share QR')} variant="secondary" iconName="share-outline" onPress={shareQrForCurrent} />
                 </>
               ) : null}
-              <AppButton label={tr('Close')} variant="ghost" onPress={() => { setQrPayload(null); setQrBill(null); setQrDataUri(null) }} />
+              <AppButton label={tr('Close')} variant="ghost" onPress={() => { setQrPayload(null); setQrBill(null); setQrDataUri(null); setQrPayloadSource(null) }} />
             </View>
           </Surface>
         </View>
