@@ -24,7 +24,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.anaplus.billboxmobile",
-      "buildNumber": "184",
+      "buildNumber": "186",
       "infoPlist": {
         "NSCameraUsageDescription": "This app uses the camera to scan QR codes and capture invoice photos for OCR.",
         "NSUserNotificationUsageDescription": "BillBox schedules local notifications to remind you of upcoming bills and planned payments.",
@@ -33,7 +33,7 @@
     },
     "android": {
       "package": "com.anaplus.billboxmobile",
-      "versionCode": 186,
+      "versionCode": 187,
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo/logo-icon-foreground.png",
         "backgroundColor": "#ffffff"
